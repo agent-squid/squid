@@ -1397,3 +1397,17 @@ def test_safety_poll_recovers_a_lost_notification(tmp_path, monkeypatch):
         event = ws.receive_json()
         assert event["type"] == "message.changed"
         assert event["payload"] == {"id": "polled"}
+
+
+def test_ws_sender_reports_send_after_close_as_disconnect():
+    class ClosedSocket:
+        async def send_json(self, _frame):
+            raise RuntimeError("Unexpected ASGI message 'websocket.send', after sending 'websocket.close'.")
+
+    async def run():
+        outbound = server._RealtimeOutbound(8)
+        await server._realtime_send(outbound, {"v": 1, "type": "ping"}, None, -1)
+        with pytest.raises(WebSocketDisconnect):
+            await asyncio.wait_for(server._ws_sender(ClosedSocket(), outbound), timeout=1)
+
+    asyncio.run(run())

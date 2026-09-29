@@ -134,7 +134,9 @@ _LOG_DIR.mkdir(parents=True, exist_ok=True)
 _log_handler = logging.handlers.TimedRotatingFileHandler(
     _LOG_DIR / "server.log", when="midnight", backupCount=7, encoding="utf-8", utc=True,
 )
-_log_handler.setFormatter(logging.Formatter("%(asctime)sZ %(levelname)s  %(message)s"))
+_log_formatter = logging.Formatter("%(asctime)sZ %(levelname)s  %(message)s")
+_log_formatter.converter = time.gmtime  # the "Z" suffix and midnight rotation are UTC
+_log_handler.setFormatter(_log_formatter)
 logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
 log = logging.getLogger(__name__)
 
@@ -4071,7 +4073,12 @@ async def _ws_sender(websocket: WebSocket, outbound: _RealtimeOutbound) -> None:
     """Drain the outbound queue; exits only on a send failure or cancellation."""
     while True:
         frame = await outbound.get()
-        await websocket.send_json(frame)
+        try:
+            await websocket.send_json(frame)
+        except RuntimeError as exc:
+            # The ASGI server already closed the socket (the peer went away
+            # between frames); treat it as the disconnect it is.
+            raise WebSocketDisconnect(code=1006) from exc
 
 
 async def _realtime_terminate(

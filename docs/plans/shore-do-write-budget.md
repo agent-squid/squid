@@ -5,7 +5,8 @@
 `b62082c` and AgentSquid `v0.1.6rc13`. Phase 4b shipped in AgentSquid
 `v0.1.6rc14`. Phase 4c shipped in Shore `2a57a95` and AgentSquid
 `v0.1.6rc19` (rc18 was pinned to the pre-4c client by mistake). Phase 4d is
-implemented, not yet released. Deferred: 10 (optional, no DO saving), 15 (a
+implemented, not yet released. Phase 4e is implemented in Shore (Worker and
+web client), not yet deployed. Deferred: 10 (optional, no DO saving), 15 (a
 billing decision), and deriving the audit chain tip (see Phase 4d). Observed
 numbers are in "Measurements"; replace the "Expected effect" estimates with a
 full day of observed data.
@@ -234,6 +235,44 @@ Verification: Shore `npm test` ("keeps a host reconnect to the challenge and
 the attach audit event"); Squid `tests/test_shore_transport.py`
 (`test_host_audit_batch_waits_until_oldest_event_is_due`).
 
+## Phase 4e — Failed browser attachments (implemented, undeployed)
+
+Measured 2026-09-29 on the 4d deployment: ~70–130 rows/hr for eight hours
+(04:00–12:00 UTC) with zero receipted frames (the host's `audit_chain` had no
+inbound events) and 1–3 host reconnects per hour. Zone analytics for 05:00:
+67 `GET /@user/relay` → 400 and 80 `GET /@user/auth/security` → 401. A
+background tab's `ShoreDashboardSession` had an expired session cookie; after
+its one `restoreSession()` failed it kept reconnecting on the hidden-tab timer
+(~1/min). Without a cookie the Worker did not mark the upgrade as a native
+browser, the account object rejected it as `invalid_attachment`, and
+`recordAttachmentFailure` persisted a `rate:attachment-failure:*` bucket, armed
+an alarm, and later deleted it. That was about 1,000 of the day's ~1,350 rows.
+
+27. The Worker answers a relay upgrade with no `x-shore-role` and no native
+    browser identity itself (401 without a cookie, 400 with one) instead of
+    routing it to the account object. No DO invocation, no write.
+28. Attachment-failure counts are kept in memory, like `TRANSIENT_RATE_KINDS`.
+    The attachment lock keeps check and increment atomic, and a caller fast
+    enough to reach the 30/min limit keeps the object resident. Failed host
+    proofs and expired browser sessions no longer write.
+
+29. Client: `ShoreDashboardSession` tried `restoreSession()` once per
+    successful connection (`reauthAttempted`). On 2026-09-29 one restore ran at
+    03:00 UTC and none after it, though relay attaches kept failing until
+    12:00; a reload at 14:00 restored silently. The session now retries the
+    silent paired-key restore after a failed connect with its own backoff
+    (30s doubling to 15 min, reset by a successful connect), and
+    `restoreSession()` first checks the write-free route view, so a still-valid
+    cookie costs no restore. `wake()` reconnects immediately with fresh
+    backoff; the hosted client calls it on `visibilitychange` (visible) and
+    `online`. No sign-in prompt: restoring needs no user action.
+
+Verification: Shore `npm test` ("rejects a role-less relay upgrade at the edge
+without touching the account"; write budget "counts failed attachments in
+memory without a write"); `browser/` vitest ("keeps retrying the silent
+restore with backoff after it fails", "backs off restores while connects keep
+failing with a valid session", "wake() reconnects and restores immediately").
+
 ## Phase 5 — Guardrails
 
 12. Done: Shore test "Durable Object write budget" instruments storage
@@ -277,6 +316,8 @@ account (dev and prod share it), UTC.
 | 2026-09-26 04:00–05:00 (hours) | rc17 (Phase 4b) | 118, 90 | Idle host and tab; mostly 30s version poll and 15-min re-auth |
 | 2026-09-26 06:00 (hour) | rc18 → rc19 | 819 | Two deploys, releases, restarts, active chat |
 | 2026-09-26 00:00–06:33 | mixed | 3,730 | Day so far |
+| 2026-09-29 04:00–12:00 (hours) | 4d | 70–127/hr | Expired-cookie tab retrying relay attach (Phase 4e) |
+| 2026-09-29 00:00–16:00 | 4d | 1,392 | 88 receipted frames (~350 rows); rest mostly failed attachments |
 
 Pending: a clean idle hour on rc19, then on the Phase 4d release.
 
