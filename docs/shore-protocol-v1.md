@@ -240,7 +240,7 @@ to an account session.
 
 | Capability | Browser-to-host ADR-0040 types | Authorized scopes | Notes |
 | --- | --- | --- | --- |
-| `dashboard.read.v1` | `subscribe`, `unsubscribe`, `ack`, `ping`, `pong` | global lifecycle feed only (exactly `{"lifecycle": "global"}`); topic/agent-scoped requests, though the local dashboard principal may make them, are denied | Initial and only production capability. Allows receipt of the v1 snapshot and replayable events listed in ADR-0040. No command or HTTP mutation. Narrower scope than the local session gets is deliberate, not a gap: widening it to topic/agent scopes is a future protocol-doc amendment, not an implementation detail. |
+| `dashboard.read.v1` | `subscribe`, `unsubscribe`, `ack`, `ping`, `pong` | global lifecycle feed only (exactly `{"lifecycle": "global"}`); topic/agent-scoped requests, though the local dashboard principal may make them, are denied | Initial and only production capability. Allows receipt of the v1 snapshot and replayable events listed in ADR-0040. No command or HTTP mutation. `ack` stays accepted for compatibility, but the Shore web client no longer sends it: resume uses the `subscribe` cursor, and each ack was a receipted envelope. Narrower scope than the local session gets is deliberate, not a gap: widening it to topic/agent scopes is a future protocol-doc amendment, not an implementation detail. |
 
 `chat.start`, `chat.cancel`, every `auth.*` type, arbitrary HTTP/RPC forwarding,
 filesystem access, terminal access, and types introduced after ADR-0040 v1 are
@@ -296,6 +296,14 @@ layered on top of ADR-0040's own `ping`/`pong`/`slow_consumer` semantics
   device's frames. A host that does not send the header gets no such frames.
   A host still answers a device's `ping` with `pong`, and ignores a `pong`
   from an older client.
+- **Host reattach.** When a host WebSocket attaches, the relay sends each of
+  that host's open browser sockets the text control frame
+  `{"v":1,"type":"host_online"}`. Browser sockets are authenticated once at
+  attach and outlive their session (revocation closes them), and an idle tab
+  sends no frames, so without this a tab would not learn that a restarted
+  host lost its subscription. The browser resubscribes on the same socket
+  with its saved cursor (one receipted envelope). Clients that predate it
+  ignore the frame. It costs the relay no storage write.
 - **Recovery.** Overflow and `device_offline` both leave the device's paired trust, capability grant,
   and key epoch untouched — only the in-memory subscription is cleared. The
   device recovers by sending a fresh `subscribe` with its own last-applied

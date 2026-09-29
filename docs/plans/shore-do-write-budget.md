@@ -190,8 +190,8 @@ re-ran paired-device auth (~10 writes plus alarm cleanup, every 15 minutes).
     instead of recreating the session. The dashboard session still restores on
     reconnect, and the client checks the version on every (re)subscribe.
     Trade-off: once the session has expired, a host upgrade that keeps the
-    browser socket open is noticed at the next reconnect (at most the 1h
-    socket lifetime), not within 30s.
+    browser socket open is noticed at the next (re)subscribe, which a host
+    restart now triggers via `host_online` (item 32), not within 30s.
 
 Verification: Shore `npm test` ("serves the route view of the security surface
 without a write"); `browser/` vitest ("does not recreate an expired session
@@ -267,11 +267,60 @@ an alarm, and later deleted it. That was about 1,000 of the day's ~1,350 rows.
     backoff; the hosted client calls it on `visibilitychange` (visible) and
     `online`. No sign-in prompt: restoring needs no user action.
 
+30. Client: the Shore web client sends no dashboard `ack`. The host only
+    records the acked cursor for its slow-consumer log line; resume uses the
+    cursor in `subscribe`. Acks were 536 of the host's ~1,000 receipted
+    inbound frames to date (the rest `subscribe` and legacy `pong`), so this
+    removes about half of an open tab's per-frame writes. The host still
+    accepts `ack` from older clients.
+
+31. Browser sockets stay open across session expiry, and the socket lifetime
+    backstop is 24h (`SOCKET_LIFETIME_SECONDS` 3600 → 86400). Before, Shore
+    checked `session.expiresAt` on every browser frame, including the 20s
+    zero-length heartbeats, so a tab's socket closed about 15 minutes after its
+    session was created. Each cycle then cost a paired-key restore, an attach
+    and a receipted `subscribe` (~10+ writes per 15 minutes per open tab).
+    Every socket, host included, also reconnected hourly (host: 4 writes).
+    Now the socket is authenticated once at attach and closed by revocation.
+
+    > **Do not forget: revocation must close sockets actively.** With no
+    > expiry-driven close, any new path that revokes a session, device, host,
+    > or account must close the affected sockets itself, or they stay open up
+    > to 24h. The per-frame check only closes a socket whose session record is
+    > revoked or downgraded, when that socket next sends a frame. The invariant
+    > is recorded in ADR-0039 (end-user session). Tests: Shore "browser socket
+    > lifetime: revocation closes, expiry does not" (session expiry/sweep keeps
+    > the socket; revoked record, listed-session revoke, device revoke and host
+    > revoke close it; logout and refresh rotation are covered by "closes a
+    > browser socket on …").
+
+32. Host reattach notice. Item 31 removed the 15-minute and hourly browser
+    socket closes, and item 30 the acks, which were what incidentally made an
+    idle tab notice a restarted host (which loses its in-memory
+    subscriptions). Shore now sends `{"v":1,"type":"host_online"}` to the
+    host's open browser sockets when a host attaches (no write), and the
+    dashboard session resubscribes from its cursor on the same socket (4
+    writes per host attach per open tab, instead of a restore + attach +
+    subscribe). Deploy Shore and the web client together: a tab on the old
+    client ignores the notice and stays stale after a host restart until it
+    reconnects.
+
+    The hosted client's version check on `subscribed` may now restore the
+    session silently (a restore per connect or host restart); the 30s poll
+    still never restores. Since the socket outlives the cookie, that poll
+    mostly gets 401 after the first 15 minutes. Follow-up: have the host put
+    its required client version in `subscribed` and drop the poll (it is also
+    three invocations per tab every 30s through the global `IdentityIndex`).
+
 Verification: Shore `npm test` ("rejects a role-less relay upgrade at the edge
 without touching the account"; write budget "counts failed attachments in
 memory without a write"); `browser/` vitest ("keeps retrying the silent
 restore with backoff after it fails", "backs off restores while connects keep
-failing with a valid session", "wake() reconnects and restores immediately").
+failing with a valid session", "wake() reconnects and restores immediately",
+"never sends ack over Shore"); Shore "browser socket lifetime: revocation
+closes, expiry does not" (includes "tells open browser sockets when the host
+reattaches, without a write"); `browser/` vitest ("resubscribes from the saved
+cursor when the host comes back online").
 
 ## Phase 5 — Guardrails
 

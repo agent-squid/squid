@@ -678,6 +678,21 @@ not by Cloudflare Access:
    `~/.ssh/authorized_keys` or running `ssh-add -D`. The Worker checks this
    session before proxying any request into the Durable Object's WebSocket.
 
+   > **Invariant — revocation closes sockets.** A browser socket is
+   > authenticated once, at attach. Session expiry does not close it; the
+   > short session bounds new requests and new attaches only. Therefore
+   > **every path that revokes a session, device, host, or account must close
+   > the affected live sockets itself** (today: logout, refresh rotation,
+   > listed-session revoke, device revoke, operator sessions-revoke/TOTP
+   > reset/suspend, host revoke, recovery completion, account deletion). A new
+   > revocation path without an active close would leave sockets open for up
+   > to the 24h `SOCKET_LIFETIME_SECONDS` backstop. Shore's per-frame check
+   > (`socketSessionActive`) still closes a socket whose session record is
+   > revoked or downgraded, but only when that socket next sends a frame.
+   > Shore test suite: "browser socket lifetime: revocation closes, expiry does
+   > not". (Amended 2026-09-29; see `docs/plans/shore-do-write-budget.md`
+   > Phase 4e item 31.)
+
 3. **Phone-to-host pairing**: browser login authenticates the account but
    does not authorize commands by itself. A new phone generates a non-
    extractable signing/encryption keypair and must be approved on the physical
