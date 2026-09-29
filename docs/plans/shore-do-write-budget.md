@@ -319,6 +319,17 @@ an alarm, and later deleted it. That was about 1,000 of the day's ~1,350 rows.
     before the web client, or an updated tab gets no version notice until
     Shore is deployed.
 
+34. Hourly traffic rows. Traffic was one `traffic:<minute>` row per active
+    minute (flushed every 60s), each deleted again after 24h: ~2 writes per
+    active minute, ~120/hr per account while anything streamed, the largest
+    active cost after items 30–33. Minute totals are now kept in memory and
+    flushed every 5 minutes into one `traffic-hour:<hour>` row that holds that
+    hour's per-minute totals: ~12 writes per active hour plus one delete when
+    the hour ages out (~90% fewer). `/internal/state` still returns the latest
+    60 minute totals, newest first. Pre-hourly `traffic:` rows are read
+    alongside and age out after 24h. Up to 5 minutes of counts can be lost if
+    the object is evicted (capacity metrics, not evidence).
+
 Verification: Shore `npm test` ("rejects a role-less relay upgrade at the edge
 without touching the account"; write budget "counts failed attachments in
 memory without a write"); `browser/` vitest ("keeps retrying the silent
@@ -329,7 +340,8 @@ closes, expiry does not" (includes "tells open browser sockets when the host
 reattaches, without a write"); `browser/` vitest ("resubscribes from the saved
 cursor when the host comes back online", "reports a relay-pushed client
 version only when it differs from the running one"); Shore "pushes the host's
-required client version on browser attach and host reattach".
+required client version on browser attach and host reattach", write budget
+"persists relay traffic as one row per hour and ages rows out").
 
 ## Phase 5 — Guardrails
 
