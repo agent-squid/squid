@@ -2603,7 +2603,8 @@ authenticated divergence. Shore must deploy before hosts that send
 transport/audit/receipt tests and all 171 Shore tests pass, including
 multi-page replay, timeout, divergence, backfill, and storage-failure cases. Live preproduction
 verification remains a deployment gate because the already-published rc9
-artifacts are immutable.
+artifacts are immutable. (Verified live 2026-09-29; see the live dev drill
+follow-up below.)
 
 **Package/client release coordination follow-up (2026-09-24):** Squid's
 tag-driven release now dispatches Shore's existing client publisher after PyPI
@@ -2614,7 +2615,9 @@ advance the recommendation. The dispatch carries no Shore signing, R2, relay,
 account, audit, Worker, or compute credentials. Shore remains the sole client
 publisher, and client publication still does not deploy Shore compute or the
 Worker. Squid requires the narrowly scoped `SHORE_RELEASE_DISPATCH_TOKEN`
-Actions secret before this coordination can run.
+Actions secret before this coordination can run. It was set on 2026-09-24, and
+Squid release runs have dispatched Shore's `release.yml` successfully since
+(most recently 2026-09-29).
 
 **Release drill follow-up (2026-09-29):** the runbook's quarterly drill now has a
 repeatable script, Shore `scripts/release-drill.sh`, and its first run passed
@@ -2647,6 +2650,38 @@ browser that had already loaded a later-revoked release keep loading it. The
 procedure, the `AGENTSQUID_SHORE_CLIENT_VERSION` emergency override, and the
 unsupported package downgrade are documented in Shore's release runbook and
 ADR-0050. The first real dev run of the workflow remains an evidence item.
+
+**Live dev drill follow-up (2026-09-29):** run against `dev.agentsquid.ai` with
+the live host (`@haebin`, client `0.1.6rc23`).
+- **`revoke.yml` first dev run:** passed ([run 36643757818](https://github.com/agent-squid/shore/actions/runs/36643757818)).
+  The drill revoked the retired `0.1.6.dev1` build (incident
+  `DRILL-2026-09-29-revoke`, replacement `0.1.6rc23`). That manifest now returns
+  410. Its signed statement is served and verified by the served bootstrap, while
+  `rc23` and `rc21` still return 200. A second run for the same version failed
+  closed with "already revoked" before signing
+  ([run 36643827164](https://github.com/agent-squid/shore/actions/runs/36643827164)).
+  This closes the evidence item above.
+- **Receipt re-sync on reconnect:** verified live. A copy of the host identity,
+  with its last 250 receipts removed (tip 9051 → 8801), reconnected. Shore
+  replayed the missing suffix in 100-receipt pages, and the host verified and
+  appended each page up to Shore's current tip (9056). The first attempt stopped
+  after one page when the live host's reconnect displaced the probe
+  (`same_key_displaced`). The retry resumed from the new tip and completed. All
+  255 replayed receipts are byte-identical to the live host's chain. The
+  displaced live host reconnected and resynced its equal tip. It logged no
+  guided-recovery error and kept receiving receipts. This closes the
+  preproduction gate from the receipt reconnect follow-up.
+- **Live integration drill, partial:** the pairing page for `?v=0.1.6rc23`
+  injects the exact version into the bootstrap meta and loads only
+  `/client/bootstrap.js`. An invalid version injects an empty value, so the
+  bootstrap fails closed. The served bootstrap verifies the `rc23` manifest
+  signature and schema, and both uploaded assets match their size and SHA-256.
+  Revocation of an uploaded build is covered above. The live host's audit
+  export cursor equals its audit tip (4116). Still open, because each needs the
+  account owner's email code and authenticator plus real devices: login,
+  pairing, multi-device convergence, and reconnect/recovery from browsers
+  running the uploaded bytes, plus receipt continuity and audit export as a
+  browser sees them.
 
 **Pre-account edge limits follow-up (2026-09-29):** closes item 3. Two
 Cloudflare Rate Limiting bindings are checked in the Worker before any Durable
@@ -2704,9 +2739,11 @@ Worker requests. Evidence: unit tests for parsing and the higher-of rule, and a
 Worker test where a KV reading of 100% returns `503 shore_unavailable` for a new
 relay while yesterday's reading is ignored; all 201 Shore tests pass. The `shore-control`
 namespace, both `wrangler.jsonc` bindings, and the `SHORE_CONTROL_NAMESPACE_ID`
-environment variable are provisioned (2026-09-29). Remaining: the KV-only
-`SHORE_CONTROL_KV_TOKEN` secret and a first published measurement (Shore
-degradation runbook, "Enabling the automatic level").
+environment variable are provisioned (2026-09-29). The KV-only
+`SHORE_CONTROL_KV_TOKEN` secret is set, preproduction deployed with the binding
+without extra deploy-token permissions, and the first manual workflow run
+published `{"percent":3.2,"day":"2026-09-29"}`. The automatic level is live in
+preproduction; production picks up the binding on its next deploy.
 
 #### 6.3 — Independent security review (action 3)
 
