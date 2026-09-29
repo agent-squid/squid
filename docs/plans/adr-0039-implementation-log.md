@@ -2615,6 +2615,38 @@ publisher, and client publication still does not deploy Shore compute or the
 Worker. Squid requires the narrowly scoped `SHORE_RELEASE_DISPATCH_TOKEN`
 Actions secret before this coordination can run.
 
+**Release drill follow-up (2026-09-29):** the runbook's quarterly drill now has a
+repeatable script, Shore `scripts/release-drill.sh`, and its first run passed
+against `shore-releases-dev`. It read all 41 objects and changed nothing
+remotely. Findings:
+- All 23 retained manifests (`0.1.6.dev1`, `rc1`–`rc21`, `rc23`) verify against
+  the dev release key.
+- All 17 content-addressed objects match their digests, and none is orphaned.
+- `rc22` was never published; the other gaps are unrelated.
+
+Inside an isolated local bucket, served by a local `wrangler dev` Worker:
+- `rc23` and `rc21` were served and verified byte-for-byte.
+- `stable.json` advanced to `rc23` and rolled back to `rc21` (generation 2).
+- A signed revocation of `rc23` returned 410, the served bootstrap verified its
+  reason, and `rc21` remained served.
+
+The revocation was signed with a drill-only key trusted only by the local Worker.
+This closes the release-drill portion of item 1 for preproduction. Production
+revocation still has no signed-statement tooling in a protected environment;
+today the only way is an operator-signed object.
+Running the drill against the production bucket waits for production deployment.
+
+**Revocation tooling follow-up (2026-09-29):** Shore's `revoke.yml` workflow closes
+the production revocation gap noted above. It publishes, with confirmation, a
+signed, write-once statement for one exact client, including a user-facing
+reason and a fixed replacement version, then reads it back to verify
+enforcement. The bootstrap now shows that reason with host upgrade instructions.
+It also revalidates the manifest on every load: previously `force-cache` let a
+browser that had already loaded a later-revoked release keep loading it. The
+procedure, the `AGENTSQUID_SHORE_CLIENT_VERSION` emergency override, and the
+unsupported package downgrade are documented in Shore's release runbook and
+ADR-0050. The first real dev run of the workflow remains an evidence item.
+
 #### 6.3 — Independent security review (action 3)
 
 In progress (2026-09-22). The first adversarial review confirmed the relay-

@@ -36,10 +36,11 @@ with a Worker-compiled client constant. The authenticated browser route returns
 that identifier. The stable bootstrap fetches only
 `/client/releases/<version>/manifest.json`, verifies its version, signature,
 revocation state, and content hashes, and then loads its assets. When the
-requested release is missing, unavailable, or revoked, the bootstrap reloads once
+requested release is absent, malformed, missing, or revoked, the bootstrap reloads once
 with the exact identifier the authenticated route currently returns for the
 host, which it then verifies in full; it never selects an older or cached
-release. Any other failure, including signature or hash failure, renders a
+release. The manifest is revalidated on every load, so a revocation overrides a
+browser-cached copy. Any other failure, including signature or hash failure, renders a
 static non-command-capable panel.
 
 Client identifiers use the project's accepted PEP 440 subset. The coordinated
@@ -139,7 +140,12 @@ mutate or overwrite either immutable surface; retry is safe for identical bytes.
 
 Rollback changes only `stable.json`; running hosts continue requesting their
 advertised exact client. Revocation is a separately signed immutable statement
-and never alters the original release. Retained manifests and reachable objects
+and never alters the original release. Shore's `revoke.yml` workflow signs and
+publishes it; the bootstrap shows its signed reason, the fixed replacement
+version, and host upgrade instructions. A host advertising a revoked client
+stays unreachable remotely until it upgrades, or until an operator selects a
+compatible retained client with `AGENTSQUID_SHORE_CLIENT_VERSION`. Hosts are not
+downgraded automatically. Retained manifests and reachable objects
 remain available for every supported exact client.
 
 ## Consequences
