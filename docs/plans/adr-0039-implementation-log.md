@@ -2444,8 +2444,9 @@ Remaining slices before 6.2 is complete:
 2. Running independent Shore client publish/retention automation; its workflow source,
    immutable manifests, hashes, atomic activation, revocation rejection, and
    client recommendation rollback pointers are complete.
-3. Pre-account per-route/device/IP dimensions and quota projections; durable
-   per-account traffic export and the longer host lease interval are complete.
+3. ~~Pre-account per-route/device/IP dimensions and quota projections~~
+   (source-complete 2026-09-29, see below); durable per-account traffic
+   export and the longer host lease interval are complete.
 4. Production alert-sink wiring and a witnessed immutable-archive restore
    record; the tested local/Tailscale fallback UI is complete.
 
@@ -2565,7 +2566,7 @@ page-migration repository gaps above.
 This closes the implementation portion of item 2 (design was already closed
 above). Infrastructure provisioning is not an open gate. The deployment drill,
 uploaded-byte integration evidence, production alert sink, pre-account traffic
-dimensions, and witnessed archive restore remain.
+dimensions (since closed, see below), and witnessed archive restore remain.
 
 **Read-only client wiring follow-up (2026-09-24):** the exact-version browser
 bundle now serves both pairing and `/@<username>/client`. Successful pairing
@@ -2646,6 +2647,65 @@ browser that had already loaded a later-revoked release keep loading it. The
 procedure, the `AGENTSQUID_SHORE_CLIENT_VERSION` emergency override, and the
 unsupported package downgrade are documented in Shore's release runbook and
 ADR-0050. The first real dev run of the workflow remains an evidence item.
+
+**Pre-account edge limits follow-up (2026-09-29):** closes item 3. Two
+Cloudflare Rate Limiting bindings are checked in the Worker before any Durable
+Object is invoked, so rejected traffic costs no DO request or row write:
+- **Per route/IP** (`EDGE_IP_LIMITER`, 120/min): keyed by route family
+  (`relay`, `signup`, `auth`, `host`) and `cf-connecting-ip`. Checked before
+  username resolution, so it also shields the identity index.
+- **Per device** (`EDGE_DEVICE_LIMITER`, 20 relay connects/min): keyed by role,
+  account, host or browser device ID, and source IP.
+
+Every key includes the source IP. Nothing is authenticated at this point, so a
+budget keyed only by account or device ID would let anyone who knows those IDs
+lock the owner out of login and relay. A pure per-account edge limit was
+therefore dropped. Floods spread across many IPs fall to the account object's
+exact per-account limits (for example `magic-link`) and to the global
+degradation levels.
+
+The 50/70/85/95/100% quota degradation, spend ceiling, and kill switch are the
+global limit. No separate global rate limiter is added: Cloudflare rate limits
+are per location, cap at a 60-second window against a daily quota, and would
+refuse every user once tripped. Until the automatic level below, these were
+all manual deploy variables, so the global limit was an alert followed by an
+operator redeploy. On the Free plan Cloudflare's own daily cutoff is the
+backstop; on a paid plan nothing stops traffic automatically.
+
+A rejection returns `429 {error: "rate_limited", dimension}` with
+`retry-after: 60` and logs one `shore_edge_rate_limited` line with the route
+family and dimension (no IP or account ID). The limits are a quota guard, not
+a security boundary: limiter errors fail open. Prod and preproduction use
+distinct namespace IDs (3901/3903, 3911/3913).
+
+`scripts/check-do-writes.mjs` now projects end-of-day DO rows written from
+today's average hourly rate and emits a workflow warning with the estimated
+exhaustion time when the projection reaches the daily limit. The 50% threshold
+remains the failing alert. Evidence: a new Worker test covers each dimension,
+that an exhausted budget on another IP cannot lock out the owner, and
+fail-open; all 200 Shore tests pass.
+Deployment remains: confirm the bindings in preproduction and tune the limits
+from observed rejections.
+
+**Automatic quota level follow-up (2026-09-29):** the quota degradation level
+now follows measured usage without an operator or a redeploy.
+`scripts/check-do-writes.mjs` (now every 30 minutes) writes today's Durable
+Object rows written, as a percentage of the daily limit, to a `quota-percent`
+KV key in a new `SHORE_CONTROL` namespace. It uses a separate token scoped to
+Workers KV Storage:Edit, which cannot deploy code. The Worker and account
+objects apply the higher of that reading and the manual `SHORE_QUOTA_PERCENT`,
+cached for a minute per isolate. KV rather than a Worker variable: a variable
+change redeploys the Worker, which restarts Durable Objects and drops every
+relay socket. Only a well-formed reading for the current UTC day counts. A
+stale, malformed, or unreadable reading is ignored rather than failing closed,
+so a bad measurement cannot switch Shore off, and the level resets with the
+quota at midnight. It covers DO rows written, the limit hit in practice, but not
+Worker requests. Evidence: unit tests for parsing and the higher-of rule, and a
+Worker test where a KV reading of 100% returns `503 shore_unavailable` for a new
+relay while yesterday's reading is ignored; all 201 Shore tests pass. Remaining:
+provision the namespace, binding, token, and variable (Shore degradation
+runbook, "Enabling the automatic level"); until then the Worker has no binding
+and the workflow logs a notice.
 
 #### 6.3 — Independent security review (action 3)
 
