@@ -304,6 +304,15 @@ layered on top of ADR-0040's own `ping`/`pong`/`slow_consumer` semantics
   host lost its subscription. The browser resubscribes on the same socket
   with its saved cursor (one receipted envelope). Clients that predate it
   ignore the frame. It costs the relay no storage write.
+- **Pushed client version.** A host advertises its exact required web-client
+  version only in `x-shore-required-client-version` when it attaches, so the
+  relay pushes it: `host_online` carries `"required_client_version"`, and
+  each browser attach receives `{"v":1,"type":"client_version",
+  "required_client_version":"<version>"}` as its first text frame. A browser
+  whose running bootstrap version differs reloads through the stable
+  bootstrap, which verifies the signed manifest (the same trust as the version
+  in the `?view=route` security view). The hosted client has no HTTP version
+  poll.
 - **Recovery.** Overflow and `device_offline` both leave the device's paired trust, capability grant,
   and key epoch untouched — only the in-memory subscription is cleared. The
   device recovers by sending a fresh `subscribe` with its own last-applied

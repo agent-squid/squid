@@ -190,8 +190,8 @@ re-ran paired-device auth (~10 writes plus alarm cleanup, every 15 minutes).
     instead of recreating the session. The dashboard session still restores on
     reconnect, and the client checks the version on every (re)subscribe.
     Trade-off: once the session has expired, a host upgrade that keeps the
-    browser socket open is noticed at the next (re)subscribe, which a host
-    restart now triggers via `host_online` (item 32), not within 30s.
+    browser socket open is noticed at the next (re)subscribe. Superseded by
+    item 33: the relay pushes the version on every attach.
 
 Verification: Shore `npm test` ("serves the route view of the security surface
 without a write"); `browser/` vitest ("does not recreate an expired session
@@ -305,12 +305,19 @@ an alarm, and later deleted it. That was about 1,000 of the day's ~1,350 rows.
     client ignores the notice and stays stale after a host restart until it
     reconnects.
 
-    The hosted client's version check on `subscribed` may now restore the
-    session silently (a restore per connect or host restart); the 30s poll
-    still never restores. Since the socket outlives the cookie, that poll
-    mostly gets 401 after the first 15 minutes. Follow-up: have the host put
-    its required client version in `subscribed` and drop the poll (it is also
-    three invocations per tab every 30s through the global `IdentityIndex`).
+
+33. Pushed client version instead of a poll. With the socket outliving the
+    15-minute cookie, the hosted client's 30s `/auth/security?view=route`
+    version poll got 401 after the first 15 minutes, so a host upgrade
+    requiring a new client went unnoticed. The version can only change when a
+    host attaches (`x-shore-required-client-version`), so Shore pushes it:
+    `host_online` carries `required_client_version`, and every browser attach
+    gets a `client_version` frame. The client reloads through the signed
+    bootstrap when it differs, and the poll and the per-(re)subscribe HTTP
+    check are gone: no cookie or restore needed, and three invocations per
+    tab every 30s through the global `IdentityIndex` are removed. Deploy Shore
+    before the web client, or an updated tab gets no version notice until
+    Shore is deployed.
 
 Verification: Shore `npm test` ("rejects a role-less relay upgrade at the edge
 without touching the account"; write budget "counts failed attachments in
@@ -320,7 +327,9 @@ failing with a valid session", "wake() reconnects and restores immediately",
 "never sends ack over Shore"); Shore "browser socket lifetime: revocation
 closes, expiry does not" (includes "tells open browser sockets when the host
 reattaches, without a write"); `browser/` vitest ("resubscribes from the saved
-cursor when the host comes back online").
+cursor when the host comes back online", "reports a relay-pushed client
+version only when it differs from the running one"); Shore "pushes the host's
+required client version on browser attach and host reattach".
 
 ## Phase 5 — Guardrails
 
