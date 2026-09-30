@@ -710,6 +710,147 @@ async function _shoreStatus() {
 
 const SHORE_HOST_ONLY_MSG = 'AgentSquid.AI pairing is only available on the host computer.\nOpen squid there (127.0.0.1) and run /pair.';
 
+/* ---- Browser pairing requests (AgentSquid.AI) ----
+ * A browser signed in at agentsquid.ai can ask this host to pair. The request
+ * waits in memory on the host for two minutes, so surface it wherever the
+ * user is instead of only inside /pair. The host API is loopback-only; any
+ * other client gets 403 and stops watching. The server never sends the real
+ * code: the user must pick the one their browser shows. */
+const PAIRING_REQUEST_POLL_MS = 3000;
+const PAIRING_REQUEST_IDLE_POLL_MS = 30000;
+let _pairingRequests = [];
+let _pairingDismissed = new Set();
+let _pairingShownId = null;
+let _pairingBusy = false;
+let _pairingWatchTimer = null;
+let _pairingCountdownTimer = null;
+
+function _formatPairingCode(code) {
+  return String(code).match(/.{1,4}/g).join('-');
+}
+
+async function _pollPairingRequests() {
+  _pairingWatchTimer = null;
+  let delay = PAIRING_REQUEST_POLL_MS;
+  try {
+    const res = await fetch('/shore/pairing/requests', { cache: 'no-store' });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 403) return; // not the host's own browser: never approves
+    if (!res.ok) delay = PAIRING_REQUEST_IDLE_POLL_MS; // e.g. Shore not configured yet
+    else _setPairingRequests(body.requests || []);
+  } catch { delay = PAIRING_REQUEST_IDLE_POLL_MS; }
+  if (document.visibilityState === 'visible') _pairingWatchTimer = setTimeout(_pollPairingRequests, delay);
+}
+
+function startPairingRequestWatcher() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !_pairingWatchTimer) _pollPairingRequests();
+  });
+  _pollPairingRequests();
+}
+
+function _setPairingRequests(requests) {
+  _pairingRequests = requests;
+  const live = new Set(requests.map(r => r.request_id));
+  _pairingDismissed = new Set([..._pairingDismissed].filter(id => live.has(id)));
+  if (_pairingBusy) return;
+  if (_pairingShownId && live.has(_pairingShownId)) return;
+  if (_pairingShownId) _closePairingPrompt('This request expired or was handled elsewhere.');
+  const next = requests.find(r => !_pairingDismissed.has(r.request_id));
+  if (next) openPairingPrompt(next);
+}
+
+function openPairingPrompt(request) {
+  const modal = document.getElementById('pairing-request-modal');
+  _pairingDismissed.delete(request.request_id);
+  _pairingShownId = request.request_id;
+  document.getElementById('pairing-request-device').textContent = `Device ${request.device_id.slice(0, 8)}…`;
+  const error = document.getElementById('pairing-request-error');
+  error.textContent = '';
+  const choices = document.getElementById('pairing-request-choices');
+  choices.replaceChildren();
+  for (const code of request.choices || []) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'pairing-request-choice';
+    btn.textContent = _formatPairingCode(code);
+    btn.addEventListener('click', () => _approvePairingRequest(request, code));
+    choices.appendChild(btn);
+  }
+  const expires = document.getElementById('pairing-request-expires');
+  const tick = () => {
+    const remaining = Math.max(0, Math.ceil(Number(request.expires_at) - Date.now() / 1000));
+    expires.textContent = `Expires in ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
+    if (remaining === 0 && !_pairingBusy) _closePairingPrompt('This request expired. Ask the browser to request again.');
+  };
+  if (_pairingCountdownTimer) clearInterval(_pairingCountdownTimer);
+  tick();
+  _pairingCountdownTimer = setInterval(tick, 1000);
+  modal.classList.add('open');
+  // Focus the dialog, not a code: a pre-focused code would read as the
+  // suggested answer and Enter would pick it without comparing.
+  document.getElementById('pairing-request-box').focus();
+}
+
+function _closePairingPrompt(feedback) {
+  if (_pairingCountdownTimer) clearInterval(_pairingCountdownTimer);
+  _pairingCountdownTimer = null;
+  _pairingShownId = null;
+  document.getElementById('pairing-request-modal').classList.remove('open');
+  if (feedback) showCmdFeedback(feedback);
+}
+
+/** "Later": hide without deciding. The request stays pending (and listed in
+ * /pair) until it expires. */
+function dismissPairingPrompt() {
+  if (_pairingBusy || !_pairingShownId) return;
+  _pairingDismissed.add(_pairingShownId);
+  _closePairingPrompt();
+}
+
+async function _pairingAction(path, payload) {
+  const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload) });
+  const body = await res.json().catch(() => ({}));
+  return { ok: res.ok, error: body.error };
+}
+
+async function _approvePairingRequest(request, code) {
+  if (_pairingBusy) return;
+  _pairingBusy = true;
+  const buttons = document.querySelectorAll('#pairing-request-modal button');
+  buttons.forEach(b => { b.disabled = true; });
+  let result;
+  try { result = await _pairingAction('/shore/pairing/requests/approve', { request_id: request.request_id, verification_code: code }); }
+  catch { result = { ok: false, error: 'network_error' }; }
+  _pairingBusy = false;
+  buttons.forEach(b => { b.disabled = false; });
+  _pairingRequests = _pairingRequests.filter(r => r.request_id !== request.request_id);
+  if (result.ok) { _closePairingPrompt('Approved — confirm the host fingerprints in your browser to finish pairing.'); return; }
+  const messages = {
+    pairing_code_mismatch: 'That code did not match, so the request was cancelled. If you picked the wrong one by mistake, request again from the browser.',
+    pairing_request_expired: 'This request expired. Ask the browser to request again.',
+    shore_not_connected: 'This host is not connected to AgentSquid.AI right now. Try again once it reconnects.',
+  };
+  if (result.error === 'shore_not_connected' || result.error === 'pairing_rate_limited' || result.error === 'network_error') {
+    // Still pending on the host: keep the prompt so the user can retry.
+    _pairingRequests.push(request);
+    document.getElementById('pairing-request-error').textContent = messages[result.error] || 'Approval failed — try again.';
+    return;
+  }
+  _closePairingPrompt(messages[result.error] || 'Pairing approval failed.');
+}
+
+async function rejectPairingPrompt() {
+  const requestId = _pairingShownId;
+  if (_pairingBusy || !requestId) return;
+  _pairingBusy = true;
+  try { await _pairingAction('/shore/pairing/requests/reject', { request_id: requestId }); } catch { /* expires on its own */ }
+  _pairingBusy = false;
+  _pairingRequests = _pairingRequests.filter(r => r.request_id !== requestId);
+  _closePairingPrompt('Pairing request rejected.');
+}
+
 /** Unified "Connect" modal for both remote-access methods: Tailscale
  * (LAN/tailnet-scoped, needs the Tailscale app on the far end, no far-end
  * login) and AgentSquid.AI (relay-routed, needs no app install anywhere,
@@ -957,19 +1098,11 @@ async function openConnectModal(preferredTab) {
       } catch { return; }
       pendingRequests.replaceChildren();
       for (const request of requests) {
-        const approve = document.createElement('button');
-        approve.type = 'button'; approve.className = 'btn-ghost';
-        approve.textContent = `Approve browser ${request.device_id.slice(0, 8)}… · code ${request.verification_code}`;
-        approve.addEventListener('click', async () => {
-          approve.disabled = true; approve.textContent = 'Approving…';
-          try {
-            const res = await fetch('/shore/pairing/requests/approve', { method: 'POST',
-              headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request_id: request.request_id }) });
-            if (!res.ok) throw new Error();
-            approve.textContent = 'Approved — waiting for confirmation';
-          } catch { approve.disabled = false; approve.textContent = 'Approval failed — try again'; }
-        });
-        pendingRequests.appendChild(approve);
+        const review = document.createElement('button');
+        review.type = 'button'; review.className = 'btn-ghost';
+        review.textContent = `Review browser ${request.device_id.slice(0, 8)}… pairing request`;
+        review.addEventListener('click', () => { close(); openPairingPrompt(request); });
+        pendingRequests.appendChild(review);
       }
     };
     refreshPairingRequests();
@@ -16847,6 +16980,13 @@ function initPin() {
   document.getElementById('restart-modal').addEventListener('mousedown', e => {
     if (e.target === document.getElementById('restart-modal')) closeRestartModal(false);
   });
+  document.getElementById('pairing-request-close').addEventListener('click', dismissPairingPrompt);
+  document.getElementById('pairing-request-later').addEventListener('click', dismissPairingPrompt);
+  document.getElementById('pairing-request-reject').addEventListener('click', rejectPairingPrompt);
+  document.getElementById('pairing-request-modal').addEventListener('keydown', e => {
+    if (e.key === 'Escape') dismissPairingPrompt();
+  });
+  startPairingRequestWatcher();
   document.getElementById('agent-session-modal-close').addEventListener('click', () => closeAgentSessionModal(false));
   document.getElementById('agent-session-cancel').addEventListener('click', () => closeAgentSessionModal(false));
   document.getElementById('agent-session-confirm').addEventListener('click', () => closeAgentSessionModal(true));

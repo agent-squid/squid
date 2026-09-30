@@ -72,11 +72,16 @@ def test_authenticated_browser_pairing_requires_local_approval_and_returns_encry
 
     channel.receive_pairing_request(request, now=100)
     channel.receive_pairing_request(request, now=110)  # replay must not extend approval lifetime
-    assert channel.list_pairing_requests(now=101) == [
-        {"request_id": request_id, "device_id": DEVICE,
-         "verification_code": hashlib.sha256(canonical(request)).hexdigest()[:16].upper(), "received_at": 100}
-    ]
-    response = json.loads(channel.approve_pairing_request(request_id, now=101))
+    code = hashlib.sha256(canonical(request)).hexdigest()[:16].upper()
+    [listed] = channel.list_pairing_requests(now=101)
+    # The real code is only one of the choices, never labelled as such.
+    assert "verification_code" not in listed
+    assert {k: listed[k] for k in ("request_id", "device_id", "received_at", "expires_at")} == {
+        "request_id": request_id, "device_id": DEVICE, "received_at": 100, "expires_at": 220}
+    assert len(listed["choices"]) == 3 and code in listed["choices"] and len(set(listed["choices"])) == 3
+    assert all(len(choice) == 16 for choice in listed["choices"])
+    assert channel.list_pairing_requests(now=105)[0]["choices"] == listed["choices"]  # stable across refreshes
+    response = json.loads(channel.approve_pairing_request(request_id, code, now=101))
     assert channel.list_pairing_requests(now=101) == []
     signature = unb64url(response.pop("signature"))
     host_signing.public_key().verify(signature, canonical(response))
@@ -90,7 +95,37 @@ def test_authenticated_browser_pairing_requires_local_approval_and_returns_encry
     assert plaintext["offer"]["account_id"] == ACCOUNT
     assert plaintext["offer"]["host_id"] == HOST
     with pytest.raises(ShoreProtocolError, match="pairing_request_expired"):
-        channel.approve_pairing_request(request_id, now=102)
+        channel.approve_pairing_request(request_id, code, now=102)
+
+
+def _pairing_request(request_id: str) -> dict:
+    return {"v": 1, "type": "pairing_request", "request_id": request_id,
+        "account_id": ACCOUNT, "host_id": HOST, "device_id": DEVICE, "key_epoch": 1,
+        "browser_agreement_key": b64url(x25519.X25519PrivateKey.generate().public_key().public_bytes_raw())}
+
+
+def test_pairing_request_wrong_code_consumes_request(tmp_path):
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=ed25519.Ed25519PrivateKey.generate(), host_agreement=x25519.X25519PrivateKey.generate())
+    request = _pairing_request(CEREMONY)
+    channel.receive_pairing_request(request, now=100)
+    code = hashlib.sha256(canonical(request)).hexdigest()[:16].upper()
+    [decoy, *_] = [choice for choice in channel.list_pairing_requests(now=101)[0]["choices"] if choice != code]
+    with pytest.raises(ShoreProtocolError, match="pairing_code_mismatch"):
+        channel.approve_pairing_request(CEREMONY, decoy, now=101)
+    # A mismatch may mean a substituted request: it can't be retried with another pick.
+    assert channel.list_pairing_requests(now=101) == []
+    with pytest.raises(ShoreProtocolError, match="pairing_request_expired"):
+        channel.approve_pairing_request(CEREMONY, code, now=101)
+
+
+def test_pairing_request_reject_removes_it(tmp_path):
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=ed25519.Ed25519PrivateKey.generate(), host_agreement=x25519.X25519PrivateKey.generate())
+    channel.receive_pairing_request(_pairing_request(CEREMONY), now=100)
+    assert channel.reject_pairing_request(CEREMONY) is True
+    assert channel.reject_pairing_request(CEREMONY) is False
+    assert channel.list_pairing_requests(now=101) == []
 
 
 def test_host_connection_allows_plaintext_only_for_loopback(tmp_path):

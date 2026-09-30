@@ -16,11 +16,13 @@ from __future__ import annotations
 import asyncio
 from importlib.metadata import version
 import hashlib
+import hmac
 import json
 import logging
 import os
 import random
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -76,7 +78,18 @@ _PUSH_SWEEP_SECONDS = 5.0
 # Object row writes. Well inside the five-minute export-lag threshold.
 _AUDIT_BATCH_DELAY_SECONDS = 60.0
 _PAIRING_REQUEST_TTL_SECONDS = 120.0
+# Wrong codes shown next to the real one. Each is a full 64-bit code like the
+# real one: shorter codes would let a relay grind a substitute request whose
+# hash matches what the browser shows.
+_PAIRING_DECOY_COUNT = 2
 _RECEIPTS_DISABLED_ORIGINS: frozenset[str] = frozenset()
+
+
+
+def _pairing_verification_code(request: dict[str, Any]) -> str:
+    """Matches the code the browser derives from its own request
+    (browser/src/client.ts requestPairing): first 64 bits of SHA-256(JCS)."""
+    return hashlib.sha256(canonical(request)).hexdigest()[:16].upper()
 
 
 @dataclass
@@ -146,7 +159,10 @@ class ShoreChannel:
         self._sessions_lock = threading.Lock()
         self.sessions: dict[str, _DeviceSession] = {}
         self._pairing_requests_lock = threading.Lock()
-        self._pairing_requests: dict[str, tuple[dict[str, Any], float]] = {}
+        # request_id -> (request, received_at, choices). `choices` is the real
+        # verification code shuffled among decoys, fixed at arrival so every
+        # UI refresh shows the same options.
+        self._pairing_requests: dict[str, tuple[dict[str, Any], float, list[str]]] = {}
 
     def _session_snapshot(self) -> list[tuple[str, "_DeviceSession"]]:
         with self._sessions_lock:
@@ -185,24 +201,36 @@ class ShoreChannel:
                                       if received_at - value[1] < _PAIRING_REQUEST_TTL_SECONDS}
             if len(self._pairing_requests) >= 20 and request["request_id"] not in self._pairing_requests:
                 raise ShoreProtocolError("pairing_rate_limited")
-            self._pairing_requests.setdefault(request["request_id"], (request, received_at))
+            if request["request_id"] not in self._pairing_requests:
+                choices = [_pairing_verification_code(request)]
+                choices += [secrets.token_hex(8).upper() for _ in range(_PAIRING_DECOY_COUNT)]
+                random.SystemRandom().shuffle(choices)
+                self._pairing_requests[request["request_id"]] = (request, received_at, choices)
 
     def list_pairing_requests(self, *, now: float | None = None) -> list[dict[str, Any]]:
         checked_at = time.time() if now is None else now
         with self._pairing_requests_lock:
             self._pairing_requests = {key: value for key, value in self._pairing_requests.items()
                                       if checked_at - value[1] < _PAIRING_REQUEST_TTL_SECONDS}
+            # The real code is deliberately absent: the person must pick it
+            # out of `choices` by comparing with the browser, so approval
+            # can't be a blind click-through.
             return [{"request_id": request["request_id"], "device_id": request["device_id"],
-                     "verification_code": hashlib.sha256(canonical(request)).hexdigest()[:16].upper(),
-                     "received_at": received_at} for request, received_at in self._pairing_requests.values()]
+                     "choices": list(choices), "received_at": received_at,
+                     "expires_at": received_at + _PAIRING_REQUEST_TTL_SECONDS}
+                    for request, received_at, choices in self._pairing_requests.values()]
 
-    def approve_pairing_request(self, request_id: str, *, now: float | None = None) -> bytes:
+    def approve_pairing_request(self, request_id: str, verification_code: str, *, now: float | None = None) -> bytes:
         checked_at = time.time() if now is None else now
         with self._pairing_requests_lock:
             pending = self._pairing_requests.pop(request_id, None)
         if pending is None or checked_at - pending[1] >= _PAIRING_REQUEST_TTL_SECONDS:
             raise ShoreProtocolError("pairing_request_expired")
         request = pending[0]
+        # A wrong pick means the codes didn't match -- possibly a substituted
+        # request -- so the request is consumed rather than left to retry.
+        if not hmac.compare_digest(verification_code.encode(), _pairing_verification_code(request).encode()):
+            raise ShoreProtocolError("pairing_code_mismatch")
         browser_key = x25519.X25519PublicKey.from_public_bytes(unb64url(request["browser_agreement_key"]))
         result = self.pairing.begin(ceremony_id=uuid7())
         context = (f"shore-pairing-request-v1\0{self.account_id}\0{self.host_id}\0"
@@ -216,6 +244,10 @@ class ShoreChannel:
         plaintext = canonical({"v": 1, "offer": result["offer"], "code": result["code"]})
         unsigned = {**header, "ciphertext": b64url(AESGCM(derived).encrypt(nonce, plaintext, canonical(header)))}
         return canonical({**unsigned, "signature": b64url(self.host_signing.sign(canonical(unsigned)))})
+
+    def reject_pairing_request(self, request_id: str) -> bool:
+        with self._pairing_requests_lock:
+            return self._pairing_requests.pop(request_id, None) is not None
 
     def pairing_status(self, ceremony_id: str) -> dict[str, Any]:
         return self.pairing.status(ceremony_id)
@@ -826,12 +858,15 @@ class ShoreHostConnection:
     def list_pairing_requests(self) -> list[dict[str, Any]]:
         return self.channel.list_pairing_requests()
 
-    async def approve_pairing_request(self, request_id: str) -> None:
+    def reject_pairing_request(self, request_id: str) -> bool:
+        return self.channel.reject_pairing_request(request_id)
+
+    async def approve_pairing_request(self, request_id: str, verification_code: str) -> None:
         if not self.connected.is_set():
             raise ShoreProtocolError("shore_not_connected")
         if self._pairing_outbound.full():
             raise ShoreProtocolError("pairing_rate_limited")
-        response = await asyncio.to_thread(self.channel.approve_pairing_request, request_id)
+        response = await asyncio.to_thread(self.channel.approve_pairing_request, request_id, verification_code)
         try:
             self._pairing_outbound.put_nowait(response)
         except asyncio.QueueFull as exc:

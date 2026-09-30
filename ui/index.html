@@ -28,7 +28,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
   <link rel="stylesheet" href="/vendor/xterm.css" />
-  <link rel="stylesheet" href="style.css?v=20260929-002" />
+  <link rel="stylesheet" href="style.css?v=20260930-001" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -493,6 +493,25 @@
       </div>
     </div>
 
+    <div id="pairing-request-modal" role="dialog" aria-modal="true" aria-labelledby="pairing-request-title">
+      <div id="pairing-request-box" tabindex="-1">
+        <div id="pairing-request-header">
+          <span class="settings-label">Browser Pairing Request</span>
+          <button id="pairing-request-close" type="button" aria-label="Decide later">✕</button>
+        </div>
+        <div id="pairing-request-body">
+          <div id="pairing-request-title">A browser wants to pair with this host</div>
+          <div id="pairing-request-copy">Pick the code your browser is showing. If none match, reject it — the request did not come from your browser unchanged.</div>
+          <div id="pairing-request-meta"><span id="pairing-request-device"></span><span id="pairing-request-expires"></span></div>
+          <div id="pairing-request-choices"></div>
+          <div id="pairing-request-error" role="alert"></div>
+        </div>
+        <div id="pairing-request-footer">
+          <button id="pairing-request-later" type="button">Later</button>
+          <button id="pairing-request-reject" type="button">Reject</button>
+        </div>
+      </div>
+    </div>
     <div id="agent-session-modal">
       <div id="agent-session-modal-box">
         <div id="agent-session-modal-header">
@@ -812,6 +831,6 @@
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script src="flow-lang.js?v=20260721-003"></script>
-  <script src="app.js?v=20260929-002"></script>
+  <script src="app.js?v=20260930-001"></script>
 </body>
 </html>

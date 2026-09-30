@@ -549,6 +549,11 @@ class ShoreRevokeDeviceRequest(BaseModel):
 
 class ShoreApprovePairingRequest(BaseModel):
     request_id: str = Field(..., min_length=1)
+    verification_code: str = Field(..., min_length=1, max_length=64)
+
+
+class ShoreRejectPairingRequest(BaseModel):
+    request_id: str = Field(..., min_length=1)
 
 
 class QuotaDeltaRequest(BaseModel):
@@ -3138,10 +3143,20 @@ async def shore_pairing_request_approve(request: Request, req: ShoreApprovePairi
         return JSONResponse({"error": "shore_not_configured"}, status_code=400)
     from .shore_crypto import ShoreProtocolError
     try:
-        await _shore_connection.approve_pairing_request(req.request_id)
+        await _shore_connection.approve_pairing_request(req.request_id, req.verification_code)
     except ShoreProtocolError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
     return JSONResponse({"ok": True})
+
+
+@app.post("/shore/pairing/requests/reject")
+async def shore_pairing_request_reject(request: Request, req: ShoreRejectPairingRequest):
+    direct_host = request.client.host if request.client else None
+    if not _request_is_loopback(request.headers, direct_host):
+        return JSONResponse({"error": "loopback_required"}, status_code=403)
+    if _shore_connection is None:
+        return JSONResponse({"error": "shore_not_configured"}, status_code=400)
+    return JSONResponse({"ok": _shore_connection.reject_pairing_request(req.request_id)})
 
 
 @app.get("/shore/devices")
