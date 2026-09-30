@@ -475,6 +475,18 @@ class DeviceTrustStore:
         except (OSError, sqlite3.Error) as exc:
             raise ShoreProtocolError("shore_untrusted_device") from exc
 
+    def list_revoked(self) -> list[str]:
+        """Revoked device IDs, replayed to Shore on each connect so every
+        revocation made while disconnected eventually reaches the relay."""
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT device_id FROM shore_devices WHERE status='revoked' ORDER BY revoked_at DESC"
+                ).fetchall()
+        except (OSError, sqlite3.Error) as exc:
+            raise ShoreProtocolError("shore_untrusted_device") from exc
+        return [row[0] for row in rows]
+
     def list_paired(self) -> list[TrustedDevice]:
         """Enumerates currently-trusted devices for a local approval UI. Never
         returns revoked devices; only public key material is exposed."""

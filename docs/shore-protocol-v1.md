@@ -433,6 +433,18 @@ solely for subsequent proof-of-possession session restoration and stores the
 capability names for user-visible security history; it never receives a browser
 private key.
 
+When the host revokes a device from its own trust store, it sends the
+closed-schema `browser_device_revoked` control frame (`v`, `type`,
+`device_id`), and resends all revocations on every connect so a
+revocation made while disconnected still arrives. The relay accepts it only
+from the authenticated host, marks the device revoked (ending paired-device
+session restoration), and closes the device's sockets with `1008
+device_revoked`. A later attach by that device returns HTTP 403, except that a
+native browser page, which cannot read an upgrade's status, receives an
+accepted socket that is immediately closed with the same reason. The browser
+then stops reconnecting and discards its identity, because a revoked device ID
+can never pair again.
+
 ### Paired-device session restoration
 
 An expired account session does not force an already-paired browser through

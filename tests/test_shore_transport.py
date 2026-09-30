@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from agent.shore_crypto import (
-    ReplayStore, ShoreProtocolError, b64url, canonical, crockford32_decode,
+    DeviceTrustStore, ReplayStore, ShoreProtocolError, b64url, canonical, crockford32_decode,
     derive_pair_bootstrap_key, derive_pair_key, fingerprint, open_envelope,
     pairing_finished, seal_envelope, unb64url,
 )
@@ -1020,6 +1020,41 @@ async def test_channel_wraps_pairing_status_list_devices_and_revoke(tmp_path):
     assert channel.revoke_device(DEVICE) is True
     assert channel.list_devices() == []
     assert channel.revoke_device(DEVICE) is False
+
+
+@pytest.mark.asyncio
+async def test_host_revocation_reaches_shore_now_and_on_every_connect(tmp_path):
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST, host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate())
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    frame = canonical({"v": 1, "type": "browser_device_revoked", "device_id": DEVICE})
+
+    connection.connected.set()
+    assert await connection.revoke_device(DEVICE) is True
+    assert connection._pairing_outbound.get_nowait() == frame
+    assert await connection.revoke_device(DEVICE) is False
+    assert connection._pairing_outbound.empty()
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def recv(self): raise asyncio.CancelledError
+        async def send(self, value): self.sent.append(value)
+
+    socket = Socket()
+    with pytest.raises(asyncio.CancelledError):
+        await connection._serve(socket, asyncio.Event())
+    assert socket.sent == [frame]
+
+
+def test_all_offline_revocations_are_replayed(tmp_path):
+    store = DeviceTrustStore(tmp_path / "trust.db")
+    for index in range(25):
+        device_id = f"018f1f25-8614-7e41-8c5c-{index:012x}"
+        store.approve(device_id, bytes([index]) * 32, bytes([index + 1]) * 32, 1)
+        assert store.revoke(device_id) is True
+    assert len(store.list_revoked()) == 25
 
 
 def _fresh_stats_db(tmp_path, monkeypatch):

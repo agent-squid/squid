@@ -592,6 +592,10 @@ class ShoreChannel:
         return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _device_revoked_frame(device_id: str) -> bytes:
+    return canonical({"v": 1, "type": "browser_device_revoked", "device_id": device_id})
+
+
 class ShoreHostConnection:
     """Maintains the authenticated host relay socket until explicitly stopped."""
 
@@ -833,6 +837,18 @@ class ShoreHostConnection:
         except asyncio.QueueFull as exc:
             raise ShoreProtocolError("pairing_rate_limited") from exc
 
+    async def revoke_device(self, device_id: str) -> bool:
+        """Revokes locally, then tells Shore so the device can no longer
+        restore a session or attach. If the relay is unreachable now, the
+        next connect replays it."""
+        revoked = await asyncio.to_thread(self.channel.revoke_device, device_id)
+        if revoked and self.connected.is_set():
+            # Revocation is security-sensitive: unlike a transient pairing
+            # response, it must not be dropped merely because the queue is
+            # momentarily full. The queue survives reconnects.
+            await self._pairing_outbound.put(_device_revoked_frame(device_id))
+        return revoked
+
     async def _serve(self, socket: Any, stop: asyncio.Event) -> None:
         from .server import _realtime_notifier
 
@@ -843,6 +859,11 @@ class ShoreHostConnection:
         pairing_send = asyncio.create_task(self._pairing_outbound.get())
         next_sweep_at = time.monotonic() + _PUSH_SWEEP_SECONDS
         try:
+            revoked = await asyncio.to_thread(self.channel.trust.list_revoked)
+            for device_id in revoked:
+                await socket.send(_device_revoked_frame(device_id))
+            if revoked:
+                last_sent = time.monotonic()
             if self.receipt_keys and await self._send_audit_batch(socket, when_due=True):
                 last_sent = time.monotonic()
             while not stop.is_set():

@@ -3171,7 +3171,7 @@ async def shore_revoke_device(request: Request, req: ShoreRevokeDeviceRequest):
         return JSONResponse({"error": "shore_not_configured"}, status_code=400)
     from .shore_crypto import ShoreProtocolError
     try:
-        revoked = await asyncio.to_thread(_shore_connection.channel.revoke_device, req.device_id)
+        revoked = await _shore_connection.revoke_device(req.device_id)
     except ShoreProtocolError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse({"ok": revoked})

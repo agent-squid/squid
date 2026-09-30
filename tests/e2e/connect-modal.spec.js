@@ -130,4 +130,38 @@ test.describe('Connect modal (Shore/AgentSquid.AI + Tailscale)', () => {
     await expect(page.locator('#connect-neither')).toContainText('Tailscale is not installed');
     await expect(page.locator('#connect-neither')).toContainText('agentsquid login');
   });
+
+  test('over Tailscale, Shore endpoints are loopback-only: AgentSquid tab shows host-only note, Tailscale tab stays clean', async ({ page }) => {
+    await mockApp(page);
+    let beginCalls = 0;
+    await page.route('**/remote', r => r.fulfill({ json: { url: 'https://example.ts.net/' } }));
+    await page.route('**/shore/devices', r => r.fulfill({ status: 403, json: { error: 'loopback_required' } }));
+    await page.route('**/shore/pairing/begin', r => { beginCalls += 1; r.fulfill({ status: 403, json: { error: 'loopback_required' } }); });
+    await page.goto('/');
+
+    await typeCommand(page, '/remote');
+    await expect(page.locator('.connect-tab.active')).toHaveText('Tailscale');
+    await expect(page.locator('#connect-tailscale-panel .connect-qr img')).toBeVisible();
+    await expect(page.locator('#connect-tailscale-panel')).not.toContainText('AgentSquid.AI');
+    await expect(page.locator('#connect-shore-host-only')).toBeHidden();
+
+    await page.locator('.connect-tab', { hasText: 'AgentSquid.AI' }).click();
+    await expect(page.locator('#connect-tailscale-panel')).toBeHidden();
+    await expect(page.locator('#connect-shore-host-only')).toBeVisible();
+    await expect(page.locator('#connect-shore-host-only')).toContainText('only available on the host computer');
+    await expect(page.locator('#connect-agentsquid-panel .connect-qr')).toHaveCount(0);
+    await expect(page.locator('#connect-agentsquid-details')).toHaveCount(0);
+    expect(beginCalls).toBe(0);
+  });
+
+  test('loopback-only with no Tailscale URL shows the host-only message, not the login prompt', async ({ page }) => {
+    await mockApp(page);
+    await page.route('**/remote', r => r.fulfill({ json: { reason: 'not_installed' } }));
+    await page.route('**/shore/devices', r => r.fulfill({ status: 403, json: { error: 'loopback_required' } }));
+    await page.goto('/');
+
+    await typeCommand(page, '/pair');
+    await expect(page.locator('#connect-neither')).toContainText('only available on the host computer');
+    await expect(page.locator('#connect-neither')).not.toContainText('agentsquid login');
+  });
 });

@@ -697,12 +697,18 @@ function initSettings() {
   });
 }
 
-async function _shoreIsConfigured() {
+/** 'configured' | 'host_only' (Shore endpoints are loopback-only, so a
+ * tailnet/LAN browser can't pair or list devices) | 'unavailable'. */
+async function _shoreStatus() {
   try {
     const res = await fetch('/shore/devices');
-    return res.ok;
-  } catch { return false; }
+    if (res.ok) return 'configured';
+    const body = await res.json().catch(() => ({}));
+    return body.error === 'loopback_required' ? 'host_only' : 'unavailable';
+  } catch { return 'unavailable'; }
 }
+
+const SHORE_HOST_ONLY_MSG = 'AgentSquid.AI pairing is only available on the host computer.\nOpen squid there (127.0.0.1) and run /pair.';
 
 /** Unified "Connect" modal for both remote-access methods: Tailscale
  * (LAN/tailnet-scoped, needs the Tailscale app on the far end, no far-end
@@ -715,10 +721,12 @@ async function _shoreIsConfigured() {
 async function openConnectModal(preferredTab) {
   if (document.getElementById('connect-modal')) return;
 
-  const [remoteData, shoreConfigured] = await Promise.all([
+  const [remoteData, shoreStatus] = await Promise.all([
     fetch('/remote').then(res => res.json()).catch(() => ({})),
-    _shoreIsConfigured(),
+    _shoreStatus(),
   ]);
+  const shoreConfigured = shoreStatus === 'configured';
+  const shoreHostOnly = shoreStatus === 'host_only';
   const tailscaleUrl = remoteData.url || null;
   const tailscaleReason = remoteData.reason || null;
 
@@ -763,7 +771,8 @@ async function openConnectModal(preferredTab) {
     tsOption.textContent = msgs[tailscaleReason] || 'Tailscale unavailable (tailscale.com).';
     const asOption = document.createElement('div');
     asOption.className = 'connect-neither-option';
-    asOption.textContent = "AgentSquid isn't set up on this host yet.\nRun `agentsquid login` in a terminal, then restart squid.";
+    asOption.textContent = shoreHostOnly ? SHORE_HOST_ONLY_MSG
+      : "AgentSquid isn't set up on this host yet.\nRun `agentsquid login` in a terminal, then restart squid.";
     neither.appendChild(tsOption);
     neither.appendChild(asOption);
     box.appendChild(neither);
@@ -902,9 +911,16 @@ async function openConnectModal(preferredTab) {
       if (statusBody.status === 'paired') _shoreRenderDeviceList(devicesList);
     }, 2000);
   };
-  if (shoreConfigured) box.appendChild(agentsquidPanel);
+  if (shoreHostOnly) {
+    const note = document.createElement('div');
+    note.id = 'connect-shore-host-only';
+    note.className = 'connect-neither-option';
+    note.textContent = SHORE_HOST_ONLY_MSG;
+    agentsquidPanel.appendChild(note);
+  }
+  if (shoreConfigured || shoreHostOnly) box.appendChild(agentsquidPanel);
 
-  if (tailscaleUrl && shoreConfigured) {
+  if (tailscaleUrl && (shoreConfigured || shoreHostOnly)) {
     const tabs = document.createElement('div');
     tabs.id = 'connect-tabs';
     const tsTab = document.createElement('button');
@@ -917,7 +933,7 @@ async function openConnectModal(preferredTab) {
       tailscalePanel.style.display = which === 'tailscale' ? '' : 'none';
       agentsquidPanel.style.display = which === 'agentsquid' ? '' : 'none';
       shoreDetails.style.display = which === 'agentsquid' ? '' : 'none';
-      if (which === 'agentsquid') startAgentSquid();
+      if (which === 'agentsquid' && shoreConfigured) startAgentSquid();
     };
     tsTab.addEventListener('click', () => activate('tailscale'));
     asTab.addEventListener('click', () => activate('agentsquid'));

@@ -2699,7 +2699,10 @@ def test_shore_pairing_request_requires_local_approval(monkeypatch):
 def test_shore_devices_list_and_revoke(monkeypatch):
     device = SimpleNamespace(device_id="018f1f25-8614-7e41-8c5c-fc0b6eefad62", key_epoch=1, capabilities=("dashboard.read.v1",))
     channel = SimpleNamespace(list_devices=lambda: [device], revoke_device=lambda device_id: device_id == device.device_id)
-    monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=channel))
+    async def revoke_device(device_id):
+        return channel.revoke_device(device_id)
+
+    monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=channel, revoke_device=revoke_device))
     client = _loopback_client()
 
     listed = client.get("/shore/devices")
