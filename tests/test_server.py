@@ -2715,7 +2715,7 @@ def test_shore_pairing_reject_is_loopback_only(monkeypatch):
 
 
 def test_shore_devices_list_and_revoke(monkeypatch):
-    device = SimpleNamespace(device_id="018f1f25-8614-7e41-8c5c-fc0b6eefad62", key_epoch=1, capabilities=("dashboard.read.v1",))
+    device = SimpleNamespace(device_id="018f1f25-8614-7e41-8c5c-fc0b6eefad62", key_epoch=1, capabilities=("dashboard.read.v1",), approved_at=1_700_000_000_000)
     channel = SimpleNamespace(list_devices=lambda: [device], revoke_device=lambda device_id: device_id == device.device_id)
     async def revoke_device(device_id):
         return channel.revoke_device(device_id)
@@ -2725,7 +2725,8 @@ def test_shore_devices_list_and_revoke(monkeypatch):
 
     listed = client.get("/shore/devices")
     assert listed.status_code == 200
-    assert listed.json() == {"devices": [{"device_id": device.device_id, "key_epoch": 1, "capabilities": ["dashboard.read.v1"]}]}
+    assert listed.json() == {"devices": [{"device_id": device.device_id, "key_epoch": 1, "capabilities": ["dashboard.read.v1"],
+                                          "approved_at": 1_700_000_000_000}]}
 
     assert client.post("/shore/devices/revoke", json={"device_id": device.device_id}).json() == {"ok": True}
     assert client.post("/shore/devices/revoke", json={"device_id": "unknown"}).json() == {"ok": False}

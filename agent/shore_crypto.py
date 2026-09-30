@@ -358,6 +358,8 @@ class TrustedDevice:
     agreement_key: bytes
     key_epoch: int
     capabilities: tuple[str, ...] = field(default_factory=_default_capabilities)
+    # Epoch ms of the (latest) pairing approval; set only by list_paired.
+    approved_at: int | None = None
 
 
 class DeviceTrustStore:
@@ -493,11 +495,12 @@ class DeviceTrustStore:
         try:
             with self._connect() as connection:
                 rows = connection.execute(
-                    "SELECT device_id, signing_key, agreement_key, key_epoch, capabilities FROM shore_devices WHERE status='paired'"
+                    "SELECT device_id, signing_key, agreement_key, key_epoch, capabilities, approved_at"
+                    " FROM shore_devices WHERE status='paired' ORDER BY approved_at DESC"
                 ).fetchall()
         except (OSError, sqlite3.Error) as exc:
             raise ShoreProtocolError("shore_untrusted_device") from exc
-        return [TrustedDevice(row[0], row[1], row[2], row[3], _parse_capabilities(row[4])) for row in rows]
+        return [TrustedDevice(row[0], row[1], row[2], row[3], _parse_capabilities(row[4]), row[5]) for row in rows]
 
 
 class PairingCoordinator:

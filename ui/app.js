@@ -1135,7 +1135,10 @@ function _shoreRenderDeviceList(container) {
       row.className = 'shore-device-row';
       const label = document.createElement('span');
       label.className = 'shore-device-label';
-      label.textContent = `${device.device_id.slice(0, 8)}… · epoch ${device.key_epoch} · ${device.capabilities.join(', ') || 'no capabilities'}`;
+      // Devices have no names yet: when each was paired is what tells them apart.
+      const paired = device.approved_at ? new Date(device.approved_at) : null;
+      label.textContent = `${paired ? `Paired ${_fmtMtime(device.approved_at / 1000)}` : 'Paired'} · ${device.device_id.slice(0, 8)}… · ${device.capabilities.join(', ') || 'no capabilities'}`;
+      if (paired) label.title = paired.toLocaleString();
       const revokeBtn = document.createElement('button');
       revokeBtn.type = 'button';
       revokeBtn.className = 'btn-ghost shore-device-revoke';

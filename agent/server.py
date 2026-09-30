@@ -3172,7 +3172,8 @@ async def shore_list_devices(request: Request):
     except ShoreProtocolError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
     return JSONResponse({"devices": [
-        {"device_id": device.device_id, "key_epoch": device.key_epoch, "capabilities": list(device.capabilities)}
+        {"device_id": device.device_id, "key_epoch": device.key_epoch, "capabilities": list(device.capabilities),
+         "approved_at": device.approved_at}
         for device in devices
     ]})
 

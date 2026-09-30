@@ -682,6 +682,7 @@ def test_list_paired_returns_only_currently_paired_devices(tmp_path):
     assert paired[0].agreement_key == b"a" * 32
     assert paired[0].key_epoch == 1
     assert paired[0].capabilities == ("dashboard.read.v1",)
+    assert paired[0].approved_at == 100
 
 
 def test_list_paired_wraps_db_failure_in_stable_protocol_error(tmp_path, monkeypatch):
