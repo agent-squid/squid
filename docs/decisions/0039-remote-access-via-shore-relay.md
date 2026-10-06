@@ -614,7 +614,9 @@ during a Shore quota event or relay outage once the user has configured it.
 - A user creates an AgentSquid account at `agentsquid.ai` via email
   magic-link (OAuth as a later addition, not required for v1).
 - At signup, the user claims a `username` (validated: alphanumeric,
-  length-bounded, checked against a reserved-word blocklist). The username
+  length-bounded, checked against a reserved-word blocklist) only after the
+  emailed code has proven the address, so an unverified or mistyped address
+  never holds a username (amended 2026-10-06 by ADR-0052). The username
   is the public path segment (`/@username`); an immutable generated account
   ID is the Durable Object key — one account, one username, one Durable
   Object.
@@ -673,7 +675,8 @@ not by Cloudflare Access:
 2. **End-user session (phone/browser → relay)**: visiting
    `agentsquid.ai/@<username>` requires a login (same account system as
    registration). Sessions are short-lived with refresh, gated behind a
-   second factor (TOTP or passkey) given what a session authorizes, and
+   second factor (TOTP or passkey; passkey is the default since ADR-0052)
+   given what a session authorizes, and
    listed/revocable from one place — the equivalent of checking
    `~/.ssh/authorized_keys` or running `ssh-add -D`. The Worker checks this
    session before proxying any request into the Durable Object's WebSocket.
@@ -683,8 +686,9 @@ not by Cloudflare Access:
    > short session bounds new requests and new attaches only. Therefore
    > **every path that revokes a session, device, host, or account must close
    > the affected live sockets itself** (today: logout, refresh rotation,
-   > listed-session revoke, device revoke, operator sessions-revoke/TOTP
-   > reset/suspend, host revoke, recovery completion, account deletion). A new
+   > listed-session revoke, device revoke, operator sessions-revoke/
+   > second-factor reset/suspend, host revoke, recovery completion, account
+   > deletion). A new
    > revocation path without an active close would leave sockets open for up
    > to the 24h `SOCKET_LIFETIME_SECONDS` backstop. Shore's per-frame check
    > (`socketSessionActive`) still closes a socket whose session record is

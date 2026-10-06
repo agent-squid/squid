@@ -59,14 +59,22 @@ def authenticate(relay: str, username: str, email: str,
     with httpx.Client(timeout=20) as client:
         response = client.post(endpoint + "/auth/magic-link", json={"email": email})
         if response.status_code == 404 and _response_error(response) == "unknown_username":
+            # Email-first signup (ADR-0052): verify the address, then claim the handle.
             print(f"@{username} does not exist; requesting signup", file=sys.stderr)
-            response = client.post(endpoint + "/auth/signup", json={"email": email})
-            _require_response(response, "account signup")
+            base = relay.rstrip("/")
+            _require_response(client.post(base + "/signup/start", json={"email": email}), "account signup")
+            code = magic_code or getpass.getpass("Sign-in code from email (input hidden): ")
+            consumed = client.post(base + "/signup/verify", json={"email": email, "token": code})
+            _require_response(consumed, "email sign-in code")
+            csrf = consumed.json().get("csrfToken")
+            if not isinstance(csrf, str): raise RuntimeError("invalid signup response")
+            claimed = client.post(base + "/signup/handle", headers={"x-shore-csrf": csrf}, json={"email": email, "handle": username})
+            _require_response(claimed, "username reservation")
         else:
             _require_response(response, "sign-in email request")
-        code = magic_code or getpass.getpass("Sign-in code from email (input hidden): ")
-        consumed = client.post(endpoint + "/auth/consume", json={"token": code})
-        _require_response(consumed, "email sign-in code")
+            code = magic_code or getpass.getpass("Sign-in code from email (input hidden): ")
+            consumed = client.post(endpoint + "/auth/consume", json={"token": code})
+            _require_response(consumed, "email sign-in code")
         csrf = consumed.json().get("csrfToken")
         if not isinstance(csrf, str): raise RuntimeError("invalid login response")
         enrolled = client.post(endpoint + "/auth/totp/enroll", headers={"x-shore-csrf": csrf})

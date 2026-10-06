@@ -27,6 +27,7 @@ from .shore_crypto import UUID7, uuid7, valid_relay_url, valid_key_epoch
 _valid_relay_url = valid_relay_url
 _DEFAULT_RELAY = "https://agentsquid.ai"
 _TRUSTED_RELAYS = frozenset({_DEFAULT_RELAY, "https://dev.agentsquid.ai"})
+_APPROVAL_POLL_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -196,6 +197,10 @@ def _require_response(response: httpx.Response, stage: str) -> None:
         "account_suspended": "the account is suspended",
         "host_id_not_reusable": "this revoked host identity cannot be reused; register with a fresh identity directory",
         "host_identity_mismatch": "the registered host keys do not match this identity directory",
+        "username_taken": "that username is already taken; choose another",
+        "signup_not_pending": "the signup expired; run agentsquid login again",
+        "signup_moved": "this relay needs a newer agentsquid to create accounts",
+        "approval_not_found": "the passkey approval is no longer pending; run agentsquid login again",
     }
     detail = explanations.get(code, code or getattr(response, "reason_phrase", "request rejected"))
     raise RuntimeError(f"{stage} failed: {detail} (HTTP {response.status_code})")
@@ -225,6 +230,85 @@ def _confirm_custom_relay(relay: str) -> None:
         confirmation = ""
     if confirmation != relay:
         raise RuntimeError("custom relay confirmation did not match; no credentials were sent")
+
+
+def _signup(client: httpx.Client, relay: str, username: str, email: str) -> str:
+    """Email-first signup (ADR-0052): prove the address, then claim the
+    username. Returns the CSRF token of the resulting email-only session."""
+    base = relay.rstrip("/")
+    _require_response(client.post(base + "/signup/start", json={"email": email}), "account signup")
+    print(f"If {email} already has an account, the email names its username instead of a code; "
+          "rerun with --username set to that name.", file=sys.stderr)
+    magic_code = getpass.getpass("Sign-in code from email (input hidden): ")
+    verified = client.post(base + "/signup/verify", json={"email": email, "token": magic_code})
+    _require_response(verified, "email sign-in code")
+    csrf = verified.json().get("csrfToken")
+    if not isinstance(csrf, str):
+        raise RuntimeError("relay returned an invalid signup response")
+    claimed = client.post(base + "/signup/handle", headers={"x-shore-csrf": csrf}, json={"email": email, "handle": username})
+    _require_response(claimed, "username reservation")
+    return csrf
+
+
+def _totp_step_up(client: httpx.Client, endpoint: str, csrf: str, code: str) -> str:
+    step_response = client.post(endpoint + "/auth/step-up", headers={"x-shore-csrf": csrf}, json={"code": code})
+    _require_response(step_response, "authenticator verification")
+    stepped = step_response.json().get("csrfToken")
+    if not isinstance(stepped, str):
+        raise RuntimeError("relay returned an invalid second-factor response")
+    return stepped
+
+
+def _approve_with_passkey(client: httpx.Client, endpoint: str, relay: str, csrf: str) -> str:
+    """A terminal cannot use a passkey, so a browser that has one approves this
+    sign-in by entering the code shown here (ADR-0052)."""
+    started = client.post(endpoint + "/auth/approval/start", headers={"x-shore-csrf": csrf})
+    _require_response(started, "passkey approval request")
+    approval = started.json()
+    approval_id, code, path = approval.get("approvalId"), approval.get("code"), approval.get("approvePath")
+    if not all(isinstance(value, str) for value in (approval_id, code, path)) or not path.startswith("/@"):
+        raise RuntimeError("relay returned an invalid passkey approval request")
+    print("This account signs in with a passkey. On a device that has it, open:", file=sys.stderr)
+    print(f"  {relay.rstrip('/')}{path}", file=sys.stderr)
+    print(f"and enter this code: {code}", file=sys.stderr)
+    print("Enter it there yourself; never share it. Waiting for approval (Ctrl-C to cancel)...", file=sys.stderr)
+    while True:
+        time.sleep(_APPROVAL_POLL_SECONDS)
+        polled = client.post(endpoint + "/auth/approval/poll", headers={"x-shore-csrf": csrf}, json={"approvalId": approval_id})
+        if polled.status_code == 202:
+            continue
+        if polled.status_code == 410:
+            raise RuntimeError("the passkey approval expired; run agentsquid login again")
+        _require_response(polled, "passkey approval")
+        stepped = polled.json().get("csrfToken")
+        if not isinstance(stepped, str):
+            raise RuntimeError("relay returned an invalid second-factor response")
+        print("Approved.", file=sys.stderr)
+        return stepped
+
+
+def _second_factor(client: httpx.Client, endpoint: str, relay: str, username: str, csrf: str, factors: object) -> str:
+    """Finishes an email-only session; returns the stepped-up session's CSRF token.
+    `factors` is what the relay reported for the account (absent on older relays)."""
+    if isinstance(factors, list) and "passkey" in factors:
+        if "totp" in factors:
+            code = getpass.getpass("Authenticator code (input hidden; press Enter to approve with your passkey in a browser instead): ")
+            if code:
+                return _totp_step_up(client, endpoint, csrf, code)
+        return _approve_with_passkey(client, endpoint, relay, csrf)
+    enroll_response = client.post(endpoint + "/auth/totp/enroll", headers={"x-shore-csrf": csrf})
+    if enroll_response.status_code == 201:
+        secret = enroll_response.json().get("secret")
+        if not isinstance(secret, str):
+            raise RuntimeError("relay returned an invalid TOTP enrollment response")
+        print("Scan this QR code with your authenticator app:", file=sys.stderr)
+        _print_totp_qr(secret, username, relay)
+        print(f"Add this key to an authenticator app (1Password, Google Authenticator, ...): {secret}", file=sys.stderr)
+    elif enroll_response.status_code == 409:
+        print("Authenticator already enrolled; use its current 6-digit code (input is hidden).", file=sys.stderr)
+    else:
+        _require_response(enroll_response, "authenticator enrollment")
+    return _totp_step_up(client, endpoint, csrf, getpass.getpass("Authenticator code (input hidden): "))
 
 
 def login(argv: list[str]) -> int:
@@ -262,40 +346,22 @@ def login(argv: list[str]) -> int:
             else:
                 email = args.email or input("Account email: ").strip()
                 magic_response = client.post(endpoint + "/auth/magic-link", json={"email": email})
+                factors: object = None
                 if magic_response.status_code == 404 and _response_error(magic_response) == "unknown_username":
                     print(f"@{args.username} doesn't exist yet; creating it for {email}", file=sys.stderr)
-                    signup_response = client.post(endpoint + "/auth/signup", json={"email": email})
-                    if signup_response.status_code == 409:
-                        raise RuntimeError("account signup is unavailable; the username or email address is already in use")
-                    _require_response(signup_response, "account signup")
+                    csrf = _signup(client, args.relay, args.username, email)
+                    factors = []
                 else:
                     _require_response(magic_response, "sign-in email request")
-                magic_code = getpass.getpass("Sign-in code from email (input hidden): ")
-                consume_response = client.post(endpoint + "/auth/consume", json={"token": magic_code})
-                _require_response(consume_response, "email sign-in code")
-                consume = consume_response.json()
-                csrf = consume.get("csrfToken")
-                if not isinstance(csrf, str):
-                    raise RuntimeError("relay returned an invalid login response")
-                enroll_response = client.post(endpoint + "/auth/totp/enroll", headers={"x-shore-csrf": csrf})
-                if enroll_response.status_code == 201:
-                    secret = enroll_response.json().get("secret")
-                    if not isinstance(secret, str):
-                        raise RuntimeError("relay returned an invalid TOTP enrollment response")
-                    print("Scan this QR code with your authenticator app:", file=sys.stderr)
-                    _print_totp_qr(secret, args.username, args.relay)
-                    print(f"Add this key to an authenticator app (1Password, Google Authenticator, ...): {secret}", file=sys.stderr)
-                elif enroll_response.status_code == 409:
-                    print("Authenticator already enrolled; use its current 6-digit code (input is hidden).", file=sys.stderr)
-                else:
-                    _require_response(enroll_response, "authenticator enrollment")
-                totp_code = getpass.getpass("Authenticator code (input hidden): ")
-                step_response = client.post(endpoint + "/auth/step-up", headers={"x-shore-csrf": csrf}, json={"code": totp_code})
-                _require_response(step_response, "authenticator verification")
-                stepped = step_response.json()
-                csrf = stepped.get("csrfToken")
-                if not isinstance(csrf, str):
-                    raise RuntimeError("relay returned an invalid second-factor response")
+                    magic_code = getpass.getpass("Sign-in code from email (input hidden): ")
+                    consume_response = client.post(endpoint + "/auth/consume", json={"token": magic_code})
+                    _require_response(consume_response, "email sign-in code")
+                    consume = consume_response.json()
+                    csrf = consume.get("csrfToken")
+                    if not isinstance(csrf, str):
+                        raise RuntimeError("relay returned an invalid login response")
+                    factors = consume.get("factors")
+                csrf = _second_factor(client, endpoint, args.relay, args.username, csrf, factors)
                 headers = {"x-shore-csrf": csrf, "content-type": "application/json"}
             challenge_response = client.post(endpoint + "/host/challenge", headers=headers, json={"hostId": host_id})
             if getattr(challenge_response, "status_code", 200) == 409 and _response_error(challenge_response) == "current_host_exists":

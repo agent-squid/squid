@@ -52,6 +52,27 @@ for architecture, security invariants, sequencing, acceptance gates, and current
 - Acceptance tests cover deletion lifecycle, session revocation and rotation,
   attachment races, generation ordering, and privacy-safe rate keys.
 
+**Amendment (2026-10-06): email-first signup and passkeys ([ADR-0052](../decisions/0052-email-first-signup-and-passkeys.md))**
+
+- Signup verifies the email address before a username can be held. This
+  removes the 10-minute wait after a mistyped address and handle squatting by
+  unverified addresses. Signup for a registered address emails its owner
+  instead of revealing that it is registered. The handle-first
+  `/@handle/auth/signup` route answers `410 signup_moved`.
+- Passkeys (WebAuthn, attestation `none`, user verification required; Ed25519,
+  ES256, RS256) are the default second factor, with TOTP as the fallback.
+  Security-page step-ups use the passkey when one exists. Passkeys can be added
+  (with a fresh step-up) and removed (never the last factor), and the operator
+  factor reset clears them.
+- `agentsquid login` on a passkey-only account requests a login approval. The
+  person enters the terminal's code at `/@handle/approve` after a fresh passkey
+  check, and the terminal's session is then stepped up.
+- Verification: Worker tests drive a software authenticator for all three
+  algorithms through the public routes (typo recovery, enumeration-safe start,
+  handle choice, factor rules, lockout, approvals). Real Chromium
+  virtual-authenticator output was verified with the server verifier. The
+  Playwright `passkey.spec.ts` covers the deployed journey.
+
 
 ## Milestone 3 — End-to-end channel and local pairing
 

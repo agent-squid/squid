@@ -12,8 +12,24 @@ The identity-index object serializes account creation and username changes.
 Account states are `pending_email`, `active`, `recovery_pending`,
 `deletion_pending`, and `deleted`.
 
-- Verified email plus second factor moves `pending_email` to `active` and
-  atomically claims a normalized username for a random immutable account ID.
+- Signup is email-first (ADR-0052). `pending_email` has three sub-steps, each
+  bounded by a deadline the index and account alarms enforce:
+  1. *Address held.* Starting signup holds only the normalized address, for the
+     10-minute life of its emailed code. Starting again with the same address
+     reuses the pending account. An address that already has an account holds
+     nothing; its owner is emailed a reminder, and the requester sees the same
+     response.
+  2. *Address verified.* Consuming the code creates an email-only session and
+     extends the hold to that session's 15 minutes.
+  3. *Username chosen.* Only that verified session can choose a username,
+     which is then held until the same deadline. Choosing again releases the
+     previous choice, and another account's held username is refused.
+
+  The first confirmed second factor (an authenticator code, or registering a
+  first passkey) moves `pending_email` to `active` and atomically claims the
+  chosen username for the random immutable account ID. A lapsed signup releases
+  its address and username and erases its personal fields; audit records
+  remain.
 - A rename reserves the new normalized name, commits it to the account object,
   swaps the index binding, and tombstones the old name in one transaction
   protocol. Until commit, the old route remains authoritative; after commit it
@@ -79,7 +95,31 @@ Browser sessions are `login_pending`, `account_authenticated`,
 lived, and bind CSRF state and secure same-site cookies. Session state is only
 relay/account authorization and never device trust.
 
-After the first full email-plus-TOTP login and pairing, an expired browser
+Second factors (ADR-0052):
+
+- An `account_authenticated` session may enroll a factor only while the account
+  has none. Once any factor is confirmed, adding a passkey requires a step-up no
+  more than five minutes old. TOTP is only ever enrolled as the first factor.
+- A TOTP secret stays pending until its first valid code. It can never be
+  confirmed once a passkey exists, and registering the first passkey deletes it.
+- The last remaining factor cannot be removed by the user; only an operator
+  second-factor reset can do that.
+- Passkey assertions require user presence and verification, an exact origin
+  and relying-party match, and a single-use per-session challenge. A signature
+  counter that stops increasing is rejected. Failures share TOTP's five-failure
+  per-session and per-account lockout.
+
+A terminal (`agentsquid login`) cannot run WebAuthn. For a passkey account, its
+`account_authenticated` session may request a *login approval*. An approval is
+`pending`, then `approved` or `expired`, and is consumed once. It carries an
+8-character code shown only in the terminal, is bound to the requesting
+session, and expires within ten minutes or with that session. A different
+`remote_authenticated` session with a step-up no more than five minutes old
+approves it by entering the code. The requesting session then rotates to
+`remote_authenticated` with a fresh step-up, exactly as if it had verified a
+factor itself. No other session can collect it.
+
+After the first full email-plus-second-factor login and pairing, an expired browser
 session may be restored without repeating those factors. The relay issues a
 one-minute, single-use challenge bound to the account and paired device ID;
 the browser signs the domain-separated challenge with its non-exportable

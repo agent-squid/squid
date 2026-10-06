@@ -313,6 +313,133 @@ def test_login_performs_email_and_second_factor_flow_without_session_token(tmp_p
         "https://agentsquid.ai", "alice", "018f1f25-3f6b-7d75-a4d1-62d771381b20", 1)
 
 
+class _ScriptedRelay:
+    """httpx.Client stand-in answering each endpoint suffix from `routes`; a
+    list value is consumed one response per call."""
+
+    def __init__(self, routes, calls):
+        self.routes, self.calls = routes, calls
+
+    def __call__(self, **_kwargs):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        for suffix, answer in self.routes.items():
+            if url.endswith(suffix):
+                if isinstance(answer, list):
+                    answer = answer.pop(0)
+                value, status = answer if isinstance(answer, tuple) else (answer, 200)
+                return httpx.Response(status, json=value, request=httpx.Request("POST", url))
+        request = kwargs["json"]
+        return httpx.Response(200, request=httpx.Request("POST", url), json={
+            "accountId": "018f1f25-3f6b-7d75-a4d1-62d771381b20", "username": "alice", "keyEpoch": 1,
+            "id": request["hostId"], "signingKey": request["signingKey"], "agreementKey": request["agreementKey"]})
+
+
+def test_login_approves_a_passkey_only_account_in_the_browser(tmp_path, monkeypatch, capsys):
+    calls = []
+    relay = _ScriptedRelay({
+        "/auth/magic-link": {"sent": True},
+        "/auth/consume": ({"csrfToken": "csrf-one", "factors": ["passkey"]}, 201),
+        "/auth/approval/start": ({"approvalId": "018f1f25-3f6b-7d75-a4d1-62d771381b99", "code": "ABCD-EFGH",
+                                  "approvePath": "/@alice/approve", "expiresAt": 1}, 201),
+        "/auth/approval/poll": [({"status": "pending"}, 202), {"csrfToken": "csrf-two", "state": "remote_authenticated"}],
+        "/host/challenge": ({"id": "challenge", "nonce": "nonce"}, 201),
+    }, calls)
+    monkeypatch.setattr("agent.shore.httpx.Client", relay)
+    monkeypatch.setattr("agent.shore.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("agent.shore.getpass.getpass", lambda _prompt: "magic")
+    assert login(["--username", "alice", "--email", "alice@example.com", "--identity-dir", str(tmp_path / "shore")]) == 0
+    assert [url.rsplit("/", 2)[-2:] for url, _ in calls] == [
+        ["auth", "magic-link"], ["auth", "consume"], ["approval", "start"], ["approval", "poll"], ["approval", "poll"],
+        ["host", "challenge"], ["host", "register"],
+    ]
+    assert calls[3][1]["json"] == {"approvalId": "018f1f25-3f6b-7d75-a4d1-62d771381b99"}
+    assert calls[5][1]["headers"]["x-shore-csrf"] == "csrf-two"
+    err = capsys.readouterr().err
+    assert "https://agentsquid.ai/@alice/approve" in err and "ABCD-EFGH" in err
+
+
+def test_login_with_both_factors_uses_a_typed_code_or_falls_back_to_the_passkey(tmp_path, monkeypatch):
+    for typed, expected in (("123456", ["auth", "step-up"]), ("", ["approval", "start"])):
+        calls = []
+        relay = _ScriptedRelay({
+            "/auth/magic-link": {"sent": True},
+            "/auth/consume": ({"csrfToken": "csrf-one", "factors": ["totp", "passkey"]}, 201),
+            "/auth/step-up": {"csrfToken": "csrf-two"},
+            "/auth/approval/start": ({"approvalId": "018f1f25-3f6b-7d75-a4d1-62d771381b99", "code": "ABCD-EFGH",
+                                      "approvePath": "/@alice/approve", "expiresAt": 1}, 201),
+            "/auth/approval/poll": {"csrfToken": "csrf-two"},
+            "/host/challenge": ({"id": "challenge", "nonce": "nonce"}, 201),
+        }, calls)
+        monkeypatch.setattr("agent.shore.httpx.Client", relay)
+        monkeypatch.setattr("agent.shore.time.sleep", lambda _seconds: None)
+        answers = iter(["magic", typed])
+        monkeypatch.setattr("agent.shore.getpass.getpass", lambda _prompt: next(answers))
+        assert login(["--username", "alice", "--email", "alice@example.com", "--identity-dir", str(tmp_path / typed / "shore")]) == 0
+        assert calls[2][0].rsplit("/", 2)[-2:] == expected
+
+
+def test_login_reports_an_expired_passkey_approval(tmp_path, monkeypatch, capsys):
+    relay = _ScriptedRelay({
+        "/auth/magic-link": {"sent": True},
+        "/auth/consume": ({"csrfToken": "csrf-one", "factors": ["passkey"]}, 201),
+        "/auth/approval/start": ({"approvalId": "018f1f25-3f6b-7d75-a4d1-62d771381b99", "code": "ABCD-EFGH",
+                                  "approvePath": "/@alice/approve", "expiresAt": 1}, 201),
+        "/auth/approval/poll": ({"error": "approval_expired"}, 410),
+    }, [])
+    monkeypatch.setattr("agent.shore.httpx.Client", relay)
+    monkeypatch.setattr("agent.shore.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("agent.shore.getpass.getpass", lambda _prompt: "magic")
+    assert login(["--username", "alice", "--email", "alice@example.com", "--identity-dir", str(tmp_path / "shore")]) == 1
+    assert "passkey approval expired" in capsys.readouterr().err
+
+
+def test_login_creates_a_missing_account_email_first(tmp_path, monkeypatch, capsys):
+    calls = []
+    relay = _ScriptedRelay({
+        "/auth/magic-link": ({"error": "unknown_username"}, 404),
+        "/signup/start": ({"sent": True}, 202),
+        "/signup/verify": ({"csrfToken": "csrf-one", "factors": []}, 201),
+        "/signup/handle": {"username": "alice", "expiresAt": 1},
+        "/auth/totp/enroll": ({"secret": "ABCDEFGHIJKLMNOP"}, 201),
+        "/auth/step-up": {"csrfToken": "csrf-two"},
+        "/host/challenge": ({"id": "challenge", "nonce": "nonce"}, 201),
+    }, calls)
+    monkeypatch.setattr("agent.shore.httpx.Client", relay)
+    monkeypatch.setattr("agent.shore._print_totp_qr", lambda *_args: None)
+    answers = iter(["magic", "123456"])
+    monkeypatch.setattr("agent.shore.getpass.getpass", lambda _prompt: next(answers))
+    assert login(["--username", "alice", "--email", "alice@example.com", "--identity-dir", str(tmp_path / "shore")]) == 0
+    assert [url for url, _ in calls[:4]] == [
+        "https://agentsquid.ai/@alice/auth/magic-link", "https://agentsquid.ai/signup/start",
+        "https://agentsquid.ai/signup/verify", "https://agentsquid.ai/signup/handle",
+    ]
+    assert calls[2][1]["json"] == {"email": "alice@example.com", "token": "magic"}
+    assert calls[3][1] == {"headers": {"x-shore-csrf": "csrf-one"}, "json": {"email": "alice@example.com", "handle": "alice"}}
+    assert calls[6][1]["headers"]["x-shore-csrf"] == "csrf-two"
+
+
+def test_login_explains_a_taken_username_during_signup(tmp_path, monkeypatch, capsys):
+    relay = _ScriptedRelay({
+        "/auth/magic-link": ({"error": "unknown_username"}, 404),
+        "/signup/start": ({"sent": True}, 202),
+        "/signup/verify": ({"csrfToken": "csrf-one", "factors": []}, 201),
+        "/signup/handle": ({"error": "username_taken"}, 409),
+    }, [])
+    monkeypatch.setattr("agent.shore.httpx.Client", relay)
+    monkeypatch.setattr("agent.shore.getpass.getpass", lambda _prompt: "magic")
+    assert login(["--username", "alice", "--email", "alice@example.com", "--identity-dir", str(tmp_path / "shore")]) == 1
+    assert "username is already taken" in capsys.readouterr().err
+
+
 def test_login_prints_totp_enrollment_qr(tmp_path, monkeypatch, capsys):
     calls = []
 
