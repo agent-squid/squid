@@ -179,6 +179,24 @@ requested it and can be used once.
 - Bad: older `agentsquid` builds can no longer create accounts (`410
   signup_moved`). Sign-in still works with TOTP.
 
+## Verification
+
+- Shore Worker tests cover email-first signup, indistinguishable delivery
+  failures, factor enrollment and removal rules, lockout, all three accepted
+  WebAuthn algorithms, and terminal approval.
+- Pairing-app tests cover passkey option conversion, authentication-flow state,
+  and approval-code handling.
+- The Playwright TOTP and passkey journeys pass against a local Worker while
+  using Resend for real email delivery. The passkey journey creates a Chromium
+  virtual authenticator, signs in again from a fresh browser context, and
+  approves an email-only terminal session.
+- The CLI E2E completes email-first signup, TOTP verification, and signed host
+  registration against the local Worker over HTTPS. Its later browser-pairing
+  phase requires a signed AgentSquid Client release in the `RELEASES` bucket;
+  an empty local bucket correctly reports that remote access is unavailable.
+  Run that complete pairing phase against preproduction, or provision a signed
+  local release explicitly.
+
 ## Related decisions
 
 - ADR-0039: Remote access via Shore relay. This ADR amends its "User
