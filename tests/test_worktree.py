@@ -183,6 +183,7 @@ def test_ensure_worktree_symlinks_dependency_dirs(tmp_path):
 
 def test_ensure_worktree_auto_symlinks_only_allowlisted_ignored_dirs_not_files(tmp_path, monkeypatch):
     monkeypatch.setattr(worktree_mod.config, "DEPENDENCY_DIRS", ["tool-cache"])
+    monkeypatch.setattr(worktree_mod.config, "WORKTREE_LINK_IGNORED_FILES", [])
     repo = init_repo(tmp_path / "repo")
     (repo / ".gitignore").write_text("tool-cache/\ndist/\n.env\n")
     git(repo, "add", ".gitignore")
@@ -259,6 +260,58 @@ def test_ensure_worktree_does_not_recurse_into_matched_dependency_dirs(tmp_path)
 # ---------------------------------------------------------------------------
 # sync_after_turn
 # ---------------------------------------------------------------------------
+
+def test_link_ignored_files_defaults_to_env_files():
+    assert worktree_mod.config.WORKTREE_LINK_IGNORED_FILES == [".env", ".env.*"]
+
+
+def test_ensure_worktree_links_opted_in_ignored_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree_mod.config, "WORKTREE_LINK_IGNORED_FILES", [".env", ".env.*"])
+    repo = init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text(".env\n.env.*\nnode_modules/\n*.log\n")
+    (repo / "tracked.env.example").write_text("SECRET=\n")
+    git(repo, "add", ".gitignore", "tracked.env.example")
+    git(repo, "commit", "-m", "ignore local state")
+    (repo / ".env").write_text("SECRET=1\n")
+    (repo / "e2e").mkdir()
+    (repo / "e2e" / ".env.local").write_text("KEY=2\n")
+    (repo / "node_modules" / "pkg").mkdir(parents=True)
+    (repo / "node_modules" / "pkg" / ".env").write_text("dependency\n")
+    (repo / "app.log").write_text("log\n")
+
+    wt = ensure_worktree(repo, "t", "213")
+
+    assert (wt / ".env").is_symlink()
+    (wt / ".env").write_text("SECRET=edited\n")
+    assert (repo / ".env").read_text() == "SECRET=edited\n"
+    assert (wt / "e2e" / ".env.local").is_symlink()
+    assert not (wt / "app.log").exists()
+    assert not (wt / "tracked.env.example").is_symlink()
+
+    assert sync_after_turn(repo, "t", "213", msg_id=213) == []
+    assert not (repo / ".env").is_symlink()
+    assert git(repo, "status", "--porcelain").stdout == ""
+
+
+def test_sync_after_turn_promotes_opted_in_ignored_files_the_turn_created(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree_mod.config, "WORKTREE_LINK_IGNORED_FILES", [".env"])
+    repo = init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text(".env\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-m", "ignore .env")
+    wt = ensure_worktree(repo, "t", "214")
+    (wt / "e2e").mkdir()
+    (wt / "e2e" / ".env").write_text("KEY=new\n")
+    os.chmod(wt / "e2e" / ".env", 0o600)
+    (wt / ".env").write_text("turn copy\n")
+    (repo / ".env").write_text("created meanwhile\n")
+
+    assert sync_after_turn(repo, "t", "214", msg_id=214) == []
+
+    assert (repo / "e2e" / ".env").read_text() == "KEY=new\n"
+    assert (repo / "e2e" / ".env").stat().st_mode & 0o777 == 0o600
+    assert (repo / ".env").read_text() == "created meanwhile\n"
+
 
 def test_sync_after_turn_commits_and_merges(tmp_path):
     repo = init_repo(tmp_path / "repo")

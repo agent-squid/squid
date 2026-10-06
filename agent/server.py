@@ -5015,12 +5015,15 @@ def _request_http_shutdown(host: str, port: int) -> Optional[int]:
 
 def _print_lifecycle_usage() -> None:
     print(
-        "usage: agentsquid [--fg|--reload|start|stop|restart|status]\n\n"
+        "usage: agentsquid [--fg|--reload|start|stop|restart|status|login|pair]\n\n"
         "commands:\n"
         "  start     run agentsquid in the background\n"
         "  stop      stop the background agentsquid process\n"
         "  restart   stop then start the background process\n"
-        "  status    show whether agentsquid is running\n\n"
+        "  status    show whether agentsquid is running\n"
+        "  login     register this machine as your Shore host\n"
+        "  pair      show a QR code to pair a browser (--requests to approve\n"
+        "            pairing requests started from a browser)\n\n"
         "bare agentsquid runs in the foreground; Ctrl+C stops it."
     )
 
@@ -5189,6 +5192,9 @@ def main():
     if args and args[0] == "login":
         from .shore import login
         sys.exit(login(args[1:]))
+    if args and args[0] == "pair":
+        from .shore import pair
+        sys.exit(pair(args[1:], f"http://{host}:{port}"))
     lifecycle_commands = {"start", "stop", "restart", "status"}
     if args and args[0] in {"-h", "--help"}:
         _print_lifecycle_usage()

@@ -7,7 +7,7 @@ import httpx
 from agent.shore import (
     ShoreRuntimeConfig, _confirm_custom_relay, _load_or_new_identity, _load_runtime_config,
     _new_identity, _print_totp_qr, _registration_proof, _require_response,
-    _write_runtime_config, login,
+    _write_runtime_config, login, pair,
 )
 
 
@@ -406,3 +406,84 @@ def test_login_explains_existing_host_conflict(tmp_path, monkeypatch, capsys):
         "--identity-dir", str(tmp_path / "shore")])
     assert result == 1
     assert "already has a different registered host" in capsys.readouterr().err
+
+
+_REAL_HTTPX_CLIENT = httpx.Client
+
+
+def _pair_client(monkeypatch, handler):
+    def client(**kwargs):
+        return _REAL_HTTPX_CLIENT(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr("agent.shore.httpx.Client", client)
+
+
+def test_pair_prints_qr_and_waits_until_paired(monkeypatch, capsys):
+    statuses = iter(["pending", "paired"])
+
+    def handler(request):
+        if request.url.path == "/shore/pairing/begin":
+            return httpx.Response(200, json={
+                "ceremony_id": "018f1f25-c930-76f0-86e7-cb06d94e6a32", "code": "ABCD-EFGH",
+                "expires_at": 4102444800, "pair_url": "https://agentsquid.ai/@alice/pair?v=1#offer",
+            })
+        assert request.url.params["ceremony_id"] == "018f1f25-c930-76f0-86e7-cb06d94e6a32"
+        return httpx.Response(200, json={"status": next(statuses)})
+
+    _pair_client(monkeypatch, handler)
+    assert pair([], "http://127.0.0.1:1", poll_seconds=0) == 0
+    out = capsys.readouterr().out
+    assert "https://agentsquid.ai/@alice/pair?v=1#offer" in out
+    assert "code: ABCD-EFGH" in out
+    assert "Paired ✓" in out
+
+
+def test_pair_reports_expired_code(monkeypatch, capsys):
+    def handler(request):
+        if request.url.path == "/shore/pairing/begin":
+            return httpx.Response(200, json={
+                "ceremony_id": "018f1f25-c930-76f0-86e7-cb06d94e6a32", "code": "ABCD",
+                "expires_at": 0, "pair_url": "https://agentsquid.ai/@alice/pair#offer",
+            })
+        return httpx.Response(200, json={"status": "expired"})
+
+    _pair_client(monkeypatch, handler)
+    assert pair([], "http://127.0.0.1:1", poll_seconds=0) == 1
+    assert "expired" in capsys.readouterr().err
+
+
+def test_pair_explains_missing_login_and_stopped_server(monkeypatch, capsys):
+    _pair_client(monkeypatch, lambda request: httpx.Response(400, json={"error": "shore_not_configured"}))
+    assert pair([], "http://127.0.0.1:1") == 1
+    assert "agentsquid login" in capsys.readouterr().err
+
+    def refused(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    _pair_client(monkeypatch, refused)
+    assert pair([], "http://127.0.0.1:1") == 1
+    assert "agentsquid start" in capsys.readouterr().err
+
+
+def test_pair_requests_approves_picked_choice_and_rejects_blank(monkeypatch, capsys):
+    posted = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"requests": [
+                {"request_id": "r1", "device_id": "d1", "choices": ["AAAA", "BBBB", "CCCC"]},
+                {"request_id": "r2", "device_id": "d2", "choices": ["DDDD", "EEEE", "FFFF"]},
+            ]})
+        posted.append((request.url.path, request.read()))
+        return httpx.Response(200, json={"ok": True})
+
+    _pair_client(monkeypatch, handler)
+    answers = iter(["2", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    assert pair(["--requests"], "http://127.0.0.1:1") == 0
+    assert posted == [
+        ("/shore/pairing/requests/approve", b'{"request_id":"r1","verification_code":"BBBB"}'),
+        ("/shore/pairing/requests/reject", b'{"request_id":"r2"}'),
+    ]
+    out = capsys.readouterr().out
+    assert "Approved ✓" in out and "Rejected." in out

@@ -229,6 +229,11 @@ DEPENDENCY_DIRS: list[str] = _worktree_cfg.get("dependency_dirs", [
     "vendor", "target", ".bundle", "Pods", ".cargo", ".stack-work", "elm-stuff",
 ])
 
+# Git-ignored local files (e.g. ".env") to symlink from a code root into each
+# turn directory, matched by file name. Other ignored state files stay private
+# to the code root (see ADR-0025); set [] to share none.
+WORKTREE_LINK_IGNORED_FILES: list[str] = _worktree_cfg.get("link_ignored_files", [".env", ".env.*"])
+
 # Proxy environment to inject into every CLI subprocess, or None if disabled.
 _proxy_cfg = _cfg.get("proxy", {})
 PROXY_ENV: Optional[dict] = None

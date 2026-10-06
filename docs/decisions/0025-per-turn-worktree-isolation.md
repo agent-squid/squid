@@ -772,8 +772,20 @@ materializing the branchless turn directory. It symlinks allowlisted ignored dir
 discovered by Git when `auto_link_ignored_dirs` is enabled, plus optional
 `worktree.dependency_dirs` entries, into the equivalent path under `wt`.
 It only ever matches directories, never individual files, so it can't touch
-gitignored *state* files (`.env`, `squid.db`, `*.log`, `config/squid.yaml`)
-that must stay private to repo_root.
+gitignored *state* files (`squid.db`, `*.log`, `config/squid.yaml`) that must
+stay private to repo_root.
+
+The one exception is `worktree.link_ignored_files` (default `.env`, `.env.*`;
+`[]` disables it). Hiding `.env` from turn directories protected nothing —
+agents' process CWD is still the source repo (see above), so they could read
+it there anyway — while it broke tests and tools that load it from the turn
+directory. Ignored files whose name matches one of its globs are symlinked
+into the turn directory by `_link_ignored_files`, so a turn can use local
+config/secrets and its edits write straight through to repo_root, outside the
+GitDiff/revert flow. Because they stay ignored, snapshots skip them; so at
+turn end `_promote_new_ignored_files` copies matching files the turn
+*created* (nothing to link at turn start) back to repo_root, never
+overwriting one that appeared there meanwhile.
 
 After creating symlinks, Squid writes slashless versions of the linked paths to
 Git's local exclude file (`git rev-parse --git-path info/exclude`). This is

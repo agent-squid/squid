@@ -14,6 +14,7 @@ Squid-internal only and never exposed to an agent.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import hashlib
 import logging
 import os
@@ -95,6 +96,79 @@ def _link_dependency_dirs(repo_root: Path, wt: Path) -> None:
             dst.symlink_to(src, target_is_directory=True)
         if dst.is_symlink():
             linked_rels.append(rel)
+
+
+def _ignored_file_rel_paths(repo_root: Path, root: Path) -> list[Path]:
+    """
+    Files under root whose name matches config.WORKTREE_LINK_IGNORED_FILES
+    and that repo_root's Git ignores. root is repo_root itself, or a turn
+    directory being promoted back to it. Symlinks are skipped: in a turn
+    directory those are the links _link_ignored_files created.
+    """
+    patterns = config.WORKTREE_LINK_IGNORED_FILES
+    if not patterns:
+        return []
+    skip = {".git", *config.DEPENDENCY_DIRS, *_AUTO_LINK_DENY_DIR_NAMES}
+    root_depth = str(root).count(os.sep)
+    candidates: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        depth = str(dirpath).count(os.sep) - root_depth
+        dirnames[:] = [] if depth >= _DEPENDENCY_SCAN_MAX_DEPTH else [d for d in dirnames if d not in skip]
+        for name in filenames:
+            path = Path(dirpath) / name
+            if any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns) and not path.is_symlink():
+                candidates.append(str(path.relative_to(root)))
+    if not candidates:
+        return []
+    result = _run_git(
+        repo_root, "check-ignore", "-z", "--stdin", check=False, input="\0".join(candidates) + "\0",
+    )
+    return [Path(raw) for raw in result.stdout.split("\0") if raw]
+
+
+def _link_ignored_files(repo_root: Path, wt: Path) -> None:
+    """
+    Symlink opted-in ignored files (config.WORKTREE_LINK_IGNORED_FILES, e.g.
+    .env) from repo_root into wt, so a turn can read local config/secrets and
+    its edits write through. They stay ignored, so they never enter turn
+    snapshots or the GitDiff/conflict flow.
+    """
+    repo_root = repo_root.resolve()
+    wt = wt.resolve()
+    if wt == repo_root:
+        log.error("refusing to link ignored files: worktree path equals repo_root (%s)", repo_root)
+        return
+    for rel in _ignored_file_rel_paths(repo_root, repo_root):
+        dst = wt / rel
+        if not dst.exists() and not dst.is_symlink():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.symlink_to(repo_root / rel)
+
+
+def _promote_new_ignored_files(repo_root: Path, wt: Path) -> None:
+    """
+    Copy opted-in ignored files the turn created (no repo_root counterpart
+    to link at turn start) back to repo_root. Snapshots skip ignored files,
+    so without this they would be lost with the turn directory. Never
+    overwrites a file that appeared in repo_root meanwhile.
+    """
+    for rel in _ignored_file_rel_paths(repo_root, wt):
+        dst = repo_root / rel
+        if dst.exists() or dst.is_symlink():
+            log.warning("not promoting %s from %s: it already exists in %s", rel, wt, repo_root)
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        # Copy beside dst, then hard-link into place: os.link fails rather
+        # than replacing a file created between the check above and now.
+        fd, tmp = tempfile.mkstemp(prefix=f".{dst.name}.", dir=dst.parent)
+        os.close(fd)
+        try:
+            shutil.copy2(wt / rel, tmp)
+            os.link(tmp, dst)
+        except FileExistsError:
+            log.warning("not promoting %s from %s: it already exists in %s", rel, wt, repo_root)
+        finally:
+            os.unlink(tmp)
 
 
 def _run_git(
@@ -357,6 +431,7 @@ def ensure_worktree(repo_root: Path, topic: str, agent: str) -> Path:
     _run_git(repo_root, "update-ref", base_ref_name(topic, agent), base_commit)
     _materialize_tree(repo_root, base_commit, wt)
     _link_dependency_dirs(repo_root, wt)
+    _link_ignored_files(repo_root, wt)
     log.info("worktree created: %s (branchless, base=%s)", wt, base_commit[:12])
     return wt
 
@@ -418,6 +493,7 @@ def sync_after_turn(
         base_commit = _base_commit_from_registry(repo_root, topic, agent) or base_commit_for(repo_root, topic, agent)
         if not base_commit:
             raise RuntimeError(f"missing base commit for worktree {wt}")
+        _promote_new_ignored_files(repo_root, wt)
         turn_tree = turn_tree or _snapshot_dir(repo_root, wt)
         base_tree = _run_git(repo_root, "show", "--format=%T", "--no-patch", base_commit).stdout.strip()
         if turn_tree == base_tree:

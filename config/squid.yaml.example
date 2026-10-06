@@ -67,6 +67,16 @@ worktree:
   # as ignored. Leave unset; add only dependency/cache names Squid misses.
   # dependency_dirs:
   #   - custom-cache-dir
+  # Git-ignored local files to share with turn directories, matched by file
+  # name (globs allowed). Each is symlinked in, so turns read your real copy
+  # and their edits write through; a file a turn creates is copied back to
+  # the code root at turn end. Their edits bypass GitDiff/revert. Other
+  # ignored files stay private to the code root. Defaults to .env and .env.*;
+  # set [] to share none, or list your own to replace the default.
+  # link_ignored_files:
+  #   - .env
+  #   - .env.*
+  #   - .dev.vars
   # Whether a new turn should start from the source checkout's uncommitted
   # state. true snapshots dirty/untracked files into the turn seed, so files
   # you just edited or added are visible to the agent without committing first.

@@ -11,6 +11,7 @@ import re
 import stat
 import sys
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -336,3 +337,89 @@ def login(argv: list[str]) -> int:
         return 1
     print(f"registered Shore host {host_id}; private keys remain in {args.identity_dir}")
     return 0
+
+
+def _local_request(client: httpx.Client, method: str, path: str, **kwargs) -> dict:
+    try:
+        response = client.request(method, path, **kwargs)
+    except httpx.TransportError as exc:
+        raise RuntimeError("agentsquid isn't running on this host; start it with `agentsquid start`") from exc
+    body = response.json()
+    if response.status_code >= 400:
+        error = body.get("error") if isinstance(body, dict) else None
+        if error == "shore_not_configured":
+            raise RuntimeError("Shore isn't set up on this host yet; run `agentsquid login` first")
+        raise RuntimeError(error or f"HTTP {response.status_code}")
+    return body
+
+
+def _pair_with_qr(client: httpx.Client, poll_seconds: float) -> int:
+    body = _local_request(client, "POST", "/shore/pairing/begin")
+    # Low error correction (as in the web UI) keeps the long pair URL's QR
+    # narrow enough for a typical terminal.
+    qr = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_L)
+    qr.add_data(body["pair_url"])
+    print("Scan this QR code, or open the URL, in the browser you want to pair:")
+    qr.print_ascii(tty=False, invert=True)
+    print(f"{body['pair_url']}\ncode: {body['code']}")
+    while True:
+        status = _local_request(client, "GET", "/shore/pairing/status",
+                                params={"ceremony_id": body["ceremony_id"]}).get("status")
+        if status != "pending":
+            break
+        remaining = max(0, int(float(body["expires_at"]) - time.time()))
+        print(f"\rWaiting for the browser… expires in {remaining // 60}:{remaining % 60:02d} ",
+              end="", flush=True)
+        time.sleep(poll_seconds)
+    print()
+    if status == "paired":
+        print("Paired ✓")
+        return 0
+    print("Pairing code expired; run `agentsquid pair` again." if status == "expired" else "Pairing failed.",
+          file=sys.stderr)
+    return 1
+
+
+def _approve_pairing_requests(client: httpx.Client) -> int:
+    requests = _local_request(client, "GET", "/shore/pairing/requests")["requests"]
+    if not requests:
+        print("No pending pairing requests.")
+        return 0
+    for request in requests:
+        print(f"\nPairing request from device {request['device_id']}")
+        choices = request["choices"]
+        print("Which code does the browser show?")
+        for number, code in enumerate(choices, 1):
+            # Grouped like the browser and web UI show it, for easy comparison.
+            print(f"  {number}. {'-'.join(code[i:i + 4] for i in range(0, len(code), 4))}")
+        try:
+            answer = input(f"Pick 1-{len(choices)} (blank to reject): ").strip()
+        except EOFError:
+            answer = ""
+        if not answer.isdigit() or not 1 <= int(answer) <= len(choices):
+            if answer:
+                print("Not one of the choices.", file=sys.stderr)
+            _local_request(client, "POST", "/shore/pairing/requests/reject",
+                           json={"request_id": request["request_id"]})
+            print("Rejected.")
+            continue
+        _local_request(client, "POST", "/shore/pairing/requests/approve",
+                       json={"request_id": request["request_id"], "verification_code": choices[int(answer) - 1]})
+        print("Approved ✓")
+    return 0
+
+
+def pair(argv: list[str], base_url: str, *, poll_seconds: float = 2.0) -> int:
+    parser = argparse.ArgumentParser(prog="agentsquid pair", description="Pair a browser with this Shore host")
+    parser.add_argument("--requests", action="store_true",
+                        help="review pairing requests started from a browser instead of showing a QR code")
+    args = parser.parse_args(argv)
+    try:
+        with httpx.Client(base_url=base_url, timeout=15.0) as client:
+            return _approve_pairing_requests(client) if args.requests else _pair_with_qr(client, poll_seconds)
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+    except (KeyError, TypeError, ValueError, RuntimeError, httpx.HTTPError) as exc:
+        print(f"ERROR: Shore pairing failed: {exc}", file=sys.stderr)
+        return 1
