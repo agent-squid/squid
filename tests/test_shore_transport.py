@@ -32,6 +32,7 @@ DEVICE = "018f1f25-8614-7e41-8c5c-fc0b6eefad62"
 DEVICE2 = "018f1f25-8614-7e41-8c5c-fc0b6eefad64"
 CEREMONY = "018f1f25-c930-76f0-86e7-cb06d94e6a32"
 CEREMONY2 = "018f1f25-c930-76f0-86e7-cb06d94e6a34"
+ROTATE = b'{"type":"host_continuity_rotate","v":1}'
 NOW = int(datetime(2026, 9, 3, 12, tzinfo=timezone.utc).timestamp() * 1000)
 
 
@@ -693,8 +694,8 @@ async def test_host_connection_signs_challenge_heartbeats_and_dispatches(monkeyp
     socket = Socket()
     with pytest.raises(asyncio.CancelledError):
         await connection._serve(socket, asyncio.Event())
-    assert socket.sent[-1] == b"response"
-    assert socket.sent[:-1] and all(frame == b"" for frame in socket.sent[:-1])
+    assert socket.sent[0] == ROTATE and socket.sent[-1] == b"response"
+    assert socket.sent[1:-1] and all(frame == b"" for frame in socket.sent[1:-1])
     assert handled == [b"request"]
 
 
@@ -867,6 +868,52 @@ async def test_routine_transport_expiry_reconnects(monkeypatch, tmp_path, reason
 
 
 @pytest.mark.asyncio
+async def test_host_saves_continuity_token_before_acking_and_presents_it_on_reconnect(tmp_path, monkeypatch):
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
+        host_id=HOST, signing_key=host_signing, heartbeat_seconds=100)
+    token = "A" * 43
+    stop = asyncio.Event()
+    inbound = [canonical({"v": 1, "type": "host_continuity", "token": "short"}),
+               canonical({"v": 1, "type": "host_continuity", "token": token})]
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def recv(self):
+            await asyncio.sleep(0.001)
+            if inbound:
+                return inbound.pop(0)
+            stop.set()
+            return b""
+        async def send(self, value):
+            if value == canonical({"v": 1, "type": "host_continuity_ack"}):
+                assert (tmp_path / "continuity-token").read_text() == token
+            self.sent.append(value)
+
+    socket = Socket()
+    await connection._serve(socket, stop)
+    assert socket.sent == [ROTATE, canonical({"v": 1, "type": "host_continuity_ack"})]
+    assert stat.S_IMODE((tmp_path / "continuity-token").stat().st_mode) == 0o600
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"id": CEREMONY, "nonce": "challenge-nonce"}
+
+    class Client:
+        def __init__(self, **_kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): pass
+        async def post(self, url, json): return Response()
+
+    monkeypatch.setattr("agent.shore_transport.httpx.AsyncClient", Client)
+    assert (await connection._connection_headers())["x-shore-continuity-token"] == token
+    (tmp_path / "continuity-token").write_text("tampered")
+    assert "x-shore-continuity-token" not in await connection._connection_headers()
+
+
+@pytest.mark.asyncio
 async def test_inbound_invalid_frames_cannot_suppress_host_heartbeat(tmp_path):
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
@@ -882,11 +929,12 @@ async def test_inbound_invalid_frames_cannot_suppress_host_heartbeat(tmp_path):
             return b"not-canonical-json"
         async def send(self, value):
             self.sent.append(value)
-            stop.set()
+            if value == b"":
+                stop.set()
 
     socket = Socket()
     await connection._serve(socket, stop)
-    assert socket.sent == [b""]
+    assert socket.sent == [ROTATE, b""]
 
 
 @pytest.mark.asyncio
@@ -926,7 +974,7 @@ async def test_receipt_mode_preserves_pairing_packets_and_relay_heartbeats(tmp_p
     with pytest.raises(asyncio.CancelledError):
         await connection._serve(socket, asyncio.Event())
     assert handled == [pairing_packet]
-    assert socket.sent == [b"pairing-response"]
+    assert socket.sent == [ROTATE, b"pairing-response"]
 
 
 @pytest.mark.asyncio
@@ -1080,7 +1128,7 @@ async def test_host_revocation_reaches_shore_now_and_on_every_connect(tmp_path):
     socket = Socket()
     with pytest.raises(asyncio.CancelledError):
         await connection._serve(socket, asyncio.Event())
-    assert socket.sent == [frame]
+    assert socket.sent == [frame, ROTATE]
 
 
 def test_all_offline_revocations_are_replayed(tmp_path):
@@ -1184,8 +1232,8 @@ async def test_serve_survives_unexpected_dispatch_error_and_keeps_serving(tmp_pa
     # The subscribe frame's snapshot call raised, so it produced no response
     # at all -- but the loop must not have died: the ping that followed it
     # still got a real pong reply.
-    assert len(socket.sent) == 1
-    pong = open_response(socket.sent[0], host_signing.public_key(), browser_agreement, host_agreement.public_key(),
+    assert socket.sent[0] == ROTATE and len(socket.sent) == 2
+    pong = open_response(socket.sent[1], host_signing.public_key(), browser_agreement, host_agreement.public_key(),
                           replay, now_ms=None)
     assert pong == {"v": 1, "type": "pong", "payload": {}}
 

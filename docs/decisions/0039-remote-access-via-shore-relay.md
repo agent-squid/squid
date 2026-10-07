@@ -672,6 +672,22 @@ not by Cloudflare Access:
    automatically revoke the host because legitimate process/network overlap is
    possible.
 
+   *Amendment (2026-10-07): reconnect continuity.* A host whose network drops
+   detects it before Shore's heartbeat window lapses, so its own reconnect
+   looked like displacement and alerted roughly hourly on flaky links. After
+   receipt sync, the host sends `host_continuity_rotate`; Shore replies over
+   that socket with a random single-use `host_continuity` token (storing only
+   its hash, bound to host ID and key epoch), and the host saves it atomically
+   beside its keys before sending `host_continuity_ack`. A reconnect presents
+   it in `x-shore-continuity-token`. A healthy displacement that presents a
+   valid token is audited as `healthy_same_key_reconnect` with outcome
+   `continuity_token_valid` and raises no alert. Until acknowledged, both the
+   newly issued token and the previous one stay valid, so a drop before the
+   save is not mistaken for theft; the ack retires the previous token. A
+   missing, stale, or copied token keeps the alert above. A copied key alone
+   never saw the token, and a copied token goes stale once the real host
+   rotates.
+
 2. **End-user session (phone/browser → relay)**: visiting
    `agentsquid.ai/@<username>` requires a login (same account system as
    registration). Sessions are short-lived with refresh, gated behind a

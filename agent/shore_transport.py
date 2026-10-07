@@ -24,6 +24,7 @@ import random
 import re
 import secrets
 import sqlite3
+import tempfile
 import threading
 import time
 from contextlib import suppress
@@ -624,6 +625,39 @@ class ShoreChannel:
         return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+_CONTINUITY_TOKEN_FILE = "continuity-token"
+_CONTINUITY_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+
+
+def _read_continuity_token(state_dir: Path) -> str | None:
+    """The token Shore issued over this host's last socket, if one was saved."""
+    try:
+        token = (state_dir / _CONTINUITY_TOKEN_FILE).read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return token if _CONTINUITY_TOKEN_RE.fullmatch(token) else None
+
+
+def _write_continuity_token(state_dir: Path, token: str) -> None:
+    """Atomically replace the saved token; it must be durable before Shore is told."""
+    fd, name = tempfile.mkstemp(prefix=".continuity.", dir=state_dir)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(token)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, state_dir / _CONTINUITY_TOKEN_FILE)
+        directory_fd = os.open(state_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
 def _device_revoked_frame(device_id: str) -> bytes:
     return canonical({"v": 1, "type": "browser_device_revoked", "device_id": device_id})
 
@@ -853,7 +887,10 @@ class ShoreHostConnection:
                 # envelope, several Durable Object writes per idle tab.
                 "x-shore-device-presence": "1",
                 "x-shore-challenge-id": challenge["id"],
-                "x-shore-signature": b64url(self.signing_key.sign(proof))}
+                "x-shore-signature": b64url(self.signing_key.sign(proof)),
+                # ADR-0039: proves a reconnect replacing a dropped socket is
+                # this host, not a copied key, so Shore does not alert on it.
+                **({"x-shore-continuity-token": token} if (token := _read_continuity_token(self.channel.state_dir)) else {})}
 
     def list_pairing_requests(self) -> list[dict[str, Any]]:
         return self.channel.list_pairing_requests()
@@ -901,6 +938,8 @@ class ShoreHostConnection:
                 last_sent = time.monotonic()
             if self.receipt_keys and await self._send_audit_batch(socket, when_due=True):
                 last_sent = time.monotonic()
+            await socket.send(canonical({"v": 1, "type": "host_continuity_rotate"}))
+            last_sent = time.monotonic()
             while not stop.is_set():
                 now = time.monotonic()
                 remaining = max(0.0, self.heartbeat_seconds - (now - last_sent))
@@ -963,6 +1002,20 @@ class ShoreHostConnection:
                         # trusting this costs nothing; the device recovers
                         # with a fresh `subscribe` when it reconnects.
                         self.channel._drop_session(control["device_id"])
+                        continue
+                    if (isinstance(control, dict) and control.get("type") == "host_continuity"
+                            and set(control) == {"v", "type", "token"} and control.get("v") == 1
+                            and isinstance(control.get("token"), str)
+                            and _CONTINUITY_TOKEN_RE.fullmatch(control["token"]) and canonical(control) == message):
+                        # Acknowledge only once saved: until then Shore keeps
+                        # accepting the previous token.
+                        try:
+                            await asyncio.to_thread(_write_continuity_token, self.channel.state_dir, control["token"])
+                        except OSError as exc:
+                            log.warning("shore: could not save continuity token: %s", exc)
+                            continue
+                        await socket.send(canonical({"v": 1, "type": "host_continuity_ack"}))
+                        last_sent = time.monotonic()
                         continue
                     if isinstance(control, dict) and control.get("type") == "pairing_request":
                         try:
