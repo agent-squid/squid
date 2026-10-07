@@ -2766,6 +2766,27 @@ without extra deploy-token permissions, and the first manual workflow run
 published `{"percent":3.2,"day":"2026-09-29"}`. The automatic level is live in
 preproduction; production picks up the binding on its next deploy.
 
+**Archive restore and browser drill tooling follow-up (2026-10-06):** both
+remaining non-alerting 6.2 evidence items now have repeatable tooling. Neither
+has been run as evidence yet.
+- **Witnessed archive restore:** Shore `scripts/verify-archive-restore.mjs`
+  verifies a local copy of restored B2 objects offline, with no credentials.
+  It checks canonical bodies, object names, relay and host hash chains, host
+  payload commitments, cross-batch gaps and forks, and host Ed25519
+  signatures against a key taken from the host. `docs/runbooks/shore-backup-restore.md`
+  now has the custodian-plus-witness procedure and the record format. A
+  Worker test runs the verifier on the exact object the relay exporter
+  uploads; all 228 Shore tests pass. Still open: the custodian's drill on the
+  real bucket, and its record.
+- **Live browser checks:** `e2e/pair-cli.spec.ts` now continues past pairing:
+  both browsers, running the uploaded client, must reach `Connected`, both
+  must receive the updates a restarted host publishes, the host's relay
+  receipt chain must grow across the restart without a gap, and Shore must
+  acknowledge the host audit log through its tip. Not yet run: preproduction
+  deploys have failed since the email-first signup commit (`npm audit`, high
+  `source-map-js` advisory), so dev rejects the current CLI signup with
+  `not_shore_route`. Rerun once preproduction deploys.
+
 #### 6.3 — Independent security review (action 3)
 
 In progress (2026-09-22). The first adversarial review confirmed the relay-
