@@ -2767,8 +2767,9 @@ published `{"percent":3.2,"day":"2026-09-29"}`. The automatic level is live in
 preproduction; production picks up the binding on its next deploy.
 
 **Archive restore and browser drill tooling follow-up (2026-10-06):** both
-remaining non-alerting 6.2 evidence items now have repeatable tooling. Neither
-has been run as evidence yet.
+remaining non-alerting 6.2 evidence items now have repeatable tooling. The
+browser drill has passed in preproduction; the archive restore drill has not
+been run.
 - **Witnessed archive restore:** Shore `scripts/verify-archive-restore.mjs`
   verifies a local copy of restored B2 objects offline, with no credentials.
   It checks canonical bodies, object names, relay and host hash chains, host
@@ -2782,10 +2783,16 @@ has been run as evidence yet.
   both browsers, running the uploaded client, must reach `Connected`, both
   must receive the updates a restarted host publishes, the host's relay
   receipt chain must grow across the restart without a gap, and Shore must
-  acknowledge the host audit log through its tip. Not yet run: preproduction
-  deploys have failed since the email-first signup commit (`npm audit`, high
-  `source-map-js` advisory), so dev rejects the current CLI signup with
-  `not_shore_route`. Rerun once preproduction deploys.
+  acknowledge the host audit log through its tip. Preproduction deploys had
+  failed since the email-first signup commit on a high `npm audit` advisory
+  (`source-map-js`); Shore `fc85360` cleared it and `4e14cec` deployed.
+  Against `dev.agentsquid.ai`, the extended spec then passed twice, with
+  throwaway accounts and the uploaded client bytes. This closes, for
+  preproduction, the live integration items left open by the 2026-09-29 dev
+  drill: login, pairing, multi-device convergence, reconnect/recovery,
+  receipt continuity, and audit export. In the same session
+  `login-totp.spec.ts` failed once with an unexplained `403` on its
+  account-deletion cleanup, then passed on two reruns.
 
 #### 6.3 — Independent security review (action 3)
 
