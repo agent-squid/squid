@@ -4735,13 +4735,33 @@ function _setCatalogOperationBusy(busy) {
 
 // Read the rendered buffer so ANSI styling and URLs wrapped across PTY rows
 // never leak into the device-code UI. Unknown output stays available in details.
-function codexDevicePrompt(buffer) {
+function authPromptText(buffer) {
   let text = '';
   for (let i = 0; i < buffer.length; i++) {
     const line = buffer.getLine(i);
     if (!line) continue;
     text += (line.isWrapped ? '' : '\n') + line.translateToString(true);
   }
+  return text;
+}
+
+function claudeWebPrompt(buffer) {
+  const text = authPromptText(buffer);
+  const urls = text.match(/https:\/\/[^\s<>\"]+/g) || [];
+  const url = urls.find(value => {
+    try {
+      const parsed = new URL(value);
+      const endpoint = parsed.origin + parsed.pathname;
+      return ['https://claude.ai/oauth/authorize', 'https://claude.com/cai/oauth/authorize',
+        'https://platform.claude.com/oauth/authorize', 'https://console.anthropic.com/oauth/authorize'].includes(endpoint)
+        && parsed.searchParams.has('client_id') && parsed.searchParams.has('code_challenge');
+    } catch { return false; }
+  });
+  return { url: url || null, code: null, success: false };
+}
+
+function codexDevicePrompt(buffer) {
+  const text = authPromptText(buffer);
   return {
     url: text.match(/https:\/\/auth\.openai\.com\/codex\/device(?![\w/?#.-])/)?.[0] || null,
     code: text.match(/\b[A-Z0-9]{4}-[A-Z0-9]{5}\b/)?.[0] || null,
@@ -4807,7 +4827,8 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   if (isCatalogOperation) agentsAuthPanelRestartBtn.hidden = true;
   panelTitle.textContent = _authPanelTitle(harness, mode, model);
   panelTerm.innerHTML = '';
-  const deviceLogin = harness === 'codex' && mode === 'login';
+  const claudeLogin = harness === 'claudecode' && mode === 'login';
+  const deviceLogin = (harness === 'codex' || claudeLogin) && mode === 'login';
   const deviceUi = document.getElementById('codex-device-login');
   const deviceStatus = document.getElementById('codex-device-status');
   const deviceLink = document.getElementById('codex-device-link');
@@ -4815,6 +4836,45 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   const deviceCodeRow = document.getElementById('codex-device-code-row');
   const deviceCopy = document.getElementById('codex-device-copy');
   const deviceDetails = document.getElementById('codex-device-details');
+  const claudeCodeRow = document.getElementById('claude-login-code-row');
+  const claudeCodeInput = document.getElementById('claude-login-code');
+  const claudeCodeSubmit = document.getElementById('claude-login-submit');
+  claudeCodeRow.hidden = !claudeLogin;
+  claudeCodeInput.value = '';
+  claudeCodeInput.disabled = false;
+  claudeCodeSubmit.disabled = false;
+  deviceLink.textContent = claudeLogin ? 'Open Claude login page ↗' : 'Open activation page ↗';
+  claudeCodeSubmit.onclick = async () => {
+    const session = _authSession;
+    const code = claudeCodeInput.value.trim();
+    if (!code || !session?.id || session.term !== term || !session.running) return;
+    if (/[\r\n\x00-\x1f\x7f]/.test(code)) {
+      deviceStatus.textContent = 'Paste only the authorization code shown by Claude.';
+      return;
+    }
+    claudeCodeSubmit.disabled = true;
+    claudeCodeInput.disabled = true;
+    try {
+      const response = await fetch(`/auth/session/${session.id}/input`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: code + '\r' }),
+      });
+      if (_authSession !== session || !session.running) return;
+      if (!response.ok) throw new Error('Code submission failed');
+      claudeCodeInput.value = '';
+      deviceStatus.textContent = 'Code sent. Waiting for Claude to confirm login…';
+    } catch {
+      if (_authSession === session && session.running) deviceStatus.textContent = 'Could not send code. Try again or check terminal details.';
+    } finally {
+      if (_authSession === session && session.running) {
+        claudeCodeInput.disabled = false;
+        claudeCodeSubmit.disabled = false;
+      }
+    }
+  };
+  claudeCodeInput.onkeydown = event => {
+    if (event.key === 'Enter') { event.preventDefault(); if (!claudeCodeSubmit.disabled) claudeCodeSubmit.click(); }
+  };
   authPanel.classList.toggle('device-login', deviceLogin);
   authPanel.classList.remove('device-details');
   deviceUi.hidden = !deviceLogin;
@@ -4824,7 +4884,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   deviceCode.textContent = '';
   deviceCopy.textContent = 'Copy code';
   deviceCopy.disabled = false;
-  deviceStatus.textContent = 'Preparing device login…';
+  deviceStatus.textContent = claudeLogin ? 'Preparing Claude login…' : 'Preparing device login…';
   deviceDetails.textContent = 'Show terminal details';
   deviceDetails.setAttribute('aria-expanded', 'false');
   deviceDetails.onclick = () => {
@@ -4857,8 +4917,8 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   });
   term.open(panelTerm);
   if (deviceLogin) term.onWriteParsed(() => {
-    if (_authSession?.term !== term) return;
-    const prompt = codexDevicePrompt(term.buffer.active);
+    if (_authSession?.term !== term || !_authSession.running) return;
+    const prompt = claudeLogin ? claudeWebPrompt(term.buffer.active) : codexDevicePrompt(term.buffer.active);
     if (prompt.success) {
       // Leave xterm's parser callback before disposing its terminal. Codex has
       // saved credentials, but may still be exiting: do not cancel that process.
@@ -4868,6 +4928,9 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
     if (prompt.url) {
       deviceLink.href = prompt.url;
       deviceLink.hidden = false;
+      if (claudeLogin && _authSession.running && !claudeCodeInput.value && !claudeCodeSubmit.disabled) {
+        deviceStatus.textContent = 'Sign in using the link, then paste the full authorization code below, including any # suffix.';
+      }
     }
     if (prompt.code) {
       deviceCode.textContent = prompt.code;
@@ -4991,6 +5054,23 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
         // The process is gone, so it is now safe to fit the retained result
         // to the current viewport without sending SIGWINCH to ollama.
         fitTerminal();
+      } else if (deviceLogin) {
+        const session = _authSession;
+        const label = claudeLogin ? 'Claude' : 'Codex';
+        panelTitle.textContent = `Signed in to ${label} ✓`;
+        deviceStatus.textContent = `${label} login successful.`;
+        deviceLink.hidden = true;
+        deviceCodeRow.hidden = true;
+        claudeCodeRow.hidden = true;
+        panelRetryBtn.hidden = true;
+        // UI-only feedback: never submitted to the model or saved as a chat turn.
+        showCmdFeedback(`${label} login successful.${retry ? ' Retrying your request…' : ''}`)
+          .setAttribute('role', 'status');
+        session.loginSucceeded = true;
+        session.onLoginSuccessClose = retry;
+        session.successTimer = setTimeout(() => {
+          if (_authSession === session) closeAuthPanel({ cancelSession });
+        }, 800);
       } else {
         closeAuthPanel({ cancelSession });
         if (retry) retry();
@@ -5000,6 +5080,8 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
         deviceStatus.textContent = 'Login did not complete. Retry, or open terminal details for the error.';
         deviceLink.hidden = true;
         deviceCopy.disabled = true;
+        claudeCodeInput.disabled = true;
+        claudeCodeSubmit.disabled = true;
       }
       panelTitle.textContent = `Exited (${code})`;
       panelRetryBtn.hidden = false;
@@ -5163,13 +5245,14 @@ async function closeAuthPanel({ refreshCatalog = true, cancelSession = true } = 
   const session = _authSession;
   _authSession = null;
   if (session) {
+    clearTimeout(session.successTimer);
     session.stopCompletionMonitor?.();
     if (session.handleResize) window.removeEventListener('resize', session.handleResize);
     if (session.es) session.es.close();
     if (session.transport === 'ws') realtimeV1?.clearAuth();
     // The endpoint only signals a running child; for a completed session it
     // simply releases the retained server-side replay buffer immediately.
-    if (session.id && cancelSession) {
+    if (session.id && cancelSession && !session.loginSucceeded) {
       if (session.transport === 'ws') realtimeV1?.authSend('auth.cancel', { session_id: session.id });
       else fetch(`/auth/session/${session.id}/cancel`, { method: 'POST' }).catch(() => {});
     }
@@ -5183,6 +5266,7 @@ async function closeAuthPanel({ refreshCatalog = true, cancelSession = true } = 
     if (refreshCatalog && typeof loadAgents === 'function') loadAgents();
   }
   form.classList.remove('dimmed');
+  session?.onLoginSuccessClose?.();
 }
 
 authPanelCancelBtn.addEventListener('click', () => closeAuthPanel());

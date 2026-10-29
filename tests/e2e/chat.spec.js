@@ -3979,6 +3979,8 @@ test.describe('recovered pending responses', () => {
 
 // ── CLI auth panel transport (ADR-0040 step 1) ───────────────────────────────
 
+test.describe('Claude web login', () => {
+  test.use({ serviceWorkers: 'block' });
 test('websocket transport drives the auth panel over WS without POST /auth/session', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => {
@@ -4015,6 +4017,12 @@ test('websocket transport drives the auth panel over WS without POST /auth/sessi
   });
   await mockBackend(page);
   await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  await page.route('**/auth/session/sess-1', route => route.fulfill({ json: { state: 'running', returncode: null } }));
+  let submittedCode;
+  await page.route('**/auth/session/sess-1/input', route => {
+    submittedCode = route.request().postDataJSON().data;
+    return route.fulfill({ json: { ok: true } });
+  });
   let httpAuthRequests = 0;
   await page.route('**/auth/session', route => {
     httpAuthRequests++;
@@ -4031,6 +4039,20 @@ test('websocket transport drives the auth panel over WS without POST /auth/sessi
   expect(typeof start.request_id).toBe('string');
   expect(start.request_id.length).toBeGreaterThan(0);
 
+  await page.evaluate(() => window.__ws.receive({ v: 1, type: 'auth.output', payload: {
+    session_id: 'sess-1', data: btoa('https://claude.com/cai/oauth/authorize?client_id=test&code_challenge=test&state=test\r\nPaste code here if prompted > '),
+  } }));
+  const loginLink = page.locator('#codex-device-link');
+  await expect(loginLink).toBeVisible();
+  await expect(loginLink).toHaveAttribute('target', '_blank');
+  await expect(loginLink).toHaveAttribute('href', 'https://claude.com/cai/oauth/authorize?client_id=test&code_challenge=test&state=test');
+  await page.locator('#claude-login-code').fill('code#state');
+  await page.locator('#claude-login-submit').click();
+  await expect.poll(() => submittedCode).toBe('code#state\r');
+  await expect(page.locator('#claude-login-code')).toHaveValue('');
+  await expect(page.locator('#auth-panel-keypad')).not.toBeVisible();
+  await page.locator('#codex-device-details').click();
+
   const keypad = page.locator('#auth-panel-keypad');
   await expect(keypad).toBeVisible();
   await keypad.getByRole('button', { name: 'Escape' }).click();
@@ -4042,13 +4064,16 @@ test('websocket transport drives the auth panel over WS without POST /auth/sessi
     .toEqual(['\x1b', '\x1b[A', '\x1b[B', '\r']);
 
   // Streamed output + done arrive over the socket; a clean exit (0) on the
-  // login flow closes the panel, which in turn cancels the WS session.
+  // login flow shows confirmation and closes without cancelling the CLI.
   await page.evaluate(() => {
     window.__ws.receive({ v: 1, type: 'auth.output', payload: { session_id: 'sess-1', data: btoa('login output') } });
     window.__ws.receive({ v: 1, type: 'auth.done', payload: { session_id: 'sess-1', returncode: 0 } });
   });
   await expect(page.locator('#auth-panel')).not.toHaveClass(/open/);
-  await page.waitForFunction(() => window.__authFrames.some(f => f.type === 'auth.cancel'));
+  await expect(page.locator('.cmd-feedback').filter({ hasText: 'Claude login successful.' })).toHaveCount(1);
+  expect(await page.evaluate(() => window.__authFrames.some(f => f.type === 'auth.cancel'))).toBe(false);
+});
+
 });
 
 test('foreground resume() resends the live auth.start so the server can re-attach', async ({ page }) => {
