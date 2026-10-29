@@ -4733,6 +4733,53 @@ function _setCatalogOperationBusy(busy) {
   });
 }
 
+// Read the rendered buffer so ANSI styling and URLs wrapped across PTY rows
+// never leak into the device-code UI. Unknown output stays available in details.
+function codexDevicePrompt(buffer) {
+  let text = '';
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    if (!line) continue;
+    text += (line.isWrapped ? '' : '\n') + line.translateToString(true);
+  }
+  return {
+    url: text.match(/https:\/\/auth\.openai\.com\/codex\/device(?![\w/?#.-])/)?.[0] || null,
+    code: text.match(/\b[A-Z0-9]{4}-[A-Z0-9]{5}\b/)?.[0] || null,
+    success: /(?:^|\n)\s*Successfully logged in[.!]?\s*(?:\n|$)/.test(text),
+  };
+}
+
+// Recover completion even if the browser suspended the auth event stream.
+function monitorDeviceLogin(session, finishExit) {
+  let checking = false;
+  const check = async () => {
+    if (checking || document.hidden || _authSession !== session || !session.running) return;
+    checking = true;
+    try {
+      const response = await fetch(`/auth/session/${session.id}`, { cache: 'no-store' });
+      if (_authSession !== session || !session.running) return;
+      if (response.status === 404) {
+        finishExit(-1); // An expired session is not proof of successful login.
+      } else if (response.ok) {
+        const status = await response.json();
+        if (_authSession === session && session.running && status.state === 'exited') {
+          finishExit(status.returncode == null ? -1 : Number(status.returncode));
+        }
+      }
+    } catch { /* A temporary disconnect is retried on focus or the next tick. */ }
+    finally { checking = false; }
+  };
+  const timer = setInterval(check, 3000);
+  window.addEventListener('focus', check);
+  document.addEventListener('visibilitychange', check);
+  session.stopCompletionMonitor = () => {
+    clearInterval(timer);
+    window.removeEventListener('focus', check);
+    document.removeEventListener('visibilitychange', check);
+  };
+  check();
+}
+
 async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   const mode = opts.mode || 'login';
   const model = opts.model || null;
@@ -4760,6 +4807,39 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   if (isCatalogOperation) agentsAuthPanelRestartBtn.hidden = true;
   panelTitle.textContent = _authPanelTitle(harness, mode, model);
   panelTerm.innerHTML = '';
+  const deviceLogin = harness === 'codex' && mode === 'login';
+  const deviceUi = document.getElementById('codex-device-login');
+  const deviceStatus = document.getElementById('codex-device-status');
+  const deviceLink = document.getElementById('codex-device-link');
+  const deviceCode = document.getElementById('codex-device-code');
+  const deviceCodeRow = document.getElementById('codex-device-code-row');
+  const deviceCopy = document.getElementById('codex-device-copy');
+  const deviceDetails = document.getElementById('codex-device-details');
+  authPanel.classList.toggle('device-login', deviceLogin);
+  authPanel.classList.remove('device-details');
+  deviceUi.hidden = !deviceLogin;
+  deviceLink.hidden = true;
+  deviceLink.removeAttribute('href');
+  deviceCodeRow.hidden = true;
+  deviceCode.textContent = '';
+  deviceCopy.textContent = 'Copy code';
+  deviceCopy.disabled = false;
+  deviceStatus.textContent = 'Preparing device login…';
+  deviceDetails.textContent = 'Show terminal details';
+  deviceDetails.setAttribute('aria-expanded', 'false');
+  deviceDetails.onclick = () => {
+    const expanded = authPanel.classList.toggle('device-details');
+    deviceDetails.textContent = expanded ? 'Hide terminal details' : 'Show terminal details';
+    deviceDetails.setAttribute('aria-expanded', String(expanded));
+    if (expanded) requestAnimationFrame(fitTerminal);
+  };
+  deviceCopy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(deviceCode.textContent);
+      deviceCopy.textContent = 'Copied';
+    } catch { deviceStatus.textContent = 'Could not copy. Select and copy the code manually.'; }
+  };
+
 
   const term = new Terminal({
     convertEol: true,
@@ -4776,6 +4856,27 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
     theme: { background: '#13131c' },
   });
   term.open(panelTerm);
+  if (deviceLogin) term.onWriteParsed(() => {
+    if (_authSession?.term !== term) return;
+    const prompt = codexDevicePrompt(term.buffer.active);
+    if (prompt.success) {
+      // Leave xterm's parser callback before disposing its terminal. Codex has
+      // saved credentials, but may still be exiting: do not cancel that process.
+      queueMicrotask(() => finishExit(0, { cancelSession: false }));
+      return;
+    }
+    if (prompt.url) {
+      deviceLink.href = prompt.url;
+      deviceLink.hidden = false;
+    }
+    if (prompt.code) {
+      deviceCode.textContent = prompt.code;
+      deviceCodeRow.hidden = false;
+    }
+    if (prompt.url && prompt.code && _authSession.running) {
+      deviceStatus.textContent = 'Open the activation page and enter this code. Finish signing in, then return here. Waiting for approval…';
+    }
+  });
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   // Compat shim: addon-fit reads `_core.viewport.scrollBarWidth`, but the
@@ -4808,7 +4909,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   // Focusing xterm opens the software keyboard on phones, collapsing the
   // viewport until only the first terminal line is visible. Mobile login
   // pickers use the dedicated navigation keypad below the terminal instead.
-  if (!window.matchMedia('(max-width: 768px)').matches) term.focus();
+  if (!deviceLogin && !window.matchMedia('(max-width: 768px)').matches) term.focus();
 
   // Make URLs clickable — avoids macOS "open with" system modal.
   term.registerLinkProvider({
@@ -4870,8 +4971,9 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   _authSession = { id: null, harness, mode, model, panel, panelTitle, panelTerm,
     panelRetryBtn, anchor, term, fitAddon, handleResize, onSuccessRetry, running: true };
 
-  const finishExit = (code) => {
-    if (!_authSession) return;
+  const finishExit = (code, { cancelSession = true } = {}) => {
+    if (_authSession?.term !== term || !_authSession.running) return;
+    _authSession.stopCompletionMonitor?.();
     _authSession.running = false;
     if (isCatalogOperation) _setCatalogOperationBusy(false);
     if (code === 0) {
@@ -4890,10 +4992,15 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
         // to the current viewport without sending SIGWINCH to ollama.
         fitTerminal();
       } else {
-        closeAuthPanel();
+        closeAuthPanel({ cancelSession });
         if (retry) retry();
       }
     } else {
+      if (deviceLogin) {
+        deviceStatus.textContent = 'Login did not complete. Retry, or open terminal details for the error.';
+        deviceLink.hidden = true;
+        deviceCopy.disabled = true;
+      }
       panelTitle.textContent = `Exited (${code})`;
       panelRetryBtn.hidden = false;
       if (isCatalogOperation) {
@@ -4956,6 +5063,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
       if (!isApiOperation) term.write(`$ ${data.command}\r\n\r\n`);
       _authSession = { id: data.session_id, harness, mode, model, panel, panelTitle, panelTerm,
         panelRetryBtn, anchor, term, fitAddon, handleResize, onSuccessRetry, running: true, transport: 'ws' };
+      if (deviceLogin) monitorDeviceLogin(_authSession, finishExit);
       term.onData(input => {
         if (!_authSession?.id) return;
         realtimeV1.authSend('auth.input', { session_id: _authSession.id, data: input });
@@ -4969,6 +5077,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
       term.write(((data.detail || data.error) || 'Failed to start').replace(/\n/g, '\r\n'));
       // Keep the title short and stable — the full detail lives in the
       // terminal body above, not the panel header.
+      if (deviceLogin) deviceStatus.textContent = 'Could not start login. Open terminal details for the error.';
       panelTitle.textContent = 'Failed to start';
       panelRetryBtn.hidden = false;
       _authSession.running = false;
@@ -4984,6 +5093,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
     realtimeV1.clearAuth();
     if (transportMode === 'websocket' || (authError && authError.realtimeCommandResult)) {
       term.write('Failed to start'.replace(/\n/g, '\r\n'));
+      if (deviceLogin) deviceStatus.textContent = 'Could not start login. Open terminal details for the error.';
       panelTitle.textContent = 'Failed to start';
       panelRetryBtn.hidden = false;
       _authSession.running = false;
@@ -5013,6 +5123,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   }
   if (!res || !res.ok) {
     term.write(((data.detail || data.error) || 'Failed to start').replace(/\n/g, '\r\n'));
+    if (deviceLogin) deviceStatus.textContent = 'Could not start login. Open terminal details for the error.';
     panelTitle.textContent = 'Failed to start';
     panelRetryBtn.hidden = false;
     _authSession.running = false;
@@ -5025,6 +5136,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   _authSession = { id: data.id, harness, mode, model, panel, panelTitle, panelTerm,
     panelRetryBtn, anchor, es, term, fitAddon, handleResize, onSuccessRetry, running: true, transport: 'sse' };
 
+  if (deviceLogin) monitorDeviceLogin(_authSession, finishExit);
   es.addEventListener('data', event => {
     try {
       const bytes = base64ToBytes(event.data);
@@ -5047,16 +5159,17 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   });
 }
 
-async function closeAuthPanel({ refreshCatalog = true } = {}) {
+async function closeAuthPanel({ refreshCatalog = true, cancelSession = true } = {}) {
   const session = _authSession;
   _authSession = null;
   if (session) {
+    session.stopCompletionMonitor?.();
     if (session.handleResize) window.removeEventListener('resize', session.handleResize);
     if (session.es) session.es.close();
     if (session.transport === 'ws') realtimeV1?.clearAuth();
     // The endpoint only signals a running child; for a completed session it
     // simply releases the retained server-side replay buffer immediately.
-    if (session.id) {
+    if (session.id && cancelSession) {
       if (session.transport === 'ws') realtimeV1?.authSend('auth.cancel', { session_id: session.id });
       else fetch(`/auth/session/${session.id}/cancel`, { method: 'POST' }).catch(() => {});
     }

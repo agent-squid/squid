@@ -1699,6 +1699,17 @@ async def auth_session_create(req: AuthSessionRequest, request: Request):
     })
 
 
+@app.get("/auth/session/{session_id}")
+async def auth_session_status(session_id: str):
+    from .auth_sessions import get_session
+
+    session = get_session(session_id)
+    if not session:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"state": session.state, "returncode": session.returncode},
+                        headers={"Cache-Control": "no-store"})
+
+
 @app.get("/auth/session/{session_id}/events")
 async def auth_session_events(session_id: str):
     from .auth_sessions import get_session, stream_events

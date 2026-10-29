@@ -5896,3 +5896,23 @@ mark.search-kw-highlight {
 
 
 }
+
+/* Keep the terminal measurable while the device login controls are shown. */
+#auth-panel.device-login:not(.device-details) #auth-panel-term {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  width: min(480px, 80vw);
+}
+#auth-panel.device-login:not(.device-details) #auth-panel-keypad { display: none; }
+#codex-device-login { padding: 0.8rem; color: var(--text); }
+#codex-device-login[hidden], #codex-device-login [hidden] { display: none; }
+#codex-device-status { margin: 0 0 0.75rem; }
+#codex-device-link { display: inline-block; color: var(--accent-light); padding: 0.5rem 0; }
+#codex-device-code-row { display: flex; align-items: center; gap: 0.75rem; margin: 0.5rem 0; }
+#codex-device-code { font-size: 1.35rem; user-select: all; }
+#codex-device-login button {
+  padding: 0.5rem 0.65rem; background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px; cursor: pointer;
+}
+#codex-device-details { margin-top: 0.5rem; }

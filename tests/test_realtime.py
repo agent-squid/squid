@@ -1411,3 +1411,17 @@ def test_ws_sender_reports_send_after_close_as_disconnect():
             await asyncio.wait_for(server._ws_sender(ClosedSocket(), outbound), timeout=1)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("state,returncode", [("running", None), ("exited", 0), ("exited", 1)])
+def test_auth_status_recovers_completion_without_event_stream(monkeypatch, state, returncode):
+    session = auth_sessions.AuthSession("status-test", "codex", 99999, -1, "codex login --device-auth")
+    session.state = state
+    session.returncode = returncode
+    monkeypatch.setattr(auth_sessions, "_sessions", {session.id: session})
+    client = TestClient(server.app)
+    response = client.get(f"/auth/session/{session.id}")
+    assert response.status_code == 200
+    assert response.json() == {"state": state, "returncode": returncode}
+    assert response.headers["cache-control"] == "no-store"
+    assert client.get("/auth/session/missing").status_code == 404
