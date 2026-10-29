@@ -8,7 +8,7 @@ Instead we maintain it as a real directory and rsync into it.
 Strategy (Option 4):
   - sync_now()   — blocking full sync; call once at daemon startup
   - maybe_sync() — async stat-check; call before each prompt; only rsyncs
-                   when context/ has changed since the last sync
+                   when context/ has changed or the destination is missing
 """
 
 import asyncio
@@ -144,13 +144,15 @@ def sync_now() -> None:
 
 
 async def maybe_sync() -> None:
-    """Async stat-check before each prompt. No-op when nothing changed."""
+    """Sync changed context, restoring the destination after tmp cleanup."""
     global _last_sync_mtime
     loop = asyncio.get_event_loop()
     current = await loop.run_in_executor(None, _tree_mtime, CONTEXT_DIR)
-    if current <= _last_sync_mtime:
+    destination_missing = not os.path.isdir(SQUID_HOME)
+    if current <= _last_sync_mtime and not destination_missing:
         return
-    log.info("context changed, resyncing → %s", SQUID_HOME)
+    os.makedirs(SQUID_HOME, exist_ok=True)
+    log.info("context changed or destination missing, resyncing → %s", SQUID_HOME)
     proc = await asyncio.create_subprocess_exec(
         "rsync", "-a", "--delete", f"{CONTEXT_DIR}/", SQUID_HOME,
         stdout=asyncio.subprocess.DEVNULL,

@@ -1,6 +1,43 @@
+import asyncio
 import json
+import shutil
 
 from agent import context_sync
+
+
+def test_maybe_sync_restores_deleted_destination(tmp_path, monkeypatch):
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "instructions.md").write_text("context content")
+    squid_home = tmp_path / "temporary" / "squid"
+    monkeypatch.setattr(context_sync, "CONTEXT_DIR", str(context_dir))
+    monkeypatch.setattr(context_sync, "SQUID_HOME", str(squid_home))
+    monkeypatch.setattr(context_sync, "_last_sync_mtime", 0.0)
+
+    context_sync.sync_now()
+    original_mtime = context_sync._last_sync_mtime
+    shutil.rmtree(squid_home.parent)
+
+    asyncio.run(context_sync.maybe_sync())
+
+    assert (squid_home / "instructions.md").read_text() == "context content"
+    assert context_sync._last_sync_mtime == original_mtime
+
+
+def test_maybe_sync_skips_unchanged_existing_destination(tmp_path, monkeypatch):
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    squid_home = tmp_path / "home"
+    squid_home.mkdir()
+    monkeypatch.setattr(context_sync, "CONTEXT_DIR", str(context_dir))
+    monkeypatch.setattr(context_sync, "SQUID_HOME", str(squid_home))
+    monkeypatch.setattr(context_sync, "_last_sync_mtime", 0.0)
+
+    async def unexpected_subprocess(*args, **kwargs):
+        raise AssertionError("Unchanged context should not trigger rsync")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_subprocess)
+    asyncio.run(context_sync.maybe_sync())
 
 
 def _sync_with_context(tmp_path, monkeypatch):
