@@ -131,7 +131,7 @@ Persist three entities alongside the existing execution store:
 - **Watch run:** a claimed event batch, dispatch key, attempt, linked chat
   message IDs, expected head SHA, outcome, and any publication state.
 
-Watch states are `proposed`, `active`, `paused`, `completed`, and `cancelled`.
+Watch states are `proposed`, `active`, `paused`, `expired`, `completed`, and `cancelled`.
 Waiting and running are observable execution phases of an active watch. A
 completed agent turn does not complete its watch. Pause stops new dispatch;
 cancel also prevents future monitoring. Stopping an already-running turn uses
@@ -155,6 +155,34 @@ before retrying. A crashed process does not prove an action did not happen.
 Guarantee durable ingestion and idempotent dispatch identity; do not promise
 exactly-once external side effects. Ambiguous publishing outcomes require
 remote-state reconciliation before another attempt.
+
+### Generic observation probes
+
+A source-specific plugin is optional. Register either an executable argv or a
+server/tool pair on an existing central MCP service. Executables use existing
+unattended host authentication; MCP uses a server-owned authenticated client.
+Registration is trusted configuration, not arbitrary shell text from a watch.
+Source access does not grant authority to act on detected changes.
+
+Both transports accept `{target, cursor}` and return a bounded JSON object:
+`{revision, changed?, summary?, url?, closed?}`. A provider wrapper maps raw
+output into this contract. Revisions identify immutable source versions, including
+comment edits and run attempts. Recurring labels (`ci:fail`) and content hashes
+alone are insufficient: a later occurrence needs its own source version/attempt
+ID. Re-observing an old version is a replay and retains its original event key.
+Hashing previous plus current status does not distinguish repeated cycles.
+Status-only probes without occurrence identities are not supported. Initial snapshots establish a quiet baseline
+unless `changed: true` explicitly identifies actionable current state. Later
+revision changes generate deterministic deduplicated events; `changed: false`
+advances the baseline without dispatch. Adapters needing lossless individual
+comments must reconcile pagination/history before returning a new revision;
+snapshot comparison alone does not promise every intermediate change.
+
+Polling uses no LLM. One central MCP service can cover Linear, Graphite, and
+other sources through registered probes. Source-specific adapters remain useful
+for richer predicates, completeness, and reconciliation. The ordinary request
+turn resolves ambiguous corporate task references with its available context
+and tools, then registers a canonical target and concrete handling scope.
 
 ### Poll first, enqueue only actionable changes
 
@@ -228,6 +256,13 @@ burst of missed periodic actions: coalesce to the current valid generation.
 Repeating rules specify their next anchor and cannot create unbounded
 immediate retries.
 
+Use a configurable 24-hour default watch lifetime, bounded by server policy.
+Explicit expiry overrides the default. Return the absolute expiry in registration
+responses; retries preserve it rather than extending the window. Downtime does
+not extend expiry. Restart reclaims abandoned polling leases, reconciles current
+state since the saved cursor, and coalesces missed intervals into one poll.
+Pending events remain durable; run recovery follows linked turn identities.
+
 Watch expiry (`expires_at`) stops monitoring and new dispatch; it is distinct
 from a rule that changes an external request to an expired state. The latter
 requires explicit mutation permission and a successful recorded action. At
@@ -287,7 +322,7 @@ observations and actions. Autonomous publication
 requires the separate sync/commit/push stage above. Until then, expose any
 released capability accurately as monitoring or local work only.
 
-Linear issue adapters, inbound webhooks (potentially through Shore),
+Dedicated Linear issue adapters, inbound webhooks (potentially through Shore),
 multiple targets per watch, distributed workers, automatic merge,
 and general-purpose cron scheduling are later work. All adapters must feed
 the same durable event and authorization boundary.
@@ -326,3 +361,28 @@ tests cover no-response expiry, qualifying and nonqualifying activity, exact
 boundary and late responses, source outages, timeout/response races, generation
 resets, restart with overdue work, pause/resume, repeated rules, coalesced
 catch-up, watch expiry versus external expiry, and cancellation before mutation.
+
+## Implementation progress (2026-10-30)
+
+Delivery status: **partial implementation, unavailable to users**. The internal
+observation core is complete for its current scope; the full watch lifecycle
+is not complete. Restarting the server does not start monitoring or handling
+comments. Keep ADR status `proposed`; internal scaffolding does not satisfy
+this ADR's end-to-end verification requirements.
+
+The durable internal store/loop and review fixes are implemented, including
+operation-key replay, cursor preservation, failure reset, idle lock avoidance,
+and pause reasons. `agent/watch_probes.py` adds bounded executable probes and
+an injected MCP-client bridge with one normalized revision contract. Creation
+defaults to 24 hours and retries preserve the original expiry.
+
+These components are internal: production registry/configuration, a concrete
+MCP transport/client, grants, API/CLI, lifespan startup, durable run dispatch,
+and publication remain pending. No user-facing automatic watch is enabled.
+
+Probe timeout handling supports the declared Python 3.10 minimum via
+`asyncio.wait_for`. Loop registration validates that the probe timeout plus
+the one-second cleanup allowance is strictly below the loop timeout. Cleanup
+kills the process group and closes pipes on timeout or cancellation; detached
+descendants cannot hold cleanup open indefinitely. Event validation uses the
+same JSON encoding and 64 KiB payload limit as persistence.

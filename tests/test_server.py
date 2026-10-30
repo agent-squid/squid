@@ -21,6 +21,14 @@ from agent import providers as providers_mod
 from agent.providers import Gauge, Provider
 
 
+@pytest.fixture(autouse=True)
+def _isolated_worktrees(tmp_path, monkeypatch):
+    # Temporary repos can reuse paths across test runs. Their turn directories
+    # must have the same lifetime, rather than reusing ~/.squid leftovers whose
+    # hidden base refs belonged to a previous repository.
+    monkeypatch.setattr(worktree_mod, "_WORKTREES_HOME", tmp_path / "worktrees")
+
+
 def _config_yaml(root: Path) -> str:
     return f'''# retained comment
 server:

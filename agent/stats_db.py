@@ -1006,8 +1006,14 @@ def get_active_durable_flow_run_ids() -> list[str]:
 def init_db() -> None:
     conn = _connect()
     try:
-        for ddl in _TABLES:
+        from .watches import SCHEMA as watch_schema
+        for ddl in (*_TABLES, *watch_schema):
             conn.execute(ddl)
+        if "pause_reason" not in _table_columns(conn, "watches"):
+            conn.execute("ALTER TABLE watches ADD COLUMN pause_reason TEXT")
+            conn.execute("""UPDATE watches SET pause_reason=
+                CASE WHEN failures>=5 THEN 'poll_failures' ELSE 'manual' END
+                WHERE status='paused'""")
         flow_run_columns = _table_columns(conn, "flow_runs")
         if "execution_mode" not in flow_run_columns:
             # All pre-cutover plans were executed by the transcript scheduler.

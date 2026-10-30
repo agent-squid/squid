@@ -1,12 +1,83 @@
 # Implementation plan: transparent context, shared tools, and persistent watches
 
-Status: proposed implementation plan. Updated: 2026-10-30.
+Status: implementation in progress. Updated: 2026-10-30.
 
 Design authorities: [ADR-0046](../decisions/0046-layered-runtime-and-user-context-injection.md)
 and [ADR-0053](../decisions/0053-persistent-watches-and-shared-agent-tools.md).
 Neither ADR nor this plan implies the capabilities already exist. Names for
 new files, endpoints, tables, and flags below are proposed contracts. Existing
 symbol names are navigation anchors, not promises about their final placement.
+
+## Progress (2026-10-30)
+
+- Milestone 1 runtime foundation complete: packaged templates, strict startup
+  validation and caching, typed blocks, assembly after worktree resolution,
+  compatibility helpers, and exact prompt parity. Focused verification: 80
+  tests passed, 144 execution combinations matched prior prompts, wheel
+  templates rendered successfully. Restart validated through `/health`.
+- Milestone 1 remaining: unified optional-layer assembly and global user-context
+  inheritance. Cadence selection is implemented and tested; production runtime
+  templates use every-turn and do not yet use delivery-history persistence.
+- Milestone 4 started independently of milestone 3: internal durable observation
+  store and bounded polling loop in `agent/watches.py`. Includes idempotent
+  proposals, versioned transitions, leases, atomic cursor/event ingestion,
+  deduplication, expiry, bounded retries/backoff, and pause after five errors.
+  Review fixes preserve cursors on empty observations, reset the failure budget
+  on resume/activation, distinguish manual/error pauses, and avoid idle write
+  locks. Lifecycle operation keys replay the original result even after later
+  transitions; unkeyed requests still enforce versions. Creation keys remain
+  reserved for the lifetime of the row; new watches require new keys. Adapter
+  event keys must include source revisions/attempts. Diagnostics log only the
+  error type and watch ID, never raw exception text.
+  Verification: 155 context/memory/queue/Flow/watch tests passed, including
+  fake-clock expiry/backoff, simultaneous claims, interrupted-poll recovery,
+  and transaction rollback. No production adapter is registered and
+  no server task starts this loop: watches are not available to users yet.
+- Generic probe foundation implemented in `agent/watch_probes.py`: registered
+  executable argv with JSON stdin, bounded output, timeout/cancellation cleanup,
+  and an injected server-owned MCP client using the same revision contract.
+  First snapshots baseline quietly unless explicitly actionable; immutable
+  revision keys deduplicate repeats. Unknown/malformed output fails the poll.
+  Internal creation now defaults to 24 hours; idempotent retries retain expiry.
+  This is an MCP client bridge, not a shipped MCP transport or user registration.
+  Verification: 70 probe/watch/context tests passed, including executable limits,
+  timeout cleanup, MCP argument routing, restart deduplication, and expiry retries.
+- Probe review fixes: shared storage-size validation, process-group cleanup with
+  bounded pipe draining and cancellation-safe closure, Python 3.10-compatible
+  timeouts, and registration checks reserving cleanup time within the loop
+  timeout. Revision semantics explicitly require source versions/attempt IDs;
+  status-only cycles are unsupported. Focused verification: 78 tests passed on
+  Python 3.10, including recurring statuses with distinct attempt identities.
+- Next watch slice: trusted probe configuration/registry and concrete MCP client;
+  policy/grants and scoped service/API/CLI (milestone 3),
+  lifecycle wiring and authorized dispatch through the normal topic queue.
+  Pending events are retained, not acknowledged or dispatched by this slice.
+- Milestones 2 and 5–8 remain unimplemented. No automatic publication is enabled.
+
+## Watch completion boundary
+
+The internal observation core is complete for its current scope; milestone 4
+and the user-facing watch feature are **not complete**. Restarting Squid does
+not enable watches: `_lifespan` does not start `WatchLoop`, no production probe
+registry is loaded, and pending events have no agent dispatch consumer.
+
+| Component | Current status |
+| --- | --- |
+| Durable watch store, claims, expiry, retries, cursor/event ingestion | Implemented and unit-tested |
+| Executable probes and injected MCP-client bridge | Implemented and unit-tested |
+| Python 3.10/3.11 compatibility and review regressions | 78 focused tests passed on each runtime |
+| Trusted probe configuration and concrete MCP transport/client | Pending |
+| Policy/grants, scoped service, API/CLI registration | Pending |
+| Server lifespan startup/shutdown wiring | Pending |
+| Durable run batching, queue dispatch, acknowledgement and recovery | Pending |
+| Real-server restart and end-to-end automatic handling | Not verified; requires the pending wiring |
+
+Next completion target: register one authorized watch through the service,
+observe a source change, dispatch one ordinary topic turn, acknowledge its
+captured events on success, restart the server, and verify continued polling
+without duplicated work. Verify restart through `/health` or `BOOT_TIME`.
+Keep the feature disabled until this vertical slice passes; do not mark the
+whole milestone complete based on internal polling tests.
 
 ## Delivery order and dependencies
 
@@ -34,7 +105,8 @@ working vertical slice and recovery tests pass.
 ## Existing implementation touchpoints
 
 - `agent/memory.py`: `oneshot_protocol_prompt_block`,
-  `code_roots_prompt_block`, and `topic_memory_prompt_block` own current wording.
+  `code_roots_prompt_block`, and `topic_memory_prompt_block` provide compatibility/topic helpers; runtime wording
+  lives in `agent/runtime/` and is assembled by `agent/context.py`.
 - `agent/server.py`: `_prepare_chat_turn` prepares context and messages;
   `stream_response` dispatches normal work; `_lifespan` owns maintenance tasks.
 - `agent/topic_queue.py`: `TopicDispatcher`, queue items, and worktree setup
@@ -193,6 +265,21 @@ timeouts, jitter/backoff, and cancellation on shutdown. Persist due times;
 sleeping tasks are wakeup optimizations. Conditional claims/leases protect
 against overlapping ticks. Support the current single-server deployment;
 this is not a distributed worker rollout.
+
+### Generic probes before dedicated adapters
+
+Use the implemented Probe/ProbeAdapter contract for local authenticated binaries
+and central MCP services. Register read-only operations with fixed argv or
+server/tool, timeout, output limit, and provider-to-contract mapping. Add trusted
+configuration validation and a concrete MCP client that unwraps structuredContent
+and rejects isError. Never expose arbitrary watch-supplied shell commands.
+Test actual transport reconnection/authentication before claiming MCP support.
+
+Finish service expiry policy: configurable 24-hour default/max and absolute
+expiry in responses; the internal store already implements the default and
+retry preservation. Downtime never renews the lifetime. Expiry must block new
+dispatch and publication; pending-event disposition and running-turn behavior
+still need dispatch integration.
 
 ### PR observation and execution
 
