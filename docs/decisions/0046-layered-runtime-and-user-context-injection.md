@@ -1,6 +1,7 @@
 ---
 status: proposed
 date: 2026-09-01
+updated: 2026-10-30
 ---
 # ADR-0046: Layered Runtime and User Context Injection
 
@@ -106,6 +107,12 @@ memory for the current request; it does not need to create a generated
 Markdown file in each worktree. An optional rendered snapshot is an audit or
 debug artifact, never a second source of truth.
 
+Squid-specific instruction wording currently embedded in Python moves into
+these templates. Python still computes execution facts and enforces policy;
+editable memory is not the enforcement mechanism. Global user preferences
+remain separate from Squid-owned runtime context, even when both apply to all
+topics.
+
 ### Declarative metadata
 
 Each runtime template has validated frontmatter. For example:
@@ -183,20 +190,47 @@ present in the effective request for every harness.
 Session-resumed agents still receive `every-turn` blocks. This is necessary
 for current execution facts such as a newly isolated worktree and for one-shot
 process lifecycle guidance. `session-start` blocks rely on session continuity
-and are reinjected when their revision changes.
+and are reinjected when their revision changes. Also reinject after a known
+context reset or compaction that may have removed them. If a harness cannot
+reliably report continuity, use a minimal discovery reminder rather than
+assuming remembered capabilities. Stateless turns are session starts; the
+cadence does not imply persistence inside a one-shot process.
 
 ### Visibility and audit
 
 The composer shows optional user context and topic memory as removable context.
 Required runtime blocks are not presented as removable chips. Turn details
-provide a **Runtime context** disclosure listing each applicable block with a
-plain cadence label such as `required · every turn`.
+provide a **View added context** disclosure covering all delivered layers,
+with source, ownership, revision, cadence, inclusion reason, and delivery
+channel. Users can inspect Squid-added wording even when a harness receives it
+through a system-prompt parameter rather than the main prompt.
 
-For each turn, Squid records enough information to establish what was actually
-injected, including block IDs, source/template revisions, cadence, and rendered
-hashes. Exact rendered text may also be retained where replay or debugging
-requires it. Eligibility alone is not an audit record; the record reflects the
-blocks actually delivered.
+Record what was actually delivered, not merely which blocks were eligible.
+The disclosure distinguishes exact text available for this turn from current
+source text that has changed; it must never label a live replacement as the
+original prompt. Historical reconstruction follows the storage policy below.
+Credentials and secret environment values are excluded from context and its
+viewer.
+
+### Shared skills and tool discovery
+
+Use ADR-0053's centrally configured tool registry for executable capabilities;
+context does not register tools. Global and topic user context can describe
+workflow preferences, but cannot grant server permissions or store active watch
+state. Reuse the same layer selection and cadence machinery for any fallback
+discovery hint; do not create independent watch-specific session tracking.
+
+Publish one shared skill with a concise name/description to harnesses with
+supported skill discovery. Load full workflow instructions on demand. Skill
+frontmatter enables discovery, not guaranteed invocation or authorization.
+Harness adapters deliver enabled MCP tools through their native configuration
+where supported, with shell CLI access as fallback. Do not append complete
+schemas or skill bodies to every prompt. If discovery needs a textual entry
+point, use one short shared hint such as `agentsquid tools --help`, following
+the declared cadence. Native tool schemas and skill descriptions still consume
+context; report their delivery separately from injected prose where observable.
+The viewer must distinguish server-known configuration from tool content the
+harness loads internally and Squid cannot observe.
 
 ### Connector classes and layer eligibility
 
@@ -223,8 +257,8 @@ harness-resolution time, before block selection runs.
 
 ### Audit surfacing without snapshot storage
 
-Turn details must let a user see what was actually sent (Decision Drivers:
-"deterministic, auditable, and testable") without duplicating layer content
+Turn details must identify what was actually sent and expose available text
+without duplicating layer content
 into every referencing turn. The mechanism is a live link per block, not a
 stored rendered copy, following the pattern already shipped for topic memory
 (a `mem` flag plus content-hash revision, linking to current memory content)
@@ -252,7 +286,10 @@ This keeps the audit trail's storage cost close to zero regardless of how
 often a turn is revisited, at the cost of exact historical wording becoming
 unavailable once a user-owned layer is edited or a runtime template ships a
 new revision — acceptable because the audit goal is "what was sent and is it
-still current," not permanent replay.
+still current," not permanent replay. When the stored revision still matches, the viewer
+shows exact reconstructed runtime text; otherwise it clearly marks historical
+text unavailable and offers the current source separately. Apply the same
+changed/unavailable distinction to edited attachments or missing sources.
 
 ## Consequences
 
@@ -282,5 +319,16 @@ still current," not permanent replay.
   keeping runtime diff tracking independent from memory injection.
 - ADR-0022 defines the supported execution protocols.
 - ADR-0025 defines per-turn worktree isolation.
+- ADR-0053 defines centrally configured tools, shared skills, and persistent watches.
 - ADR-0048 defines the `bare` connector class this document's connector-class
   layer eligibility model applies to.
+
+## Required verification
+
+Verify deterministic layer ordering, migration of embedded runtime wording,
+source ownership and editability, applicability and cadence, session reset and
+revision changes, stateless invocation, and absence of duplicate discovery
+instructions. Verify that the viewer reflects actual delivery channels,
+redacts secrets, reconstructs matching runtime revisions, and labels changed
+or unavailable historical content accurately. Shared tool discovery must obey
+harness eligibility and topic enablement without treating memory as authority.
