@@ -27,6 +27,21 @@ Squid needs one context model that works across harnesses. Some CLIs expose a
 system-prompt extension while others expose only a per-turn prompt or stdin,
 so the model cannot depend on a provider-specific message role.
 
+## Implementation status
+
+The runtime foundation is implemented in `agent/context.py` and packaged
+`agent/runtime/*.md` templates. Queue dispatch assembles required runtime
+blocks after worktree setup; legacy memory helpers delegate to that assembler.
+Blocks carry source, revision, ownership, cadence, variables, and delivery
+channel in memory. One-shot, code-root, and isolation wording now lives in the
+templates. The selector supports session-start revision/reset handling and
+explicit request selection; current runtime templates all use every-turn, so
+runtime delivery requires no new session tracking.
+
+Global user-context inheritance, unified optional-layer selection, persisted
+audit manifests, the context viewer, and shared skill/tool discovery remain
+unimplemented. This runtime foundation does not mark the whole ADR complete.
+
 ## Decision Drivers
 
 - Keep mandatory execution invariants effective and consistent across agents.

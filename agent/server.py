@@ -377,6 +377,8 @@ async def _resume_stalled_flows_on_startup():
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    from .context import runtime_templates
+    runtime_templates()
     _realtime_notifier.start(asyncio.get_running_loop())
     set_process_change_listener(_publish_process_changed)
     dispatcher.set_queue_change_listener(_publish_queue_changed)

@@ -197,14 +197,9 @@ def topic_memory_prompt_block(topic: str) -> Optional[str]:
 
 
 def oneshot_protocol_prompt_block() -> str:
-    return (
-        "This turn is a one-shot, non-interactive CLI process: it exits as soon as you emit your "
-        "response, and nothing resumes it afterward. Do not background a task and tell the user "
-        "you'll \"check back\", \"report back\", or \"follow up\" once it finishes — no later turn "
-        "fires when that job completes, so that promise can't be kept. If a command may take a while, "
-        "wait for it synchronously in this turn and report the real outcome, or tell the user up front "
-        "that they'll need to ask again to check on it."
-    )
+    from .context import assemble_runtime
+    return next(block.content for block in assemble_runtime(protocol="oneshot-cli")
+                if block.id == "runtime.oneshot")
 
 
 def topic_memory_squid_config_from_content(content: str) -> dict:
@@ -231,39 +226,10 @@ def code_roots_prompt_block(
     topic: Optional[str] = None,
     backing_roots: Optional[list[str]] = None,
 ) -> Optional[str]:
-    roots = _normalize_code_roots(code_roots)
-    if not roots:
-        return None
-    backing = _normalize_code_roots(backing_roots or []) if isolated else []
-    # Worktree folder names encode the topic slug, not the repo name, so two
-    # worktrees for different repos under the same topic can look identical
-    # at a glance (e.g. both named "sqd-squid-...") — annotate each path with
-    # its source repo so that ambiguity isn't left for the model to guess at.
-    if isolated and len(backing) == len(roots):
-        root_lines = [f"{root}  (repo: {repo})" for root, repo in zip(roots, backing)]
-    else:
-        root_lines = roots
-    lines = [
-        "Topic code roots:",
-        "<squid_code_roots>",
-        *root_lines,
-        "</squid_code_roots>",
-        "Use these paths, not cwd, as codebase roots.",
-    ]
-    if isolated:
-        if backing:
-            lines.extend([
-                "Backing git repos:",
-                "<squid_backing_repos>",
-                *backing,
-                "</squid_backing_repos>",
-            ])
-        lines.append(
-            "Isolated Squid turn dir: edit here only; no `.git`. Do not edit backing repo files directly. "
-            "Squid syncs isolated edits back to the backing repos after the response completes. "
-            "For turns with file edits, do not run/suggest git commit, push, pull, branch, tag, PR, publish, or checkout switching. "
-            "For git-only turns with no file edits, run requested git status, commit, push, pull, branch, tag, or PR commands only in the backing repos. "
-            "When pushing, commit backing-repo changes if needed, then push only the current branch; "
-            "never use `git push --all` or `git push --mirror`, and never create or publish per-turn `sqd-*` branches."
-        )
-    return "\n".join(lines)
+    from .context import assemble_runtime
+    blocks = assemble_runtime(
+        code_roots=_normalize_code_roots(code_roots),
+        worktree_isolated=isolated,
+        backing_roots=_normalize_code_roots(backing_roots or []),
+    )
+    return "\n".join(block.content for block in blocks) or None

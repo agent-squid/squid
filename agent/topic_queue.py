@@ -435,7 +435,7 @@ class TopicWorker:
     async def _process(self, item: QueueItem):
         from .runners import CLIError, CLIAuthRequired, effective_protocol, runner_for_agent
         from .config import SQUID_HOME, WORKTREE_ISOLATION_ENABLED
-        from .memory import code_roots_prompt_block, oneshot_protocol_prompt_block
+        from .context import assemble_runtime, runtime_prompt
         from .resolve import resolve_agent, split_agent_ref
         from .stats_db import (
             get_completed_run_status_raw,
@@ -567,22 +567,14 @@ class TopicWorker:
                 }
             except Exception:
                 log.debug("worktree lookup skipped topic=%s msg_id=%s", item.topic, item.msg_id, exc_info=True)
-        prefix_blocks: list[str] = []
-        if not item.native_shell and effective_protocol(resolved, adhoc=item.adhoc) == "oneshot-cli":
-            prefix_blocks.append(oneshot_protocol_prompt_block())
-        if tracking_roots and not item.native_shell:
-            code_roots_block = code_roots_prompt_block(
-                tracking_roots,
-                isolated=item.worktree_isolated,
-                topic=item.topic,
-                backing_roots=item.code_roots if item.worktree_isolated else None,
-            )
-            if code_roots_block:
-                prefix_blocks.append(code_roots_block)
-
-        effective_prompt = item.prompt
-        if prefix_blocks:
-            effective_prompt = "\n\n".join(prefix_blocks + [item.prompt])
+        runtime_blocks = assemble_runtime(
+            protocol=effective_protocol(resolved, adhoc=item.adhoc),
+            native_shell=item.native_shell,
+            code_roots=tracking_roots,
+            worktree_isolated=item.worktree_isolated,
+            backing_roots=item.code_roots if item.worktree_isolated else None,
+        )
+        effective_prompt = runtime_prompt(runtime_blocks, item.prompt)
 
         # A stop can arrive while worktree/session preparation is still in
         # progress, before the CLI process exists in the process registry.
