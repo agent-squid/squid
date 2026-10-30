@@ -48,7 +48,40 @@ symbol names are navigation anchors, not promises about their final placement.
   timeout. Revision semantics explicitly require source versions/attempt IDs;
   status-only cycles are unsupported. Focused verification: 78 tests passed on
   Python 3.10, including recurring statuses with distinct attempt identities.
-- Next watch slice: trusted probe configuration/registry and concrete MCP client;
+- Test MCP fixture implemented: `tests/fixtures/watch_mcp_server.py` exposes
+  `task_snapshot` over real stdio using the official SDK v1 (`dev` dependency
+  group only; pinned below v2). Tests control comment revisions, closure,
+  delay and errors through an atomically replaced state file. Coverage includes
+  negotiation/discovery, structured output, timeout recovery, and reconnecting
+  a new fixture/client against durable cursors/events. This is not production
+  transport wiring or a full Squid server restart test.
+- Streamable HTTP fixture coverage added alongside stdio, following the
+  [official SDK v1 transport API](https://py.sdk.modelcontextprotocol.io/v1/).
+  The same six transport cases cover discovery, comment updates/edits, closure,
+  provider errors, timeout recovery, and durable deduplication after a fresh
+  server/client connection. HTTP uses an ephemeral loopback socket with bounded
+  startup/shutdown. This initial fixture slice omitted authentication and
+  broken-live-session recovery; production polling remains unwired. Focused MCP,
+  probe, and watch verification: 65 tests passed on Python 3.10 and 3.11.
+- Internal [trusted probe registry and concrete MCP client](../watch-probe-registry.md)
+  implemented: strict server/probe mappings, optional SDK extra, fixed command
+  argv, HTTPS/loopback URL validation, environment-referenced bearer credentials,
+  registered tool enforcement, structured-result bounds, and sanitized failures.
+  Every poll opens a fresh session; endpoint outage/restart and timeout recovery
+  are covered over real transports. OAuth and wire-size bounds remain deferred.
+  Registry loading is explicit and not connected to `squid.yaml` or startup.
+  Verification: 96 focused tests passed on Python 3.10 and 3.11; lockfile checked.
+- Pre-publication review fix: redact MCP/HTTP SDK logging within probe tasks,
+  including exception and cleanup paths. Regression coverage reproduces malformed
+  stdio output leaking through SDK logs and verifies concurrent diagnostics and
+  cancellation cleanup retain the correct logging scope. Verification: 99 focused
+  tests passed on Python 3.10 and 3.11.
+- Additional review fixes: optional MCP tests skip without the SDK; probe
+  registrations cap output limits at 65,536 bytes; missing/invalid credentials
+  preserve a distinct safe error type; HTTP timeouts follow probe configuration.
+  Verification: 109 focused tests passed on Python 3.10 and 3.11; without the
+  optional SDK, 92 passed and the MCP transport module skipped.
+- Next watch slice: host configuration integration and
   policy/grants and scoped service/API/CLI (milestone 3),
   lifecycle wiring and authorized dispatch through the normal topic queue.
   Pending events are retained, not acknowledged or dispatched by this slice.
@@ -65,8 +98,8 @@ registry is loaded, and pending events have no agent dispatch consumer.
 | --- | --- |
 | Durable watch store, claims, expiry, retries, cursor/event ingestion | Implemented and unit-tested |
 | Executable probes and injected MCP-client bridge | Implemented and unit-tested |
-| Python 3.10/3.11 compatibility and review regressions | 78 focused tests passed on each runtime |
-| Trusted probe configuration and concrete MCP transport/client | Pending |
+| Python 3.10/3.11 compatibility and review regressions | 96 focused tests passed on each runtime |
+| Trusted probe configuration and concrete MCP transport/client | Implemented internally; host configuration loading pending |
 | Policy/grants, scoped service, API/CLI registration | Pending |
 | Server lifespan startup/shutdown wiring | Pending |
 | Durable run batching, queue dispatch, acknowledgement and recovery | Pending |

@@ -47,7 +47,7 @@ class Probe:
                 or type(self.timeout) not in (int, float)
                 or not math.isfinite(self.timeout) or self.timeout <= 0
                 or type(self.output_limit) is not int
-                or not 1 <= self.output_limit <= 1048576):
+                or not 1 <= self.output_limit <= 65536):
             raise ValueError('invalid probe registration')
 
 

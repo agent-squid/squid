@@ -31,6 +31,9 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.30,<2"]
+
 [project.urls]
 Homepage = "https://agentsquid.ai"
 Repository = "https://github.com/agent-squid/squid"
@@ -61,3 +64,8 @@ dependencies = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "mcp>=1.30,<2",
+]
