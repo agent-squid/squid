@@ -39,7 +39,7 @@ Homepage = "https://agentsquid.ai"
 Repository = "https://github.com/agent-squid/squid"
 
 [project.scripts]
-agentsquid = "agent.server:main"
+agentsquid = "agent.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent"]

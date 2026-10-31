@@ -21,8 +21,12 @@
 | OpenAI Codex | `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` |
 | Cursor Agent | `cursor-agent` | `curl -fsS https://cursor.com/install \| bash` |
 | OpenCode | `opencode` | `curl -fsSL https://opencode.ai/install \| bash` |
+| Antigravity | `agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` |
 | Pi | `pi` | `curl -fsSL https://pi.dev/install.sh \| sh` |
 | Ollama *(optional, local models)* | `ollama` | `curl -fsSL https://ollama.com/install.sh \| sh` |
+
+For Antigravity, complete native login with `agy` in a terminal first. See
+[Antigravity harness setup](docs/antigravity-harness.md) for configuration and verification limits.
 
 2. Install and run AgentSquid!
 
@@ -50,7 +54,7 @@ agent name (@agent) = harness (Claude Code) + provider (Claude) + model (claude-
 
 ## Your Local Coding Agents, Unified
 
-Agent-Squid is a **meta harness orchestrator** which lets you run Claude Code, OpenAI Codex, Cursor Agent, OpenCode, Pi **coding agents** with **multiple providers**, such as, Claude, GPT, Cursor, OpenCode, NVIDIA, DeepSeek, local LLMs via **one browser UI**. Your agents still run on your own machine, with your repo, shell tools, credentials, and native CLI sessions. Squid gives those sessions names, history, queues, controls, and phone/tablet access.
+Agent-Squid is a **meta harness orchestrator** which lets you run Claude Code, OpenAI Codex, Cursor Agent, OpenCode, Pi, Antigravity **coding agents** with **multiple providers**, such as, Claude, GPT, Cursor, OpenCode, NVIDIA, DeepSeek, local LLMs via **one browser UI**. Your agents still run on your own machine, with your repo, shell tools, credentials, and native CLI sessions. Squid gives those sessions names, history, queues, controls, and phone/tablet access.
 
 Use it when your workflow has become a wall of unnamed terminal tabs or you need to use multiple coding agents; a couple of $20 agents alongside a free coding agent.
 
@@ -209,7 +213,7 @@ Squid is not another general AI chat app. Open WebUI and LibreChat are broad sel
 
 Squid is narrower: it controls real local coding-agent CLIs and preserves their session behavior.
 
-Most chat UIs send messages to a model API and render text back. Even when they support tools or agents, the chat app is usually the runtime. Squid is different: the runtime is still the local CLI agent. Claude Code, Codex, Cursor Agent, OpenCode, and Pi are the process doing the work on your machine. Squid is the interactive control layer around those processes.
+Most chat UIs send messages to a model API and render text back. Even when they support tools or agents, the chat app is usually the runtime. Squid is different: the runtime is still the local CLI agent. Claude Code, Codex, Cursor Agent, OpenCode, Pi, and Antigravity are the process doing the work on your machine. Squid is the interactive control layer around those processes.
 
 That difference matters:
 
@@ -226,7 +230,7 @@ That difference matters:
 | Category | Examples | Squid's difference |
 |---|---|---|
 | Self-hosted AI chat | Open WebUI, LibreChat | Squid runs local CLI coding agents instead of replacing them with a provider chat UI. |
-| Single-agent CLIs | Claude Code, Codex CLI, Cursor Agent, OpenCode, Pi | Squid gives them shared browser/mobile UI, topics, queues, history, controls, and analytics. |
+| Single-agent CLIs | Claude Code, Codex CLI, Cursor Agent, OpenCode, Pi, Antigravity | Squid gives them shared browser/mobile UI, topics, queues, history, controls, and analytics. |
 | IDE agents | Cursor, Cline, VS Code Copilot | Squid is editor-agnostic and works even when the IDE is not open. |
 | Terminal pair programmers | Aider, OpenCode | Squid is an orchestration layer, not a coding engine. |
 

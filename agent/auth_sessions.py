@@ -75,7 +75,7 @@ class AuthSessionError(RuntimeError):
 
 
 class NoLoginCommand(AuthSessionError):
-    """Raised for harnesses with no CLI login command (pi)."""
+    """Raised for harnesses with no standalone CLI login command (pi, Antigravity)."""
 
 
 def _login_argv(harness_id: str) -> list[str]:
@@ -96,6 +96,10 @@ def _login_argv(harness_id: str) -> list[str]:
         if not OPENCODE_PATH:
             raise AuthSessionError("opencode CLI not found in PATH")
         return [OPENCODE_PATH, "auth", "login"]
+    if harness_id == "antigravity":
+        raise NoLoginCommand(
+            "Antigravity uses native interactive login — run agy in a terminal first."
+        )
     if harness_id == "pi":
         raise NoLoginCommand(
             "pi has no CLI login command — set ANTHROPIC_API_KEY or "

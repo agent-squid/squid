@@ -5235,6 +5235,7 @@ button {
   -webkit-overflow-scrolling: touch;
 }
 .ac-header {
+  min-height: 44px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -5601,6 +5602,7 @@ mark.search-kw-highlight {
 }
 .acp-row input { flex: 1; min-width: 120px; }
 .acp-actions { display: flex; gap: 0.5rem; }
+#code-roots-prompt > .acp-actions { justify-content: flex-end; }
 .acp-actions button {
   font-size: var(--text-body);
   padding: 0.25rem 0.75rem;

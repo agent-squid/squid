@@ -654,52 +654,61 @@ class TopicWorker:
 
         async def _stream(prompt, **kw):
             nonlocal run_seq, session_id, raw, status_raw
-            async for chunk in runner(prompt, **kw):
-                if isinstance(chunk, dict):
-                    if "_stats" in chunk:
-                        inner = chunk["_stats"]
-                        session_id = inner.get("session_id")
-                        enriched = {k: v for k, v in inner.items() if k != "session_id"}
-                        enriched["adhoc"] = item.adhoc
-                        enriched["lookback"] = item.lookback
-                        if session_id:
-                            turn_model = enriched.get("model") or item.model
-                            save_stats(session_id, enriched, topic=item.topic, agent=item.agent,
-                                       harness=resolved.harness, provider=resolved.provider.id,
-                                       model=turn_model,
-                                       cwd=display_cwd,
-                                       lookback=item.lookback)
-                            if item.agent and not item.adhoc:
-                                set_topic_session(
-                                    item.topic, item.agent, session_id,
-                                    display_cwd,
-                                    resolved.fingerprint,
-                                )
-                            enriched["session_id"] = session_id
-                            enriched["cwd"] = display_cwd
-                            enriched["model"] = turn_model
-                            enriched["harness"] = resolved.harness
-                            enriched["provider"] = resolved.provider.id
-                        completed_at = _utc_now_iso()
-                        enriched["completed_at"] = completed_at
-                        insert_run_event(item.msg_id, run_seq, "stats", json.dumps(enriched), created_at=completed_at)
-                        await item.out_q.put({"_stats": enriched})
-                    elif "_tool" in chunk:
-                        await _emit_tool(chunk["_tool"])
+            from .watch_launch import run as run_with_watch_credentials
+            from contextlib import aclosing
+            async with aclosing(run_with_watch_credentials(
+                runner, prompt,
+                persistent=not item.native_shell and effective_protocol(resolved, adhoc=item.adhoc) != "oneshot-cli",
+                shell=item.native_shell,
+                request_text=item.display_prompt if item.display_prompt is not None else item.prompt,
+                **kw,
+            )) as stream:
+                async for chunk in stream:
+                    if isinstance(chunk, dict):
+                        if "_stats" in chunk:
+                            inner = chunk["_stats"]
+                            session_id = inner.get("session_id")
+                            enriched = {k: v for k, v in inner.items() if k != "session_id"}
+                            enriched["adhoc"] = item.adhoc
+                            enriched["lookback"] = item.lookback
+                            if session_id:
+                                turn_model = enriched.get("model") or item.model
+                                save_stats(session_id, enriched, topic=item.topic, agent=item.agent,
+                                           harness=resolved.harness, provider=resolved.provider.id,
+                                           model=turn_model,
+                                           cwd=display_cwd,
+                                           lookback=item.lookback)
+                                if item.agent and not item.adhoc:
+                                    set_topic_session(
+                                        item.topic, item.agent, session_id,
+                                        display_cwd,
+                                        resolved.fingerprint,
+                                    )
+                                enriched["session_id"] = session_id
+                                enriched["cwd"] = display_cwd
+                                enriched["model"] = turn_model
+                                enriched["harness"] = resolved.harness
+                                enriched["provider"] = resolved.provider.id
+                            completed_at = _utc_now_iso()
+                            enriched["completed_at"] = completed_at
+                            insert_run_event(item.msg_id, run_seq, "stats", json.dumps(enriched), created_at=completed_at)
+                            await item.out_q.put({"_stats": enriched})
+                        elif "_tool" in chunk:
+                            await _emit_tool(chunk["_tool"])
+                            continue
+                        elif "_status" in chunk:
+                            status_raw += chunk["_status"]
+                            insert_run_event(item.msg_id, run_seq, "status", chunk["_status"])
+                            await item.out_q.put(chunk)
+                        elif "_error" in chunk:
+                            insert_run_event(item.msg_id, run_seq, "error", chunk["_error"])
+                            await item.out_q.put(chunk)
+                        elif "_diag" in chunk:
+                            insert_run_event(item.msg_id, run_seq, "diag", json.dumps(chunk["_diag"]))
+                    else:
+                        await _emit_text(response_remapper.feed(chunk))
                         continue
-                    elif "_status" in chunk:
-                        status_raw += chunk["_status"]
-                        insert_run_event(item.msg_id, run_seq, "status", chunk["_status"])
-                        await item.out_q.put(chunk)
-                    elif "_error" in chunk:
-                        insert_run_event(item.msg_id, run_seq, "error", chunk["_error"])
-                        await item.out_q.put(chunk)
-                    elif "_diag" in chunk:
-                        insert_run_event(item.msg_id, run_seq, "diag", json.dumps(chunk["_diag"]))
-                else:
-                    await _emit_text(response_remapper.feed(chunk))
-                    continue
-                run_seq += 1
+                    run_seq += 1
             await _emit_text(response_remapper.flush())
 
         try:

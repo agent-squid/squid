@@ -84,8 +84,9 @@ configuration changes.
   conversation, `@agent` owns `(backend, model, cwd)`, and `#topic@agent`
   selects the route.
 - Backend IDs and colors are supplied dynamically to the UI.
-- `agy` and `copilot` remain experimental runners and are not configurable
-  drivers.
+- `copilot` remains an experimental runner. Antigravity (`agy`) is now a
+  configurable one-shot harness using its native NDJSON protocol; see
+  [the harness notes](../antigravity-harness.md).
 
 ## Superseding Reference
 

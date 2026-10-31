@@ -32,6 +32,12 @@ _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # so they're documented in config/squid.yaml.example rather than auto-seeded
 # for legacy squid.yaml files that predate the `providers:` section.
 _DEFAULT_PROVIDERS: dict[str, dict[str, Any]] = {
+    "antigravity": {
+        "label": "agy", "color": "#4285F4",
+        "auth": {"type": "subscription"},
+        "gauge": {"type": "static", "text": "Native", "title": "Managed by Antigravity CLI"},
+        "supported_apis": ["/native/antigravity"],
+    },
     "anthropic": {
         "label": "Claude", "color": "#AE5332",
         "auth": {"type": "subscription"}, "gauge": "claude",
@@ -343,7 +349,12 @@ def _configured_providers() -> dict[str, Any]:
     if configured is not None:
         if not isinstance(configured, dict) or not configured:
             raise ValueError("providers must be a non-empty mapping")
-        return dict(configured)
+        # Existing installations have an explicit provider catalog that predates
+        # agy. Its native harness can already be seeded, so keep its zero-config
+        # provider resolvable without rewriting the user's YAML or overrides.
+        providers = dict(configured)
+        providers.setdefault("antigravity", dict(_DEFAULT_PROVIDERS["antigravity"]))
+        return providers
     return {name: dict(value) for name, value in _DEFAULT_PROVIDERS.items()}
 
 

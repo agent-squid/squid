@@ -112,6 +112,11 @@ harnesses:
     default_provider: openai
     supported_apis: [/v1/responses]
 
+  antigravity:
+    protocol: {type: oneshot-cli}
+    default_provider: antigravity
+    supported_apis: [/native/antigravity]
+
   cursor:
     protocol:
       type: oneshot-cli
@@ -140,6 +145,14 @@ harnesses:
 # and an optional `models:` suggestion list for the agent-creation dropdown
 # (freeform entry always works too — this list is never server-validated).
 providers:
+  # Native agy login; models come from `agy models` or its configured default.
+  antigravity:
+    label: agy
+    color: "#4285F4"
+    auth: {type: subscription}
+    gauge: {type: static, text: Native, title: Managed by Antigravity CLI}
+    supported_apis: [/native/antigravity]
+
   # Native Claude Code. Uses the local `claude` CLI subscription/login.
   anthropic:
     label: Anthropic

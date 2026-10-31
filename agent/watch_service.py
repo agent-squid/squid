@@ -1,4 +1,4 @@
-"""Internal observation service; no HTTP, agent launch, or polling wiring yet.
+"""Observation service shared by HTTP, CLI, and scoped one-shot launches.
 
 WatchControl is a trusted host API, never a model-callable tool. Its callers
 must authenticate the human and validate the structured action before recording
@@ -68,6 +68,29 @@ class WatchService:
             raise WatchDenied()
         return credential, policy
 
+    def check_operation(self, token, operation):
+        """Authenticate even an unavailable transport operation without mutating."""
+        with self._lock:
+            self._authorize(token, operation)
+
+    def discover(self, token):
+        with self._lock:
+            credential = None
+            for operation in OPERATIONS:
+                try:
+                    credential, policy = self._authorize(token, operation)
+                    break
+                except WatchDenied:
+                    pass
+            if credential is None:
+                raise WatchDenied()
+            return dict(scope='observation', topic=credential.topic,
+                        operations=sorted(credential.operations & policy.operations),
+                        adapters=sorted(policy.adapters), monitoring_enabled=False,
+                        dispatch_enabled=False, publication_enabled=False,
+                        min_poll_seconds=policy.min_poll_seconds,
+                        max_lifetime_seconds=policy.max_lifetime_seconds)
+
     def create(self, token, *, adapter, target, request_key, poll_interval=30, expires_at=None):
         with self._lock:
             credential, policy = self._authorize(token, 'create')
@@ -121,6 +144,8 @@ class WatchService:
                 conn.close()
 
     def transition(self, token, watch_id, *, version, action, grant_id=None, operation_key=None):
+        if grant_id is not None and not _text(grant_id):
+            raise ValueError('invalid grant identity')
         if action not in OPERATIONS - {'create', 'list', 'show'}:
             raise ValueError('unsupported watch action')
         if type(version) is not int or version < 0:
@@ -214,7 +239,9 @@ class WatchControl:
             finally:
                 conn.close()
 
-    def revoke_grant(self, *, topic, grant_id):
+    def revoke_grant(self, *, topic, grant_id, watch_id=None):
+        if not _text(grant_id) or (watch_id is not None and not _text(watch_id)):
+            raise ValueError('invalid grant identity')
         service = self.service
         with service._lock:
             conn = watches._connect()
@@ -223,13 +250,18 @@ class WatchControl:
                     conn.execute('BEGIN IMMEDIATE')
                     grant = conn.execute('''SELECT g.* FROM watch_grants g JOIN watches w
                         ON w.id=g.watch_id WHERE g.id=? AND w.topic=?''', (grant_id, topic)).fetchone()
-                    if grant is None:
+                    if grant is None or (watch_id is not None and grant['watch_id'] != watch_id):
                         raise WatchDenied()
                     conn.execute('UPDATE watch_grants SET revoked_at=COALESCE(revoked_at,?) WHERE id=?',
                                  (service.clock(), grant_id))
-                    # Stop observations and invalidate in-flight leases atomically.
+                    # Keep observation active while another full-lifetime grant
+                    # still covers this exact watch. Otherwise invalidate leases.
                     conn.execute('''UPDATE watches SET status='paused',version=version+1,
                         claim_token=NULL,lease_until=NULL,pause_reason='grant_revoked'
-                        WHERE id=? AND status='active' ''', (grant['watch_id'],))
+                        WHERE id=? AND status='active' AND NOT EXISTS (
+                            SELECT 1 FROM watch_grants g WHERE g.watch_id=watches.id
+                            AND g.revoked_at IS NULL AND g.expires_at>?
+                            AND g.expires_at>=watches.expires_at)
+                        ''', (grant['watch_id'], service.clock()))
             finally:
                 conn.close()

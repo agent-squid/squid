@@ -14107,9 +14107,9 @@ function showCodeRootsNudge(topic, anchor) {
       <input id="crp-paths" placeholder="/path/to/repo  (comma-separate for multiple)" />
     </div>
     <div class="acp-actions">
-      <button id="crp-save">Save</button>
       <button id="crp-skip">Not a code project</button>
       <button id="crp-cancel">Dismiss</button>
+      <button id="crp-save">Save</button>
     </div>`;
 
   if (anchor.nextSibling) {

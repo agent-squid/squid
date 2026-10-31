@@ -131,9 +131,10 @@ PI_CLI        = "pi"
 # defaulting pi and opencode to (see bin/install.sh).
 OLLAMA_CLI    = "ollama"
 
-# Experimental runners exist for these CLIs but they are not configurable harnesses.
-COPILOT_CLI  = "copilot"
 AGY_CLI      = "agy"
+
+# Experimental runner; not a configurable harness.
+COPILOT_CLI  = "copilot"
 
 # Squid Echo: a no-op harness (agent/runners.py's run_echo) that echoes the
 # prompt straight back with no subprocess and no network call — for fast,

@@ -94,6 +94,13 @@ else
   warn "pi not found — curl -fsSL https://pi.dev/install.sh | sh"
 fi
 
+if command -v agy &>/dev/null; then
+  ok "agy"
+  AGENTS_FOUND=$((AGENTS_FOUND + 1))
+else
+  warn "agy not found — curl -fsSL https://antigravity.google/cli/install.sh | bash"
+fi
+
 if [[ $AGENTS_FOUND -eq 0 ]]; then
   fail "No coding agents found. Install at least one before starting squid."
   mark_error

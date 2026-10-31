@@ -96,10 +96,44 @@ symbol names are navigation anchors, not promises about their final placement.
   hook delivers/revokes turn tokens; no user-facing registration is enabled.
   Verification: 296 watch/service/config/context/server tests passed on Python
   3.11, including real MCP transports.
-- Next watch slice: authenticated grant controls, turn credential delivery and
-  scoped service API/CLI (milestone 3),
-  lifecycle wiring and authorized dispatch through the normal topic queue.
-  Pending events are retained, not acknowledged or dispatched by this slice.
+- Milestone 3 observation transport slice: authenticated HTTP and JSON CLI,
+  separate operator control authentication for exact-watch grants/revocation,
+  lazy client entry point, scoped one-shot/native-shell environment delivery,
+  credential revocation on terminal/closure paths, and minimal CLI discovery.
+  Persistent harness refresh and native MCP delivery remain unsupported.
+  `/tools` reports actual availability; activation/resume return 409 until the
+  production loop is wired. Registration remains proposed, never active
+  monitoring. See [authorization and transport contract](../watch-authorization.md).
+  Verification: 503 watch/context/queue/runner/server/Flow tests passed on Python
+  3.11; 60 focused API/CLI/service/config tests passed on Python 3.10. Wheel
+  entry point and both client help commands passed without importing server
+  configuration; lockfile checked. No live server restart or polling was claimed.
+- Milestone 3 review fixes (2026-10-31): self-reexec preserves only the
+  operator verifier, consumed at startup and stripped from harness children;
+  watch API/control and launch mint/revoke run off-loop with cancellation-safe
+  worker completion. Grant IDs validate before SQL. Non-loopback plaintext
+  listeners skip unusable turn credentials with a safe warning; resumed and
+  slash-command prompts receive no extra discovery hint. Human grant audits
+  record shared-operator key identity and exact scope. Revoking one grant
+  preserves active observation when another covers the full lifetime. Existing
+  foreign-key enforcement and cascade deletion are regression-tested.
+  Verification: 527 watch/context/queue/runner/server/Flow tests passed on Python
+  3.11; 84 focused tests passed on Python 3.10. Restart coverage intercepts the
+  real command's exec boundary; no live server restart was performed. Strict
+  startup configuration/credential validation remains intentional.
+- Follow-up review fixes (2026-10-31): launch and CLI share one standalone
+  URL validator, including loopback aliases and explicit malformed-URL rejection.
+  Queue delivery passes original request text separately from the assembled
+  runtime prompt so slash-command discovery suppression works in production.
+  Regression coverage exercises the real queue/context path, raw-prompt fallback,
+  normal requests, and accepted/rejected URLs through both launch and CLI.
+  Verification: 543 watch/context/queue/runner/server/Flow tests passed on Python
+  3.11; 96 focused watch API/CLI/queue tests passed on Python 3.10. Lockfile checked.
+- Next watch slice: lifespan polling under current policy and durable grants,
+  authorized run batching/dispatch through the normal topic queue, and recovery.
+  Execution-agent/rule/budget API fields must be added alongside their service
+  implementation; the observation API rejects those unsupported fields today.
+  Pending events remain retained, not acknowledged or dispatched.
 - Milestones 2 and 5–8 remain unimplemented. No automatic publication is enabled.
 
 ## Watch completion boundary
@@ -115,8 +149,8 @@ polling task uses the configured probe registry, and pending events have no agen
 | Executable probes and injected MCP-client bridge | Implemented and unit-tested |
 | Python 3.10/3.11 compatibility and review regressions | 96 focused tests passed on each runtime |
 | Trusted probe configuration and concrete MCP transport/client | Host configuration loading implemented; polling remains disabled |
-| Observation policy/grants and scoped internal service | Implemented; authenticated controls and turn delivery pending |
-| API/CLI registration | Pending |
+| Observation policy/grants and scoped service | Implemented with authenticated controls and one-shot turn delivery |
+| API/CLI registration | Observation proposals and human grants shipped; activation gated on polling |
 | Server lifespan startup/shutdown wiring | Pending |
 | Durable run batching, queue dispatch, acknowledgement and recovery | Pending |
 | Real-server restart and end-to-end automatic handling | Not verified; requires the pending wiring |

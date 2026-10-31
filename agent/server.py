@@ -385,6 +385,16 @@ async def _lifespan(_app: FastAPI):
     _app.state.watch_configuration = load_watch_configuration(_cfg)
     from .watch_service import WatchService
     _app.state.watch_service = WatchService(_app.state.watch_configuration)
+    from .watch_auth import load_digest
+    _app.state.watch_control_digest = load_digest(os.environ)
+    from . import watch_launch
+    watch_host = _cfg["server"]["host"]
+    if watch_host in {"0.0.0.0", "::"}:
+        watch_host = "127.0.0.1" if watch_host == "0.0.0.0" else "::1"
+    if ":" in watch_host:
+        watch_host = f"[{watch_host}]"
+    watch_launch.configure(_app.state.watch_service,
+                           f'http://{watch_host}:{_cfg["server"]["port"]}')
     _realtime_notifier.start(asyncio.get_running_loop())
     set_process_change_listener(_publish_process_changed)
     dispatcher.set_queue_change_listener(_publish_queue_changed)
@@ -427,7 +437,8 @@ async def _lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        _app.state.watch_service.close()
+        watch_launch.configure(None)
+        await asyncio.to_thread(_app.state.watch_service.close)
         _shore_connection = None
         if shore_task is not None:
             shore_stop.set()
@@ -1610,7 +1621,10 @@ async def run_cmd(req: CmdRequest):
                             os.close(fd)
                     except OSError:
                         pass
-                os.execv(sys.executable, [sys.executable, "-m", "agent.server"])
+                from .watch_auth import restart_environment
+                environment = restart_environment(
+                    os.environ, getattr(app.state, "watch_control_digest", None))
+                os.execve(sys.executable, [sys.executable, "-m", "agent.server"], environment)
         asyncio.create_task(_restart())
         return JSONResponse({"ok": True})
     if req.command == "shutdown":
@@ -4776,6 +4790,9 @@ async def realtime_v1(websocket: WebSocket):
         sender_task.cancel()
 
 
+from .watch_api import router as watch_router
+app.include_router(watch_router)
+
 if UI_DIR.exists():
     app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
 
@@ -5211,6 +5228,11 @@ def main():
     host = _cfg["server"]["host"]
     port = _cfg["server"]["port"]
     args = [arg for arg in sys.argv[1:] if arg != "--fg"]
+    # Also support direct `python -m agent.server` invocations; the installed
+    # console entry point dispatches clients lazily through agent.cli.
+    if args and args[0] in {"watch", "tools"}:
+        from .watch_cli import main as watch_main
+        sys.exit(watch_main(args))
     if args and args[0] == "login":
         from .shore import login
         sys.exit(login(args[1:]))

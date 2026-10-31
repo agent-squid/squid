@@ -25,6 +25,7 @@ _SEED_DEFAULT_MODEL_BY_HARNESS: dict[str, str] = {
     "pi": "deepseek-ai/deepseek-v4-pro",
 }
 _SEED_DEFAULT_PROVIDER_BY_HARNESS: dict[str, str] = {
+    "antigravity": "antigravity",
     "opencode": "opencode",
     "pi": "nvidia",
 }
@@ -1089,18 +1090,19 @@ def init_db() -> None:
         # Seed one default agent per installed harness (INSERT OR IGNORE — never overwrites user edits)
         for harness in sorted(SUPPORTED_HARNESSES):
             if harness != "claudecode" and is_installed(harness):
+                name = "agy" if harness == "antigravity" else harness
                 provider = _SEED_DEFAULT_PROVIDER_BY_HARNESS.get(harness)
                 model = _SEED_DEFAULT_MODEL_BY_HARNESS.get(harness)
                 if has_legacy_backend:
                     conn.execute(
                         """INSERT OR IGNORE INTO agents
                            (name, backend, harness, provider, model) VALUES (?, ?, ?, ?, ?)""",
-                        (harness, agent_ref_for_storage(harness, provider), harness, provider, model),
+                        (name, agent_ref_for_storage(harness, provider), harness, provider, model),
                     )
                 else:
                     conn.execute(
                         "INSERT OR IGNORE INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
-                        (harness, harness, provider, model),
+                        (name, harness, provider, model),
                     )
         if is_installed("claudecode"):
             if has_legacy_backend:

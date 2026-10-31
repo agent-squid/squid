@@ -277,7 +277,7 @@ async def run_native_shell(
     shell = os.environ.get("SHELL") or "/bin/sh"
     started = time.monotonic()
     context_dir = tempfile.TemporaryDirectory(prefix="squid-shell-context-")
-    context_env = os.environ.copy()
+    context_env = _child_env(_kwargs.get("backend_env"))
     pinned_contents = pinned_contents or []
     attached_paths = attached_paths or []
     context_env["SQUID_PINNED_COUNT"] = str(len(pinned_contents))
@@ -580,6 +580,8 @@ def _apply_env_overrides(env: dict, overrides: Optional[dict]) -> None:
 
 def _child_env(extra_env: Optional[dict] = None) -> dict:
     env = os.environ.copy()
+    for name in ("SQUID_WATCH_CONTROL_TOKEN", "SQUID_INTERNAL_WATCH_CONTROL_DIGEST", "SQUID_TURN_TOKEN", "SQUID_API_URL"):
+        env.pop(name, None)
     if PROXY_ENV:
         env.update(PROXY_ENV)
     _apply_env_overrides(env, extra_env)
@@ -1933,100 +1935,101 @@ async def run_antigravity(
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
     adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "antigravity", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
     prompt_preview: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
-    """Stream text chunks from agy (Google Antigravity) CLI, then yield a stats dict."""
+    """Run agy's native headless NDJSON protocol (init/step_update/result)."""
     if not AGY_PATH:
         raise CLINotFoundError(
-            "agy CLI not found in PATH. Install from https://antigravity.google"
+            "agy CLI not found in PATH. Install: "
+            "curl -fsSL https://antigravity.google/cli/install.sh | bash"
         )
 
-    cmd = [AGY_PATH, "--output-format", "stream-json"]
+    cmd = [AGY_PATH, *backend_args, "--output-format", "stream-json"]
+    if not any(arg == "--print-timeout" or arg.startswith("--print-timeout=") for arg in backend_args):
+        timeout = response_timeout if response_timeout is not None else RESPONSE_TIMEOUT
+        cmd += ["--print-timeout", f"{timeout}s"]
     if resume_session_id:
         cmd += ["--conversation", resume_session_id]
     if model:
-        cmd += ["-m", model]
+        cmd += ["--model", model]
     cmd += ["-p", prompt if resume_session_id else _build_prompt(prompt, history)]
 
     start_ms = time.monotonic() * 1000
-    session_id: Optional[str] = None
-    stats_yielded = False
+    session_id = resume_session_id
     streamed_text = False
-    tool_blocks: dict[int, dict] = {}
-
-    async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview):
-        if not line:
-            continue
+    completed_tools = set()
+    result = None
+    async for line in _stream_lines(
+        cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc,
+        msg_id=msg_id, response_timeout=response_timeout, prompt=prompt,
+        prompt_preview=prompt_preview, extra_env=backend_env,
+    ):
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
-            yield line
             continue
-
-        t = event.get("type", "")
-
-        if t == "system":
-            session_id = event.get("session_id")
-
-        elif t == "stream_event":
-            inner = event.get("event", {})
-            inner_type = inner.get("type", "")
-            idx = inner.get("index", 0)
-
-            if inner_type == "content_block_start":
-                block = inner.get("content_block", {})
-                if block.get("type") == "tool_use":
-                    tool_blocks[idx] = {"name": block.get("name", ""), "input_json": ""}
-
-            elif inner_type == "content_block_delta":
-                delta = inner.get("delta", {})
-                dtype = delta.get("type", "")
-                if dtype == "text_delta":
-                    text = delta.get("text", "")
-                    if text:
-                        streamed_text = True
-                        yield text
-                elif dtype == "input_json_delta" and idx in tool_blocks:
-                    tool_blocks[idx]["input_json"] += delta.get("partial_json", "")
-
-            elif inner_type == "content_block_stop" and idx in tool_blocks:
-                block = tool_blocks.pop(idx)
-                yield {"_tool": _tool_data(block["name"], block["input_json"])}
-
-        elif t == "result":
-            if not streamed_text:
-                final_text = event.get("result", "")
-                if final_text:
-                    yield final_text
-            usage = event.get("usage", {})
-            yield {
-                "_stats": {
-                    "session_id": session_id or event.get("session_id"),
-                    "input_tokens": usage.get("input_tokens", 0),
-                    "output_tokens": usage.get("output_tokens", 0),
-                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
-                    "cache_write_tokens": usage.get("cache_creation_input_tokens", 0),
-                    "history_input_tokens": _estimate_history_tokens(history),
-                    "cost_usd": event.get("total_cost_usd"),
-                    "duration_ms": event.get("duration_ms") or int(time.monotonic() * 1000 - start_ms),
-                }
-            }
-            stats_yielded = True
-            return
-
-    if not stats_yielded:
-        yield {
-            "_stats": {
-                "session_id": session_id,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_read_tokens": 0,
-                "cache_write_tokens": 0,
-                "history_input_tokens": _estimate_history_tokens(history),
-                "cost_usd": None,
-                "duration_ms": int(time.monotonic() * 1000 - start_ms),
-            }
-        }
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("event")
+        if kind == "init":
+            session_id = event.get("conversation_id") or session_id
+            _attach_session(msg_id, session_id)
+        elif kind == "step_update":
+            step = event.get("step_update")
+            if not isinstance(step, dict):
+                continue
+            if step.get("step_type") == "agent_response":
+                text = step.get("text_delta")
+                if isinstance(text, str) and text:
+                    streamed_text = True
+                    yield text
+            elif step.get("step_type") == "tool" and step.get("state") == "DONE":
+                index = step.get("step_index")
+                if index is not None and index in completed_tools:
+                    continue
+                if index is not None:
+                    completed_tools.add(index)
+                info = step.get("tool_info") or {}
+                if not isinstance(info, dict):
+                    continue
+                name = info.get("name") or step.get("tool_name", "tool")
+                parameters = info.get("parameters") or {}
+                if not isinstance(parameters, dict):
+                    continue
+                if name == "run_command":
+                    yield {"_tool": _tool_data("Bash", json.dumps({
+                        "command": parameters.get("CommandLine", ""),
+                    }))}
+                else:
+                    yield {"_tool": _tool_data(name, json.dumps(parameters))}
+        elif kind == "result":
+            result = event.get("result")
+            if not isinstance(result, dict) or result.get("status") != "SUCCESS":
+                detail = (result.get("error") or result.get("status")
+                          if isinstance(result, dict) else "invalid result")
+                raise CLIError(f"Antigravity run failed: {detail}")
+            session_id = result.get("conversation_id") or session_id
+            _attach_session(msg_id, session_id)
+            if not streamed_text and result.get("response"):
+                yield result["response"]
+    # Drain to EOF so the shared runner checks the exit code and owns cleanup.
+    if result is None:
+        raise CLIError("Antigravity stream ended without a result")
+    usage = result.get("usage") or {}
+    yield {"_stats": {
+        "session_id": session_id,
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "cache_read_tokens": usage.get("cache_read_tokens", 0),
+        "cache_write_tokens": 0,
+        "history_input_tokens": _estimate_history_tokens(history),
+        "cost_usd": None,
+        "duration_ms": (int(result["duration_seconds"] * 1000)
+                        if isinstance(result.get("duration_seconds"), (int, float))
+                        else int(time.monotonic() * 1000 - start_ms)),
+    }}
 
 
 def _opencode_tool(part: dict) -> Optional[dict]:
@@ -2352,6 +2355,7 @@ RUNNER_NAMES_BY_HARNESS_PROTOCOL = {
     ("cursor", "oneshot-cli"): "run_cursor",
     ("opencode", "oneshot-cli"): "run_opencode",
     ("pi", "oneshot-cli"): "run_pi",
+    ("antigravity", "oneshot-cli"): "run_antigravity",
     ("echo", "oneshot-cli"): "run_echo",
 }
 

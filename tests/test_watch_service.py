@@ -219,3 +219,36 @@ def test_pagination_bounds(setup, limit, offset):
     service, control, _ = setup
     with pytest.raises(ValueError):
         service.list(mint(control), limit=limit, offset=offset)
+
+
+def test_revoke_only_pauses_after_last_full_lifetime_grant(setup):
+    service, control, now = setup
+    token = mint(control)
+    row = create(service, token)
+    first, granted = authorize(service, control, token, row)
+    second, _ = authorize(service, control, token, row)
+    service.transition(granted, row['id'], version=0, action='activate', grant_id=first)
+    claim = watches.claim_due(now=100, lease_seconds=60, limit=1)[0]
+    control.revoke_grant(topic='squid', grant_id=first)
+    active = service.show(token, row['id'])
+    assert active['status'] == 'active' and active['version'] == 1
+    assert watches.finish_poll(claim, now=101, observation=watches.Observation('still-covered'))
+    control.revoke_grant(topic='squid', grant_id=second)
+    paused = service.show(token, row['id'])
+    assert paused['status'] == 'paused' and paused['pause_reason'] == 'grant_revoked'
+    assert paused['version'] == 2
+
+
+def test_grant_foreign_key_cascade_is_enforced(setup):
+    service, control, _ = setup
+    token = mint(control)
+    row = create(service, token)
+    grant, _ = authorize(service, control, token, row)
+    conn = watches._connect()
+    try:
+        assert conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
+        with conn:
+            conn.execute('DELETE FROM watches WHERE id=?', (row['id'],))
+        assert conn.execute('SELECT 1 FROM watch_grants WHERE id=?', (grant,)).fetchone() is None
+    finally:
+        conn.close()
