@@ -2,10 +2,32 @@
 
 `agent.watch_mcp.load_probe_registry(mapping)` builds named `ProbeAdapter`s.
 Loading does not connect, spawn processes, start polling, or activate watches.
-The host must supply this mapping from trusted configuration. It is not yet
-loaded from `squid.yaml`, exposed through an API/CLI, or wired into startup.
+The host loads this mapping from `watches.registry` in `squid.yaml` during
+server startup and validates it in the config editor. `watches.enabled` defaults
+to false; disabled registries are still validated but expose no adapters.
+Enabled adapters are held in `app.state.watch_configuration`; loading starts
+no polling. API/CLI registration and dispatch remain unimplemented.
+Internal policy, grants, and scoped operations are described in
+[watch authorization](watch-authorization.md); authenticated grant controls and
+agent credential delivery remain unwired.
+Unknown watch settings and non-boolean enablement fail validation.
+Malformed watch configuration prevents the server from starting, even when
+`watches.enabled` is false. Omit `watches` to use defaults; an empty `watches:`
+key is YAML null and is rejected. If a manual edit prevents startup, correct
+`squid.yaml` on the host before restarting; the web editor is unavailable until
+startup succeeds. Config-editor saves reject invalid settings before writing.
+
+Trusted host configuration includes edits through `PUT /config/yaml`. Anyone
+allowed to use that editor can register executable commands and MCP endpoints;
+its same-origin check is not a separate probe-registration permission. Treat
+configuration-editor access as operator access. Saved watch settings take
+effect after restart.
+
 Read-only tool declarations require operator trust; the registry cannot prove
 that a remote tool has no side effects.
+
+The following mapping belongs under `watches.registry` (alongside
+`watches.enabled: false`):
 
 ```yaml
 servers:

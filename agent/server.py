@@ -379,6 +379,12 @@ async def _resume_stalled_flows_on_startup():
 async def _lifespan(_app: FastAPI):
     from .context import runtime_templates
     runtime_templates()
+    from .watch_config import load_watch_configuration
+    # Validate before starting tasks. Construction opens no transports and
+    # grants no activation or dispatch authority.
+    _app.state.watch_configuration = load_watch_configuration(_cfg)
+    from .watch_service import WatchService
+    _app.state.watch_service = WatchService(_app.state.watch_configuration)
     _realtime_notifier.start(asyncio.get_running_loop())
     set_process_change_listener(_publish_process_changed)
     dispatcher.set_queue_change_listener(_publish_queue_changed)
@@ -421,6 +427,7 @@ async def _lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        _app.state.watch_service.close()
         _shore_connection = None
         if shore_task is not None:
             shore_stop.set()
@@ -688,6 +695,8 @@ def _validate_config_content(content: str) -> dict:
 
     realtime_transport(parsed)
     shore_identity_dir(parsed)
+    from .watch_config import load_watch_configuration
+    load_watch_configuration(parsed)
 
     _validate_harness_config(parsed.get("harnesses"))
 

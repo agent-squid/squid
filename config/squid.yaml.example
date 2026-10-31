@@ -350,3 +350,12 @@ providers:
   #   models: [qwen3-coder-30b-a3b-8bit]
   #   links:
   #     - {label: admin, url: /admin}
+
+# Internal ADR-0053 probe configuration. Restart required. This switch only
+# exposes validated adapters internally; polling, registration, human grant
+# controls, and automatic turns are not wired yet. No publication permission is granted.
+watches:
+  enabled: false
+  registry:
+    servers: {}
+    probes: {}

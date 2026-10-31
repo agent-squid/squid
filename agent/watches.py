@@ -15,6 +15,12 @@ from uuid import uuid4
 log = logging.getLogger(__name__)
 
 SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS watch_grants (
+        id TEXT PRIMARY KEY,
+        watch_id TEXT NOT NULL REFERENCES watches(id) ON DELETE CASCADE,
+        user_action TEXT NOT NULL, created_at REAL NOT NULL,
+        expires_at REAL NOT NULL, revoked_at REAL
+    )""",
     """CREATE TABLE IF NOT EXISTS watches (
         id TEXT PRIMARY KEY, topic TEXT NOT NULL, adapter TEXT NOT NULL,
         target TEXT NOT NULL, request_key TEXT NOT NULL,
@@ -54,15 +60,21 @@ def _connect():
 DEFAULT_WATCH_TTL = 24 * 60 * 60
 
 
-def create_watch(*, topic, adapter, target, request_key, poll_interval, now, expires_at=None):
-    """Creation keys are permanent per topic; a new watch needs a new key."""
+def create_watch(*, topic, adapter, target, request_key, poll_interval, now, expires_at=None, _guard=None,
+                 _default_ttl=DEFAULT_WATCH_TTL):
+    """Creation keys are permanent per topic; a new watch needs a new key.
+
+    The internal service guard runs under the write transaction before mutation.
+    """
     if not all(isinstance(v, str) and v.strip() for v in (topic, adapter, target, request_key)):
         raise ValueError('watch identity fields must be nonempty strings')
     default_expiry = expires_at is None
     if default_expiry:
         if type(now) not in (int, float) or not math.isfinite(now):
             raise ValueError('watch requires finite times')
-        expires_at = now + DEFAULT_WATCH_TTL
+        if type(_default_ttl) not in (int, float) or not math.isfinite(_default_ttl) or _default_ttl <= 0:
+            raise ValueError('watch requires a positive default lifetime')
+        expires_at = now + _default_ttl
     if (not all(type(v) in (int, float) and math.isfinite(v)
                 for v in (poll_interval, expires_at, now))
             or poll_interval < 30):
@@ -71,6 +83,8 @@ def create_watch(*, topic, adapter, target, request_key, poll_interval, now, exp
     try:
         with conn:
             conn.execute('BEGIN IMMEDIATE')
+            if _guard is not None:
+                _guard(conn)
             existing = conn.execute('SELECT * FROM watches WHERE topic=? AND request_key=?',
                                     (topic, request_key)).fetchone()
             if existing is None:
@@ -93,9 +107,10 @@ def create_watch(*, topic, adapter, target, request_key, poll_interval, now, exp
         conn.close()
 
 
-def transition_watch(watch_id, *, topic, version, action, now, operation_key=None):
+def transition_watch(watch_id, *, topic, version, action, now, operation_key=None, _guard=None):
     """Replay a keyed operation's original result, never reapply a stale action.
 
+    The internal service guard runs before replay under the write transaction.
     Replays return the recorded result, which may differ from current state.
     Unkeyed requests retain strict optimistic version checks.
     """
@@ -115,6 +130,8 @@ def transition_watch(watch_id, *, topic, version, action, now, operation_key=Non
             row = conn.execute('SELECT * FROM watches WHERE id=? AND topic=?', (watch_id, topic)).fetchone()
             if row is None:
                 raise ValueError('watch not found')
+            if _guard is not None:
+                _guard(conn, dict(row))
             if operation_key is not None:
                 previous = conn.execute(
                     'SELECT * FROM watch_operations WHERE watch_id=? AND operation_key=?',

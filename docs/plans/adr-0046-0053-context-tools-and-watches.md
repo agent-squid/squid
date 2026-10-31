@@ -69,7 +69,7 @@ symbol names are navigation anchors, not promises about their final placement.
   registered tool enforcement, structured-result bounds, and sanitized failures.
   Every poll opens a fresh session; endpoint outage/restart and timeout recovery
   are covered over real transports. OAuth and wire-size bounds remain deferred.
-  Registry loading is explicit and not connected to `squid.yaml` or startup.
+  Registry loading was initially explicit; host integration is recorded below.
   Verification: 96 focused tests passed on Python 3.10 and 3.11; lockfile checked.
 - Pre-publication review fix: redact MCP/HTTP SDK logging within probe tasks,
   including exception and cleanup paths. Regression coverage reproduces malformed
@@ -81,8 +81,23 @@ symbol names are navigation anchors, not promises about their final placement.
   preserve a distinct safe error type; HTTP timeouts follow probe configuration.
   Verification: 109 focused tests passed on Python 3.10 and 3.11; without the
   optional SDK, 92 passed and the MCP transport module skipped.
-- Next watch slice: host configuration integration and
-  policy/grants and scoped service/API/CLI (milestone 3),
+- Host configuration integration: `watches.enabled` (false by default) and
+  trusted `watches.registry` now validate at startup and in the config editor.
+  Disabled registries expose no adapters; loading never opens transports or
+  starts polling. Authorization, API/CLI, and dispatch remain pending.
+  Verification: 124 focused watch/config/context tests passed on Python 3.11.
+- Internal observation authorization slice: strict global/topic narrowing,
+  bounded observation lifetimes, durable exact-watch grants, hashed instance-local
+  turn credentials, and shared create/list/show/lifecycle service. Grant checks
+  run inside lifecycle transactions, including keyed replays; revocation pauses
+  active observation and invalidates polling leases. Server lifespan creates and
+  closes the service. See [authorization boundary](../watch-authorization.md).
+  Trusted grant/token controls have no authenticated transport yet. No launch
+  hook delivers/revokes turn tokens; no user-facing registration is enabled.
+  Verification: 296 watch/service/config/context/server tests passed on Python
+  3.11, including real MCP transports.
+- Next watch slice: authenticated grant controls, turn credential delivery and
+  scoped service API/CLI (milestone 3),
   lifecycle wiring and authorized dispatch through the normal topic queue.
   Pending events are retained, not acknowledged or dispatched by this slice.
 - Milestones 2 and 5–8 remain unimplemented. No automatic publication is enabled.
@@ -91,16 +106,17 @@ symbol names are navigation anchors, not promises about their final placement.
 
 The internal observation core is complete for its current scope; milestone 4
 and the user-facing watch feature are **not complete**. Restarting Squid does
-not enable watches: `_lifespan` does not start `WatchLoop`, no production probe
-registry is loaded, and pending events have no agent dispatch consumer.
+not enable watches: `_lifespan` does not start `WatchLoop`, no production
+polling task uses the configured probe registry, and pending events have no agent dispatch consumer.
 
 | Component | Current status |
 | --- | --- |
 | Durable watch store, claims, expiry, retries, cursor/event ingestion | Implemented and unit-tested |
 | Executable probes and injected MCP-client bridge | Implemented and unit-tested |
 | Python 3.10/3.11 compatibility and review regressions | 96 focused tests passed on each runtime |
-| Trusted probe configuration and concrete MCP transport/client | Implemented internally; host configuration loading pending |
-| Policy/grants, scoped service, API/CLI registration | Pending |
+| Trusted probe configuration and concrete MCP transport/client | Host configuration loading implemented; polling remains disabled |
+| Observation policy/grants and scoped internal service | Implemented; authenticated controls and turn delivery pending |
+| API/CLI registration | Pending |
 | Server lifespan startup/shutdown wiring | Pending |
 | Durable run batching, queue dispatch, acknowledgement and recovery | Pending |
 | Real-server restart and end-to-end automatic handling | Not verified; requires the pending wiring |
