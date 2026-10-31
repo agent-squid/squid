@@ -91,3 +91,20 @@ def test_unsupported_urls_are_rejected_by_both_paths(transport, monkeypatch, url
         assert transport == []
     finally:
         watch_launch.configure(None)
+
+
+def test_execution_commands_use_human_control_and_runs_use_get(transport, tmp_path, capsys):
+    path = tmp_path / 'grant.json'
+    path.write_text(json.dumps(dict(agent='test', instructions='local inspection', max_runs=1,
+                                    max_attempts=1, request_key='grant')))
+    assert watch_cli.main(['watch', 'execution-grant', 'watch-id', '--human-topic', 'squid', '--input', str(path)]) == 0
+    assert transport[-1].url.path == '/watch-control/squid/watches/watch-id/execution-grant'
+    assert transport[-1].headers['authorization'] == 'Bearer human-secret'
+    assert watch_cli.main(['watch', 'execution-grant', 'watch-id', '--input', str(path)]) == 1
+    assert len(transport) == 1
+    assert watch_cli.main(['watch', 'runs', 'watch-id']) == 0
+    assert transport[-1].method == 'GET'
+    assert transport[-1].url.path == '/watches/watch-id/runs'
+    assert watch_cli.main(['watch', 'runs', 'watch-id', '--human-topic', 'squid']) == 0
+    assert transport[-1].url.path == '/watch-control/squid/watches/watch-id/runs'
+    assert 'secret' not in str(capsys.readouterr())

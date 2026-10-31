@@ -28,6 +28,8 @@ def load_watch_configuration(config: dict) -> WatchConfiguration:
     mutations; the server lifespan owns the worker.
     """
     section = config.get('watches', {})
+    if section is None:
+        section = {}
     if not isinstance(section, dict) or set(section) - {'enabled', 'registry', 'policy', 'topics'}:
         raise ValueError('invalid watches configuration fields')
     enabled = section.get('enabled', False)

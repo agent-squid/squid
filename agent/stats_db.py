@@ -1008,7 +1008,8 @@ def init_db() -> None:
     conn = _connect()
     try:
         from .watches import SCHEMA as watch_schema
-        for ddl in (*_TABLES, *watch_schema):
+        from .watch_runs import SCHEMA as watch_run_schema
+        for ddl in (*_TABLES, *watch_schema, *watch_run_schema):
             conn.execute(ddl)
         if "pause_reason" not in _table_columns(conn, "watches"):
             conn.execute("ALTER TABLE watches ADD COLUMN pause_reason TEXT")
@@ -1480,6 +1481,8 @@ def set_topic_hidden(name: str, hidden: bool) -> bool:
 
 def delete_topic(name: str) -> bool:
     with _connect() as conn:
+        conn.execute("DELETE FROM watch_runs WHERE watch_id IN (SELECT id FROM watches WHERE topic=?)", (name,))
+        conn.execute("DELETE FROM watches WHERE topic=?", (name,))
         conn.execute(
             "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND role='assistant')",
             (name,),
@@ -1496,6 +1499,13 @@ def delete_topic(name: str) -> bool:
 
 def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> None:
     with _connect() as conn:
+        # Keep durable run history while detaching only messages being removed.
+        clause = "topic=? AND agent=?"
+        if adhoc is not None:
+            clause += " AND adhoc=1" if adhoc else " AND (adhoc=0 OR adhoc IS NULL)"
+        for column in ('user_msg_id', 'assistant_msg_id'):
+            conn.execute("UPDATE watch_runs SET " + column + "=NULL WHERE " + column +
+                         " IN (SELECT id FROM chat_messages WHERE " + clause + ")", (topic, agent))
         if adhoc is None:
             conn.execute(
                 "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND role='assistant')",
@@ -2287,7 +2297,7 @@ def get_flow_run_ids_with_row_counts(counts: tuple[int, ...]) -> list[str]:
 
 def mark_orphaned_pending(before_created_at: Optional[str] = None) -> int:
     with _connect() as conn:
-        where = "status='pending' AND role='assistant'"
+        where = "status='pending' AND role='assistant' AND NOT EXISTS (SELECT 1 FROM watch_runs wr WHERE wr.assistant_msg_id=chat_messages.id)"
         params: list[str] = []
         if before_created_at:
             where += " AND created_at < ?"

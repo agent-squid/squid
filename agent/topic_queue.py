@@ -1,6 +1,7 @@
 """
 topic_queue.py — Per-topic FIFO queues with parallel execution across topics.
 """
+from contextlib import asynccontextmanager
 import asyncio
 import json
 import logging
@@ -193,13 +194,15 @@ class QueueItem:
     shell_pinned_contents: Optional[list[str]] = None
     shell_attached_paths: Optional[list[str]] = None
     shell_topic_memory: Optional[str] = None
+    watch_run_id: Optional[str] = None
     refresh_session_at_start: bool = False
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
 class TopicWorker:
-    def __init__(self, topic: str, on_queue_changed: Optional[Callable[[], None]] = None):
+    def __init__(self, topic: str, on_queue_changed: Optional[Callable[[], None]] = None, coordinator=None):
         self.topic = topic
+        self.coordinator = coordinator
         self._on_queue_changed = on_queue_changed
         self.q: asyncio.Queue = asyncio.Queue()
         self._processing_seq: Optional[int] = None
@@ -406,7 +409,17 @@ class TopicWorker:
                     from .stats_db import insert_run_event
                     insert_run_event(item.msg_id, 2, "processing", json.dumps({"topic": item.topic}))
                 await item.out_q.put({"_processing": {"topic": item.topic}})
-                await self._process(item)
+                if self.coordinator is None:
+                    await self._process(item)
+                else:
+                    async with self.coordinator(item) as admitted:
+                        if admitted:
+                            await self._process(item)
+                        else:
+                            from .watch_dispatch import defer_run
+                            await defer_run(item.watch_run_id)
+                            await item.out_q.put({'_error': 'Watch deferred for user work'})
+                            await item.out_q.put(None)
             except Exception as exc:
                 log.exception("Worker bug (topic=%s)", self.topic)
                 await item.out_q.put({"_error": str(exc)})
@@ -435,6 +448,15 @@ class TopicWorker:
     async def _process(self, item: QueueItem):
         from .runners import CLIError, CLIAuthRequired, effective_protocol, runner_for_agent
         from .config import SQUID_HOME, WORKTREE_ISOLATION_ENABLED
+        if item.watch_run_id:
+            from .watch_dispatch import refresh_run
+            refreshed = await refresh_run(item.watch_run_id)
+            if refreshed is None:
+                await item.out_q.put({'_error': 'Watch authorization or source changed'})
+                await item.out_q.put(None)
+                return
+            item.prompt = refreshed
+            item.display_prompt = refreshed
         from .context import assemble_runtime, runtime_prompt
         from .resolve import resolve_agent, split_agent_ref
         from .stats_db import (
@@ -723,6 +745,14 @@ class TopicWorker:
                     await item.out_q.put({"_error": "Cancelled before start"})
                     await item.out_q.put(None)
                     return
+            if item.watch_run_id:
+                from .watch_dispatch import confirm_run
+                if not await confirm_run(item.watch_run_id):
+                    for tracker in git_trackers:
+                        await asyncio.to_thread(tracker.cleanup)
+                    await item.out_q.put({'_error': 'Watch authorization changed before execution'})
+                    await item.out_q.put(None)
+                    return
             try:
                 await _stream(effective_prompt, **kwargs)
             except CLIError as exc:
@@ -899,6 +929,44 @@ class TopicDispatcher:
         self._workers: dict[str, TopicWorker] = {}
         self._adhoc_counter: int = 0
         self._queue_change_listener = queue_change_listener
+        self._topic_condition = asyncio.Condition()
+        self._normal_active = {}
+        self._normal_waiting = {}
+        self._watch_active = set()
+
+    def busy_topics(self):
+        queued = {item.topic for worker in self._workers.values() for item in worker.q._queue
+                  if item is not None and not item.watch_run_id}
+        return (queued | {topic for topic, count in self._normal_active.items() if count}
+                | {topic for topic, count in self._normal_waiting.items() if count} | self._watch_active)
+
+    @asynccontextmanager
+    async def coordinate(self, item):
+        topic = item.topic
+        admitted = False
+        async with self._topic_condition:
+            if item.watch_run_id:
+                if topic not in self.busy_topics():
+                    self._watch_active.add(topic)
+                    admitted = True
+            else:
+                self._normal_waiting[topic] = self._normal_waiting.get(topic, 0) + 1
+                try:
+                    await self._topic_condition.wait_for(lambda: topic not in self._watch_active)
+                finally:
+                    self._normal_waiting[topic] -= 1
+                self._normal_active[topic] = self._normal_active.get(topic, 0) + 1
+                admitted = True
+        try:
+            yield admitted
+        finally:
+            if admitted:
+                async with self._topic_condition:
+                    if item.watch_run_id:
+                        self._watch_active.discard(topic)
+                    else:
+                        self._normal_active[topic] -= 1
+                    self._topic_condition.notify_all()
 
     def set_queue_change_listener(self, listener: Optional[Callable[[list[dict]], None]]) -> None:
         self._queue_change_listener = listener
@@ -909,7 +977,7 @@ class TopicDispatcher:
 
     def _get_or_create(self, key: str, topic: str) -> TopicWorker:
         if key not in self._workers:
-            worker = TopicWorker(topic, self._notify_queue_changed)
+            worker = TopicWorker(topic, self._notify_queue_changed, self.coordinate)
             worker.start()
             self._workers[key] = worker
         return self._workers[key]
@@ -955,6 +1023,7 @@ class TopicDispatcher:
         shell_pinned_contents: Optional[list[str]] = None,
         shell_attached_paths: Optional[list[str]] = None,
         shell_topic_memory: Optional[str] = None,
+        watch_run_id: Optional[str] = None,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         from .resolve import split_agent_ref
         resolved_harness, resolved_provider = split_agent_ref(harness or backend, provider)
@@ -1017,6 +1086,7 @@ class TopicDispatcher:
             shell_attached_paths=shell_attached_paths,
             shell_topic_memory=shell_topic_memory,
             refresh_session_at_start=True,
+            watch_run_id=watch_run_id,
         )
         seq = await worker.enqueue(item)
         position = worker.position_of(seq)

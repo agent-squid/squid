@@ -406,6 +406,10 @@ async def _lifespan(_app: FastAPI):
     _publish_queue_changed(dispatcher.all_queued_items())
     await asyncio.to_thread(_sync_pi_agents_models_store)
     await _recover_orphaned_pending_on_startup()
+    # Watch turns reconcile their own linked evidence, including ambiguous
+    # interrupted work, even when execution has been disabled after restart.
+    from .watch_dispatch import WatchDispatch
+    await WatchDispatch(_app.state.watch_service, dispatcher).recover()
     await _resume_stalled_flows_on_startup()
     from .flow import maintain_durable_flows
     durable_maintenance = asyncio.create_task(
@@ -436,9 +440,11 @@ async def _lifespan(_app: FastAPI):
         shore_task.add_done_callback(_log_shore_failure)
     try:
         _app.state.watch_service.start_monitoring()
+        _app.state.watch_service.start_dispatch(dispatcher)
         yield
     finally:
         watch_launch.configure(None)
+        await _app.state.watch_service.stop_dispatch()
         await _app.state.watch_service.stop_monitoring()
         await asyncio.to_thread(_app.state.watch_service.close)
         _shore_connection = None
@@ -999,6 +1005,7 @@ async def _prepare_chat_turn(
     flow_route: Optional[str] = None,
     flow_step_id: Optional[str] = None,
     override_cwd: Optional[str] = None,
+    watch_run_id: Optional[str] = None,
 ) -> Union[dict, JSONResponse]:
     native_shell = message.lstrip().startswith("!")
     # 1. Resolve agent — explicit wins, else use topic sticky
@@ -1031,8 +1038,9 @@ async def _prepare_chat_turn(
     model: Optional[str] = agent_config.get("model") or None
     native_backend_command = _is_backend_native_chat_command(message)
 
-    upsert_topic(topic, resolved_agent, last_prompt=message,
-                 last_harness=harness, last_provider=provider, last_model=model, adhoc=adhoc)
+    if watch_run_id is None:
+        upsert_topic(topic, resolved_agent, last_prompt=message,
+                     last_harness=harness, last_provider=provider, last_model=model, adhoc=adhoc)
     agent_cwd: Optional[str] = agent_config.get("cwd") or None
     response_timeout: int = RESPONSE_TIMEOUT
 
@@ -1089,6 +1097,8 @@ async def _prepare_chat_turn(
             blockers = []
         if not blockers:
             blockers = await _active_worktree_blockers(topic, code_roots)
+        if blockers and watch_run_id is not None:
+            return JSONResponse({"error": "watch_worktree_blocked"}, status_code=409)
         if blockers:
             # Persist a trace even though this turn never runs — otherwise a
             # blocked turn (e.g. a broadcast sibling that loses a worktree-sync
@@ -1120,21 +1130,26 @@ async def _prepare_chat_turn(
             memory_revision = memory_data_for_prompt.get("revision")
 
     stored_context_ids = list({*(context_ids or []), *(pinned_ids or [])}) or None
-    user_msg_id = insert_user_message(topic, resolved_agent, message,
-                                      context_ids=stored_context_ids,
-                                      mem=bool(memory_revision),
-                                      mem_revision=memory_revision,
-                                      lookback=lookback,
-                                      source=source,
-                                      flow_run_id=flow_run_id,
-                                      flow_route=flow_route,
-                                      flow_step_id=flow_step_id)
-    asst_msg_id = insert_assistant_message(
-        topic, resolved_agent, user_msg_id, adhoc=adhoc,
-        flow_run_id=flow_run_id, flow_route=flow_route,
-        source="shell" if native_shell else source,
-        flow_step_id=flow_step_id,
-    )
+    if watch_run_id is not None:
+        from .watch_runs import prepare_messages
+        user_msg_id, asst_msg_id = await asyncio.to_thread(
+            prepare_messages, watch_run_id, topic=topic, agent=resolved_agent, content=message, adhoc=adhoc)
+    else:
+        user_msg_id = insert_user_message(topic, resolved_agent, message,
+                                          context_ids=stored_context_ids,
+                                          mem=bool(memory_revision),
+                                          mem_revision=memory_revision,
+                                          lookback=lookback,
+                                          source=source,
+                                          flow_run_id=flow_run_id,
+                                          flow_route=flow_route,
+                                          flow_step_id=flow_step_id)
+        asst_msg_id = insert_assistant_message(
+            topic, resolved_agent, user_msg_id, adhoc=adhoc,
+            flow_run_id=flow_run_id, flow_route=flow_route,
+            source="shell" if native_shell else source,
+            flow_step_id=flow_step_id,
+        )
     if not native_shell:
         attach_assistant_session(asst_msg_id, resume_session_id)
 

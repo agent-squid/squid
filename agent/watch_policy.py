@@ -11,24 +11,31 @@ class WatchPolicy:
     adapters: frozenset[str] = frozenset()
     min_poll_seconds: int = 30
     max_lifetime_seconds: int = 86400
+    execution_enabled: bool = False
+    max_runs: int = 3
+    max_attempts: int = 1
 
     def narrow(self, other):
         return WatchPolicy(self.enabled and other.enabled,
                            self.operations & other.operations,
                            self.adapters & other.adapters,
                            max(self.min_poll_seconds, other.min_poll_seconds),
-                           min(self.max_lifetime_seconds, other.max_lifetime_seconds))
+                           min(self.max_lifetime_seconds, other.max_lifetime_seconds),
+                           self.execution_enabled and other.execution_enabled,
+                           min(self.max_runs, other.max_runs), min(self.max_attempts, other.max_attempts))
 
 
 def parse_policy(raw, *, defaults):
-    fields = {'enabled', 'operations', 'adapters', 'min_poll_seconds', 'max_lifetime_seconds'}
+    fields = {'enabled', 'operations', 'adapters', 'min_poll_seconds', 'max_lifetime_seconds', 'execution_enabled', 'max_runs', 'max_attempts'}
     if not isinstance(raw, dict) or set(raw) - fields:
         raise ValueError('invalid watch policy fields')
     values = dict(enabled=defaults.enabled, operations=defaults.operations,
                   adapters=defaults.adapters, min_poll_seconds=defaults.min_poll_seconds,
-                  max_lifetime_seconds=defaults.max_lifetime_seconds)
+                  max_lifetime_seconds=defaults.max_lifetime_seconds,
+                  execution_enabled=defaults.execution_enabled, max_runs=defaults.max_runs,
+                  max_attempts=defaults.max_attempts)
     for key, value in raw.items():
-        if key == 'enabled':
+        if key in {'enabled', 'execution_enabled'}:
             if type(value) is not bool:
                 raise ValueError('watch policy enabled must be boolean')
         elif key in {'operations', 'adapters'}:

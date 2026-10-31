@@ -1,12 +1,17 @@
 # Watch observation policy and authorization
 
-The **observation-only service** exposes HTTP and `agentsquid watch`, with
-server-owned polling when `watches.enabled: true`. Creation returns a proposal;
-authenticated activation/resume requires an exact-watch, full-lifetime grant
-and a running observation worker. Disabled or stopped workers return
-`409 watch_monitoring_unavailable`. Native agent-facing MCP tools, automatic
-turns, deadlines, and publication remain unavailable. Unsupported execution and
-mutation fields fail validation rather than implying those capabilities exist.
+The shared watch service supports observation and separately granted local-work
+turns through HTTP and `agentsquid watch`. Both `watches.enabled` and
+`policy.execution_enabled` default to false. Creation returns an observation
+proposal. Observation activation/resume requires a full-lifetime observation
+grant and a running polling worker; a stopped worker returns
+`409 watch_monitoring_unavailable`.
+
+Automatic local turns additionally require a distinct exact-watch execution
+grant, an explicitly selected configured agent, instructions, finite run/attempt
+limits, and execution enablement in effective global/topic policy. Observation
+authority never authorizes a model turn. Publication, external mutation grants,
+deadlines, and dedicated PR semantics remain unavailable.
 
 ## Host policy
 
@@ -25,6 +30,9 @@ watches:
     adapters: [snapshot]
     min_poll_seconds: 60
     max_lifetime_seconds: 86400
+    execution_enabled: false
+    max_runs: 3
+    max_attempts: 1
   topics:
     example:
       operations: [create, list, show, cancel]
@@ -98,7 +106,8 @@ The console entry point dispatches `watch`/`tools` before importing server or
 home-directory configuration. Agent calls require explicit `SQUID_API_URL` and
 `SQUID_TURN_TOKEN`; there is no fallback server discovery. `agentsquid tools`
 returns effective topic operations/adapters and reports the running worker’s
-monitoring availability. Dispatch and publication remain explicitly disabled. `agentsquid tools --help` and
+monitoring and dispatch availability, execution budget ceilings, and local-work
+scope. Publication remains explicitly disabled. `agentsquid tools --help` and
 `agentsquid watch --help` describe the client. Enabled one-shot model launches
 receive a minimal discovery hint and the executable directory on PATH. Hints
 are omitted for resumed sessions and slash commands, detected from the original
@@ -155,9 +164,10 @@ agentsquid watch cancel WATCH_ID --input cancel.json
 
 JSON mutation files may be replaced with `--input -` for stdin. All successful
 commands emit JSON; failures return a nonzero exit code and sanitized stderr.
-Execution-agent selection, execution/deadline rules, grants for external
-mutations, and shared native MCP delivery remain later slices; unsupported
-fields are rejected explicitly rather than suggesting execution is available.
+Execution-agent selection and local-work budgets are recorded through the
+separate human execution-grant control below. Deadline rules, external mutation
+grants, and shared native MCP delivery remain later slices; unsupported fields
+are rejected explicitly.
 
 
 Blocking watch service and control operations run in worker threads, including
@@ -185,11 +195,116 @@ complete the watch. Lifecycle changes remain readable through list/show; topic
 UI and durable lifecycle notifications are still later work.
 
 Observed revisions and cursor advancement commit atomically. Events stay
-`pending`; no agent consumer acknowledges them in this slice. Shutdown cancels
+`pending` for observation-only watches; separately authorized execution handles
+only successfully completed captured batches. Shutdown cancels
 probe I/O and preserves outstanding leases. On restart, abandoned claims are
 reclaimed after lease expiry, overdue checks coalesce into one poll, and replayed
 source revisions retain their event identity. Downtime does not extend lifetime.
 A disposable real-server test verifies a changed `/health` boot time, saved cursor
 and expiry, durable pending events, replay deduplication, a subsequent change,
 and cancellation. It makes a saved poll overdue to avoid a wall-clock interval
-sleep; it does not claim exactly-once external effects or automatic agent work.
+sleep; the execution variant also verifies local-turn dispatch and budgets. Neither
+variant claims exactly-once external effects or publication.
+
+
+## Explicit execution grants and local work
+
+Opt in through `watches.policy.execution_enabled: true`, with global `max_runs`
+and `max_attempts` ceilings (defaults 3 and 1). Topic policy can disable execution
+or lower ceilings; it cannot expand them. Configuration takes effect on restart.
+The existing observation grant and activation are still required. No production
+configuration is changed by implementing this feature.
+
+An authenticated operator may call
+`POST /watch-control/{topic}/watches/{id}/execution-grant` with exactly:
+
+```json
+{
+  "agent": "configured-agent-name",
+  "instructions": "Inspect the observed change and make an authorized local fix",
+  "max_runs": 3,
+  "max_attempts": 1,
+  "request_key": "operator-chosen-idempotency-key"
+}
+```
+
+The response identifies a `local_work` grant. The grant covers this immutable
+watch target/topic and original expiry, selected agent/runtime/cwd, and topic
+code roots. Agent or root configuration changes invalidate execution until a
+new explicit grant is recorded. No commit, push, publication, comment posting,
+merge, or external mutation is authorized. Normal isolated-turn preparation and
+sync apply; this API boundary does not sandbox the agent's ambient filesystem
+or shell. Watch-turn instructions explicitly restrict scope and label source
+content as untrusted task data.
+
+Only one unrevoked execution grant may exist for a watch. An identical request
+key replays the original grant without renewing its expiry or undoing revocation;
+conflicting fields return 409. To revoke, send `{"grant_id":"ID"}` to
+`/execution-revoke`; revocation pauses active monitoring and blocks a later
+start. Grant/revoke are human-only controls and never agent token operations.
+Default agent turn tokens carry no activation grants and cannot create further
+active watches from a triggered turn.
+
+```sh
+agentsquid watch execution-grant WATCH_ID --human-topic TOPIC --input execution.json
+agentsquid watch execution-revoke WATCH_ID --human-topic TOPIC --input revoke.json
+agentsquid watch runs WATCH_ID
+agentsquid watch runs WATCH_ID --human-topic TOPIC
+```
+
+Run listing is topic-authorized and bounded (`limit` 1–100, HTTP default 20; the shared CLI limit defaults to 100; nonnegative
+`offset`). `GET /watches/{id}/runs` and the human-prefixed equivalent expose run
+identity, batch, attempt record, linked messages, state, and outcome. `attempt`
+is the dispatch record's sequence within a batch and can include safe deferrals;
+deferrals consume no model or failure budget. Grant IDs and messages do not
+constitute new authority.
+
+## Durable dispatch, priority, and recovery
+
+The lifespan-owned dispatcher commits one bounded captured event batch and
+stable run identity before preparing messages. User/assistant message pairs,
+run links, and realtime records are committed atomically; preparation replay
+returns the same pair. A partial unique index permits one unresolved active run
+per watch. New observations remain pending while a run executes.
+
+Watch work yields to pending user messages, including requests still being
+prepared, and coordinates across all topic agent/provider lanes. User turns
+retain their existing concurrency with one another. A watch turn runs alone
+within its topic and does not preempt an already-running user turn. User work
+arriving before the agent starts safely defers the batch. Automated preparation
+does not change the topic's human-selected sticky agent or last prompt.
+
+Immediately before execution, the ordinary topic worker rechecks grant, policy,
+agent/root identity, expiry, budget, and pending user work, then refreshes the
+registered source. Refresh failures pause before model execution. A closed
+source stops the watch without running a model. Fresh data is bounded and
+explicitly marked if truncated; source-specific stale-head handling belongs to
+the future dedicated PR adapter. Refresh does not acknowledge newer events or
+advance the polling cursor outside its durable ingestion transaction.
+
+Only a successful linked ordinary turn with a durable completion event, no
+error event, and no unresolved sync conflict handles the captured event IDs.
+Partial text or `status=done` alone is insufficient. Newer events are not consumed.
+Recorded failures retry only within finite attempt and watch-wide run ceilings;
+failed preparation counts toward limits. Budget exhaustion pauses visibly.
+
+Startup reconciles watch records independently of generic orphan handling,
+even when execution was disabled after restart. Known successful completion is
+acknowledged; unstarted work can be safely retried. Started work with uncertain
+completion or sync outcomes pauses for reconciliation and is never blindly
+retried, even after an observational resume. Inspect the run/messages and local
+state; no automatic resolution control is shipped for ambiguous runs. Cancel
+and recreate a watch only after establishing a new safe scope. Shutdown settles
+known evidence, cancels owned refresh probes, drains queued watch work, and uses
+the normal process cancellation mechanism. Existing Flow retry semantics are
+unchanged. This is one server/dispatcher per database, not distributed workers.
+
+A disposable real-server test with the opt-in Echo harness verifies one event
+launches one normal turn, restart replay launches none, a later event launches
+one more, and a finite run budget stops another dispatch. No real coding agent,
+network source, Git publication, or production instance is used in that test.
+
+Worktree blockers defer execution without consuming the model budget. The durable
+run outcome records `worktree_blocked`; dispatch waits 60 seconds before trying
+that watch again, including after restart. Observation polling continues during
+this delay, and authorization is checked again before execution.

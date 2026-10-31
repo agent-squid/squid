@@ -8,7 +8,8 @@ to false; disabled registries are still validated but expose no adapters.
 Enabled adapters are held in `app.state.watch_configuration`; loading starts
 no polling by itself. Lifespan starts the authorized observation worker when
 globally enabled. HTTP/CLI registration saves proposals; activation needs an
-authenticated exact-watch grant. Agent dispatch remains unimplemented.
+authenticated exact-watch grant. Local-work dispatch is independently opt-in and needs a separate execution
+grant; observation alone launches no model.
 Internal policy, grants, and scoped operations are described in
 [watch authorization](watch-authorization.md), including authenticated human
 grant controls and scoped one-shot agent credential delivery.
@@ -97,4 +98,6 @@ Tests cover real stdio/HTTP calls, provider errors, timeout/reconnection,
 missing/rejected/valid bearer credentials, endpoint outage/restart, registration
 validation, and malformed/oversized structured results. MCP transport tests skip
 cleanly when the optional SDK is absent; executable and registry tests still run. These are isolated
-fixtures; production polling and authorized dispatch remain disabled.
+fixtures. Production observation and local-work execution are independently
+opt-in and require the corresponding durable grants. Tests enable them only in
+disposable hosts; no production configuration is changed.

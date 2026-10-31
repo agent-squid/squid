@@ -16,7 +16,7 @@ def test_defaults_and_disabled_registry_are_unavailable():
 
 
 @pytest.mark.parametrize('section', [
-    None, [], {'enabled': 'false'}, {'enabled': 1}, {'publish': True},
+    [], {'enabled': 'false'}, {'enabled': 1}, {'publish': True},
     {'registry': None}, {'registry': {'unexpected': {}}},
     {'registry': {'probes': {'bad': {'argv': 'shell text'}}}},
     {'registry': {'probes': {'bad': {'server': 'missing', 'tool': 'read'}}}},
@@ -94,3 +94,7 @@ def test_topic_policy_cannot_expand_global_scope():
 def test_invalid_policy_rejected(extra):
     with pytest.raises(ValueError):
         load_watch_configuration({'watches': extra})
+
+
+def test_empty_yaml_watch_section_is_disabled():
+    assert not load_watch_configuration({'watches': None}).enabled

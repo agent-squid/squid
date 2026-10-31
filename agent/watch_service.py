@@ -57,6 +57,31 @@ class WatchService:
         self._lock = threading.RLock()
         self._closed = False
         self._monitoring_task = None
+        self._dispatch_task = None
+        self.dispatch_runtime = None
+
+    @property
+    def dispatch_enabled(self):
+        return (not self._closed and self.monitoring_enabled and self.configuration.policy.execution_enabled
+                and self._dispatch_task is not None and not self._dispatch_task.done())
+
+    def start_dispatch(self, dispatcher):
+        if not self.monitoring_enabled or not self.configuration.policy.execution_enabled or self.dispatch_enabled:
+            return
+        from .watch_dispatch import WatchDispatch
+        self.dispatch_runtime = WatchDispatch(self, dispatcher)
+        self._dispatch_task = asyncio.create_task(self.dispatch_runtime.run(), name='squid-watch-dispatch')
+
+    async def stop_dispatch(self):
+        if self.dispatch_runtime is not None:
+            self.dispatch_runtime.accepting = False
+        if self._dispatch_task is not None:
+            self._dispatch_task.cancel()
+            await asyncio.gather(self._dispatch_task, return_exceptions=True)
+            self._dispatch_task = None
+        if self.dispatch_runtime is not None:
+            await self.dispatch_runtime.stop()
+            self.dispatch_runtime = None
 
     @property
     def monitoring_enabled(self):
@@ -169,9 +194,11 @@ class WatchService:
             return dict(scope='observation', topic=credential.topic,
                         operations=sorted(credential.operations & policy.operations),
                         adapters=sorted(policy.adapters), monitoring_enabled=self.monitoring_enabled,
-                        dispatch_enabled=False, publication_enabled=False,
+                        dispatch_enabled=self.dispatch_enabled and policy.execution_enabled, publication_enabled=False,
                         min_poll_seconds=policy.min_poll_seconds,
-                        max_lifetime_seconds=policy.max_lifetime_seconds)
+                        max_lifetime_seconds=policy.max_lifetime_seconds,
+                        max_runs=policy.max_runs, max_attempts=policy.max_attempts,
+                        execution_scope='local_work' if policy.execution_enabled else None)
 
     def create(self, token, *, adapter, target, request_key, poll_interval=30, expires_at=None):
         with self._lock:
@@ -222,6 +249,19 @@ class WatchService:
                 return [_public(row) for row in conn.execute(
                     'SELECT * FROM watches WHERE topic=? ORDER BY id LIMIT ? OFFSET ?',
                     (credential.topic, limit, offset))]
+            finally:
+                conn.close()
+
+    def runs(self, token, watch_id, *, limit=20, offset=0):
+        if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or offset < 0:
+            raise ValueError('invalid run pagination')
+        with self._lock:
+            self.show(token, watch_id)
+            conn = watches._connect()
+            try:
+                return [dict(row) for row in conn.execute(
+                    'SELECT * FROM watch_runs WHERE watch_id=? ORDER BY created_at DESC,id LIMIT ? OFFSET ?',
+                    (watch_id, limit, offset))]
             finally:
                 conn.close()
 

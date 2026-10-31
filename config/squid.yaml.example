@@ -364,11 +364,16 @@ providers:
   #   links:
   #     - {label: admin, url: /admin}
 
-# Internal ADR-0053 probe configuration. Restart required. This switch only
-# exposes validated adapters internally; polling, registration, human grant
-# controls, and automatic turns are not wired yet. No publication permission is granted.
+# ADR-0053 watches. Restart required. Observation and execution each require
+# explicit human grants. Execution is opt-in; publication is never authorized.
 watches:
+  # Execution agents retain ambient shell/filesystem access. External data is untrusted.
+  # Local-work restrictions are prompt instructions, not an OS sandbox.
   enabled: false
+  policy:
+    execution_enabled: false
+    max_runs: 3
+    max_attempts: 1
   registry:
     servers: {}
     probes: {}

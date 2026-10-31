@@ -48,7 +48,9 @@ async def run(runner, prompt, *, persistent=False, shell=False, request_text=Non
                 env['PATH'] = str(executable.parent) + os.pathsep + (env.get('PATH') or os.environ.get('PATH', ''))
                 original_request = prompt if request_text is None else request_text
                 if not shell and not kwargs.get('resume_session_id') and not original_request.lstrip().startswith('/'):
-                    availability = ('Monitoring only; no automatic agent work or publication.'
+                    availability = ('Local-work watch turns require recorded execution grants; publication is disabled.'
+                                    if service.dispatch_enabled and policy.execution_enabled else
+                                    'Monitoring only; no automatic agent work or publication.'
                                     if service.monitoring_enabled else
                                     'Watch registration currently saves proposals only; persistent monitoring is not enabled.')
                     prompt = ('Squid shared tools: `agentsquid tools --help`; '

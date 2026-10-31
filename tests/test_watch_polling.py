@@ -188,7 +188,8 @@ async def test_disabled_configuration_does_not_start_worker(setup):
     assert service._monitoring_task is None
 
 
-def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path):
+@pytest.mark.parametrize('execution', [False, True])
+def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, execution):
     import json
     import os
     from pathlib import Path
@@ -221,12 +222,13 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path):
         configuration = yaml.safe_load((root / 'config' / 'squid.yaml.example').read_text())
         configuration['server']['host'] = '127.0.0.1'
         configuration['server']['port'] = port
-        configuration['watches'] = {'enabled': True, 'registry': {'probes': {
+        configuration['test_harness_enabled'] = True
+        configuration['watches'] = {'enabled': True, 'policy': {'execution_enabled': execution, 'max_runs': 2}, 'registry': {'probes': {
             'local': {'argv': [sys.executable, str(probe), str(state)]}}}}
         (home / '.squid' / 'squid.yaml').write_text(yaml.safe_dump(configuration))
         def start():
             return subprocess.Popen([sys.executable, str(root / 'tests/fixtures/watch_host.py'),
-                                     str(home), str(listener.fileno())], env=environment,
+                                     str(home), str(listener.fileno()), '--fast-echo'], env=environment,
                                     pass_fds=(listener.fileno(),), stdout=log, stderr=log)
         def stop():
             if process is not None:
@@ -272,10 +274,18 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path):
                     paused = client.post(path + '/pause', json={'version': current['version']}).json()
                     resumed = client.post(path + '/resume', json={'version': paused['version'], 'grant_id': grant})
                     assert resumed.status_code == 200
+                if execution:
+                    agent_response = client.post('/config/agents', json={'name': 'watch-echo', 'harness': 'echo', 'provider': 'echo'})
+                    assert agent_response.status_code == 200
+                    execution_response = client.post(path + '/execution-grant', json=dict(agent='watch-echo',
+                        instructions='Inspect the event and report locally', max_runs=2, max_attempts=1, request_key='execute'))
+                    assert execution_response.status_code == 200
                 source('v2', True)
                 reschedule()
                 wait_for(lambda: client.get(path).json().get('cursor') == 'v2')
                 assert db('SELECT COUNT(*) FROM watch_events')[0][0] == 1
+                if execution:
+                    wait_for(lambda: db("SELECT COUNT(*) FROM watch_runs WHERE state='succeeded'")[0][0] == 1)
                 saved_expiry = client.get(path).json()['expires_at']
                 stop()
                 # Exercise overdue startup recovery without a 30-second sleep.
@@ -295,8 +305,17 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path):
                 source('v3', True)
                 reschedule()
                 wait_for(lambda: client.get(path).json().get('cursor') == 'v3')
-                assert db("SELECT COUNT(*) FROM watch_events WHERE disposition='pending'")[0][0] == 2
-                assert db("SELECT COUNT(*) FROM chat_messages WHERE role='assistant'")[0][0] == 0
+                if execution:
+                    wait_for(lambda: db("SELECT COUNT(*) FROM watch_runs WHERE state='succeeded'")[0][0] == 2)
+                    assert db("SELECT COUNT(*) FROM watch_events WHERE disposition='handled'")[0][0] == 2
+                    assert len(client.get(path + '/runs').json()) == 2
+                    source('v4', True)
+                    reschedule()
+                    wait_for(lambda: client.get(path).json().get('pause_reason') == 'execution_budget')
+                    assert db("SELECT COUNT(*) FROM watch_runs")[0][0] == 2
+                else:
+                    assert db("SELECT COUNT(*) FROM watch_events WHERE disposition='pending'")[0][0] == 2
+                assert db("SELECT COUNT(*) FROM chat_messages WHERE role='assistant'")[0][0] == (2 if execution else 0)
                 cancelled = client.post(path + '/cancel', json={'version': client.get(path).json()['version']})
                 assert cancelled.json()['status'] == 'cancelled'
             finally:

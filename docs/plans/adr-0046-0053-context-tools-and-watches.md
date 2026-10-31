@@ -140,18 +140,30 @@ symbol names are navigation anchors, not promises about their final placement.
   Verification: 559 watch/context/queue/runner/server/Flow tests passed on Python
   3.11; 98 focused watch polling/API/service/store tests passed on Python 3.10.
   Both runs include a disposable real server and executable probe. Lockfile checked.
-- Next watch slice: execution grants and finite budgets, durable run batching,
-  normal topic-queue dispatch and acknowledgement/recovery, plus the dedicated
-  GitHub PR adapter. Execution-agent/rule/budget API fields remain rejected
-  until their implementation ships.
+- Milestone 4 generic local-work dispatch slice: opt-in execution policy and
+  authenticated exact-watch local-work grants with agent/root identity and finite
+  budgets; durable runs/event membership and atomic message links; ordinary topic
+  queue execution with user priority and per-topic watch coordination. Source
+  refresh and scope checks precede execution. Completion proof and clean sync are
+  required before acknowledging only captured events. Ambiguous started work
+  pauses for reconciliation. Generic orphan recovery excludes linked watch turns.
+  Publication and external mutations remain disabled. No production configuration
+  is changed. Disposable Echo-host coverage includes restart replay and run limits.
+  Verification: 583 watch/context/queue/runner/server/Flow tests passed on Python
+  3.11; 159 focused tests passed on Python 3.10, both including disposable real
+  hosts. Final focused controls checks passed (97 tests), followed by 40 final
+  dispatch/polling checks covering shutdown and real-host recovery; lockfile checked.
+- Next watch slice: dedicated GitHub PR adapter, richer source-specific predicates
+  and stale-head reconciliation, and operational UI/ambiguous-run resolution.
+  Deadline and publication infrastructure remain separate milestones.
 - Milestones 2 and 5–8 remain unimplemented. No automatic publication is enabled.
 
 ## Watch completion boundary
 
 Authorized observation is available behind `watches.enabled` (false by default).
 Lifespan polls registered probes only for active watches with durable grants.
-Milestone 4 and autonomous watch handling are **not complete**: pending events
-have no agent dispatch consumer, and no dedicated PR adapter is shipped.
+Milestone 4 and autonomous watch handling are **not complete**: generic local-work dispatch is opt-in and separately granted. No dedicated PR
+adapter, deadlines, or publication stage is shipped.
 
 | Component | Current status |
 | --- | --- |
@@ -162,14 +174,17 @@ have no agent dispatch consumer, and no dedicated PR adapter is shipped.
 | Observation policy/grants and scoped service | Implemented with authenticated controls and one-shot turn delivery |
 | API/CLI registration | Proposals, grants, activation/resume and versioned controls implemented |
 | Server lifespan startup/shutdown wiring | Implemented with cancellation and awaited cleanup |
-| Durable run batching, queue dispatch, acknowledgement and recovery | Pending |
-| Real-server restart and end-to-end automatic handling | Observation restart/deduplication verified; agent handling pending |
+| Durable run batching, queue dispatch, acknowledgement and recovery | Generic local-work path implemented; ambiguous outcomes pause |
+| Real-server restart and end-to-end automatic handling | Observation and opt-in Echo dispatch/restart/budget coverage implemented |
 
 Next completion target: register one authorized watch through the service,
-observe a source change, dispatch one ordinary topic turn, acknowledge its
-captured events on success, restart the server, and verify continued polling
-without duplicated work. Verify restart through `/health` or `BOOT_TIME`.
-Keep automatic agent handling disabled until this vertical slice passes. The
+observe a GitHub PR change through a dedicated adapter, dispatch a bounded
+ordinary topic turn, reconcile stale CI heads and review feedback, and inspect
+its durable outcome through operational controls. Generic probe/Echo coverage
+already verifies dispatch, captured-event acknowledgement and restart without
+duplicated work. Verify restart through `/health` or `BOOT_TIME`.
+Keep execution opt-in; require source-specific validation before claiming
+autonomous PR handling. The
 observation-only switch remains opt-in; do not mark the whole milestone complete
 based on observation tests.
 

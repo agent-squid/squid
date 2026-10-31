@@ -38,7 +38,7 @@ def failure(exc):
         return JSONResponse({'error': 'watch_not_authorized'}, status_code=403)
     # Never return arbitrary exception/provider text or request payloads.
     conflict = isinstance(exc, ValueError) and str(exc) in {
-        'stale watch version', 'request key already used with different watch parameters',
+        'stale watch version', 'execution grant request conflict', 'execution grant already exists', 'request key already used with different watch parameters',
         'operation key already used with different parameters', 'watch transition unavailable'}
     return JSONResponse({'error': 'watch_conflict' if conflict else 'invalid_watch_request'},
                         status_code=409 if conflict else 400)
@@ -64,6 +64,10 @@ async def invoke(request, operation, watch_id=None, *, human_topic=None):
             fields(dict(request.query_params), optional=('limit', 'offset'))
             return await call(service.list, token, limit=int(request.query_params.get('limit', 100)),
                                 offset=int(request.query_params.get('offset', 0)))
+        if operation == 'runs':
+            fields(dict(request.query_params), optional=('limit', 'offset'))
+            return await call(service.runs, token, watch_id, limit=int(request.query_params.get('limit', 20)),
+                              offset=int(request.query_params.get('offset', 0)))
         if operation == 'show':
             return await call(service.show, token, watch_id)
         raw = bytearray()
@@ -75,6 +79,21 @@ async def invoke(request, operation, watch_id=None, *, human_topic=None):
         if operation == 'create':
             fields(body, ('adapter', 'target', 'request_key'), ('poll_interval', 'expires_at'))
             return await call(service.create, token, **body)
+        if operation == 'execution-grant' and human_topic is not None:
+            fields(body, ('agent', 'instructions', 'max_runs', 'max_attempts', 'request_key'))
+            from .watch_runs import execution_grant
+            audit = json.dumps(dict(id=turn, principal='host-control:' + expected.hex()[:16],
+                                    action='grant_local_work', topic=human_topic, watch_id=watch_id))
+            grant = await call(execution_grant, service, topic=human_topic, watch_id=watch_id,
+                               user_action=audit, **body)
+            return dict(grant_id=grant['id'], scope='local_work', watch_id=watch_id,
+                        agent=grant['agent'], max_runs=grant['max_runs'], max_attempts=grant['max_attempts'],
+                        revoked=grant['revoked_at'] is not None)
+        if operation == 'execution-revoke' and human_topic is not None:
+            fields(body, ('grant_id',))
+            from .watch_runs import revoke_execution
+            await call(revoke_execution, service, topic=human_topic, watch_id=watch_id, **body)
+            return {'revoked': True}
         if operation == 'grant' and human_topic is not None:
             fields(body, ('expires_at',))
             audit = json.dumps(dict(id=turn, principal='host-control:' + expected.hex()[:16],
@@ -152,6 +171,21 @@ async def human_show(request: Request, topic: str, watch_id: str):
 
 @router.post('/watch-control/{topic}/watches/{watch_id}/{action}')
 async def human_action(request: Request, topic: str, watch_id: str, action: str):
-    if action not in {'activate', 'pause', 'resume', 'cancel', 'grant', 'revoke'}:
+    if action not in {'activate', 'pause', 'resume', 'cancel', 'grant', 'revoke', 'execution-grant', 'execution-revoke'}:
         return JSONResponse({'error': 'invalid_watch_action'}, status_code=400)
     return await invoke(request, action, watch_id, human_topic=topic)
+
+
+@router.get('/watches/{watch_id}/runs')
+async def watch_runs(request: Request, watch_id: str, limit: int = 20, offset: int = 0):
+    service = request.app.state.watch_service
+    try:
+        token = bearer(request)
+        return await call(service.runs, token, watch_id, limit=limit, offset=offset)
+    except (WatchDenied, ValueError, TypeError) as exc:
+        return failure(exc)
+
+
+@router.get('/watch-control/{topic}/watches/{watch_id}/runs')
+async def human_watch_runs(request: Request, topic: str, watch_id: str):
+    return await invoke(request, 'runs', watch_id, human_topic=topic)
