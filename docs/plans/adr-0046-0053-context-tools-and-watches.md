@@ -129,38 +129,49 @@ symbol names are navigation anchors, not promises about their final placement.
   normal requests, and accepted/rejected URLs through both launch and CLI.
   Verification: 543 watch/context/queue/runner/server/Flow tests passed on Python
   3.11; 96 focused watch API/CLI/queue tests passed on Python 3.10. Lockfile checked.
-- Next watch slice: lifespan polling under current policy and durable grants,
-  authorized run batching/dispatch through the normal topic queue, and recovery.
-  Execution-agent/rule/budget API fields must be added alongside their service
-  implementation; the observation API rejects those unsupported fields today.
-  Pending events remain retained, not acknowledged or dispatched.
+- Milestone 4 authorized observation slice: lifespan starts/stops a bounded
+  `WatchLoop` when enabled. Policy, full-lifetime grants, expiry, and claim
+  ownership are checked transactionally at claims and ingestion and before I/O.
+  Authenticated activation/resume now works while the worker is running. `/tools`
+  reports monitoring only; agent execution and publication remain disabled.
+  Pending events persist without acknowledgement. Real-host subprocess coverage
+  checks `/health` boot-time changes, quiet baselines, saved cursor/expiry,
+  restart replay deduplication, a later source change, and cancellation.
+  Verification: 559 watch/context/queue/runner/server/Flow tests passed on Python
+  3.11; 98 focused watch polling/API/service/store tests passed on Python 3.10.
+  Both runs include a disposable real server and executable probe. Lockfile checked.
+- Next watch slice: execution grants and finite budgets, durable run batching,
+  normal topic-queue dispatch and acknowledgement/recovery, plus the dedicated
+  GitHub PR adapter. Execution-agent/rule/budget API fields remain rejected
+  until their implementation ships.
 - Milestones 2 and 5–8 remain unimplemented. No automatic publication is enabled.
 
 ## Watch completion boundary
 
-The internal observation core is complete for its current scope; milestone 4
-and the user-facing watch feature are **not complete**. Restarting Squid does
-not enable watches: `_lifespan` does not start `WatchLoop`, no production
-polling task uses the configured probe registry, and pending events have no agent dispatch consumer.
+Authorized observation is available behind `watches.enabled` (false by default).
+Lifespan polls registered probes only for active watches with durable grants.
+Milestone 4 and autonomous watch handling are **not complete**: pending events
+have no agent dispatch consumer, and no dedicated PR adapter is shipped.
 
 | Component | Current status |
 | --- | --- |
 | Durable watch store, claims, expiry, retries, cursor/event ingestion | Implemented and unit-tested |
 | Executable probes and injected MCP-client bridge | Implemented and unit-tested |
 | Python 3.10/3.11 compatibility and review regressions | 96 focused tests passed on each runtime |
-| Trusted probe configuration and concrete MCP transport/client | Host configuration loading implemented; polling remains disabled |
+| Trusted probe configuration and concrete MCP transport/client | Configured probes polled through authorized lifespan worker |
 | Observation policy/grants and scoped service | Implemented with authenticated controls and one-shot turn delivery |
-| API/CLI registration | Observation proposals and human grants shipped; activation gated on polling |
-| Server lifespan startup/shutdown wiring | Pending |
+| API/CLI registration | Proposals, grants, activation/resume and versioned controls implemented |
+| Server lifespan startup/shutdown wiring | Implemented with cancellation and awaited cleanup |
 | Durable run batching, queue dispatch, acknowledgement and recovery | Pending |
-| Real-server restart and end-to-end automatic handling | Not verified; requires the pending wiring |
+| Real-server restart and end-to-end automatic handling | Observation restart/deduplication verified; agent handling pending |
 
 Next completion target: register one authorized watch through the service,
 observe a source change, dispatch one ordinary topic turn, acknowledge its
 captured events on success, restart the server, and verify continued polling
 without duplicated work. Verify restart through `/health` or `BOOT_TIME`.
-Keep the feature disabled until this vertical slice passes; do not mark the
-whole milestone complete based on internal polling tests.
+Keep automatic agent handling disabled until this vertical slice passes. The
+observation-only switch remains opt-in; do not mark the whole milestone complete
+based on observation tests.
 
 ## Delivery order and dependencies
 

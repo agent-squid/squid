@@ -48,9 +48,11 @@ async def run(runner, prompt, *, persistent=False, shell=False, request_text=Non
                 env['PATH'] = str(executable.parent) + os.pathsep + (env.get('PATH') or os.environ.get('PATH', ''))
                 original_request = prompt if request_text is None else request_text
                 if not shell and not kwargs.get('resume_session_id') and not original_request.lstrip().startswith('/'):
+                    availability = ('Monitoring only; no automatic agent work or publication.'
+                                    if service.monitoring_enabled else
+                                    'Watch registration currently saves proposals only; persistent monitoring is not enabled.')
                     prompt = ('Squid shared tools: `agentsquid tools --help`; '
-                              '`agentsquid watch --help`. Watch registration currently saves '
-                              'proposals only; persistent monitoring is not enabled.\n\n' + prompt)
+                              '`agentsquid watch --help`. ' + availability + '\n\n' + prompt)
         kwargs['backend_env'] = env
         async with aclosing(runner(prompt, **kwargs)) as stream:
             async for chunk in stream:

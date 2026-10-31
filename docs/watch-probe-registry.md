@@ -6,10 +6,12 @@ The host loads this mapping from `watches.registry` in `squid.yaml` during
 server startup and validates it in the config editor. `watches.enabled` defaults
 to false; disabled registries are still validated but expose no adapters.
 Enabled adapters are held in `app.state.watch_configuration`; loading starts
-no polling. API/CLI registration and dispatch remain unimplemented.
+no polling by itself. Lifespan starts the authorized observation worker when
+globally enabled. HTTP/CLI registration saves proposals; activation needs an
+authenticated exact-watch grant. Agent dispatch remains unimplemented.
 Internal policy, grants, and scoped operations are described in
-[watch authorization](watch-authorization.md); authenticated grant controls and
-agent credential delivery remain unwired.
+[watch authorization](watch-authorization.md), including authenticated human
+grant controls and scoped one-shot agent credential delivery.
 Unknown watch settings and non-boolean enablement fail validation.
 Malformed watch configuration prevents the server from starting, even when
 `watches.enabled` is false. Omit `watches` to use defaults; an empty `watches:`

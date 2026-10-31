@@ -1,13 +1,12 @@
-# Internal watch policy and authorization
+# Watch observation policy and authorization
 
-This slice exposes an **observation-only service** through authenticated HTTP
-and `agentsquid watch`. Polling, native MCP tools, automatic turns, and
-publication remain unwired. Creation returns a proposal. HTTP activation/resume
-returns `409 watch_monitoring_unavailable` until the production loop is wired;
-a proposal is never described as active monitoring. Execution-agent selection, event/deadline rules,
-turn/retry budgets, and publication scopes are not supported by this service.
-Unsupported policy fields and operations fail validation rather than implying
-that those capabilities exist.
+The **observation-only service** exposes HTTP and `agentsquid watch`, with
+server-owned polling when `watches.enabled: true`. Creation returns a proposal;
+authenticated activation/resume requires an exact-watch, full-lifetime grant
+and a running observation worker. Disabled or stopped workers return
+`409 watch_monitoring_unavailable`. Native agent-facing MCP tools, automatic
+turns, deadlines, and publication remain unavailable. Unsupported execution and
+mutation fields fail validation rather than implying those capabilities exist.
 
 ## Host policy
 
@@ -38,9 +37,10 @@ lifetime. The top-level enablement switch still defaults to false. Topic
 policies intersect operation/adapter allowlists, increase polling minimums, and
 reduce lifetime ceilings. They cannot enable globally disabled watches or
 expand scope. Default expiry is the lesser of 24 hours and the effective maximum;
-idempotent creation preserves the original absolute expiry. Existing watches
-are not automatically reconciled when policy changes; polling remains disabled
-until a future scheduler enforces current policy on every claim.
+idempotent creation preserves the original absolute expiry. Saved configuration takes effect after restart. The worker reconciles current
+policy and durable grants inside claim and ingestion transactions and immediately
+before source reads. It pauses unauthorized active watches with `policy_changed`
+or `grant_required`, invalidates their claims, and rejects late observations.
 
 ## Trusted control versus agent operations
 
@@ -58,8 +58,10 @@ transport and never an agent tool. Authenticated human controls validate a struc
 calling `record_grant`. The recorded
 `user_action` is an audit reference, not proof that arbitrary referenced message
 text authorizes monitoring. An agent cannot call the service to mint credentials,
-record grants, or broaden permissions. The human HTTP/CLI control path described below records grants, without
-activating a poller.
+record grants, or broaden permissions. The human HTTP/CLI control path described below records grants. A separate authenticated activation/resume action attaches only
+the requested grant to a temporary credential, then uses the same lifecycle
+service. Default agent launch credentials carry no grants, so an agent cannot
+activate a proposal merely by supplying a grant ID in its arguments.
 
 Grants cover only the referenced watch's immutable target/adapter/topic and its
 recorded observation lifetime; they authorize no agent execution or external
@@ -95,8 +97,8 @@ settings. The server rejects credentials over non-loopback plaintext requests. T
 The console entry point dispatches `watch`/`tools` before importing server or
 home-directory configuration. Agent calls require explicit `SQUID_API_URL` and
 `SQUID_TURN_TOKEN`; there is no fallback server discovery. `agentsquid tools`
-returns effective topic operations/adapters and explicitly reports monitoring,
-dispatch, and publication as disabled. `agentsquid tools --help` and
+returns effective topic operations/adapters and reports the running worker’s
+monitoring availability. Dispatch and publication remain explicitly disabled. `agentsquid tools --help` and
 `agentsquid watch --help` describe the client. Enabled one-shot model launches
 receive a minimal discovery hint and the executable directory on PATH. Hints
 are omitted for resumed sessions and slash commands, detected from the original
@@ -111,7 +113,7 @@ wildcard listener for the current local client transport.
 | `POST /watches` | Idempotent proposal; adapter, target, request_key, optional poll_interval/expires_at |
 | `GET /watches` | Topic-bound list; limit 1–100 and nonnegative offset |
 | `GET /watches/{id}` | Topic-bound public row; no poll lease credential |
-| `POST /watches/{id}/{action}` | Version-checked pause/cancel; activate/resume unavailable until polling ships |
+| `POST /watches/{id}/{action}` | Version-checked lifecycle; activate/resume require a running worker and scoped grant |
 
 Mutation bodies reject unknown fields and exceed neither 65,536 bytes nor the
 underlying service limits. Lifecycle JSON includes `version` and optional
@@ -147,6 +149,7 @@ agentsquid watch create --input proposal.json
 agentsquid watch list
 agentsquid watch show WATCH_ID
 agentsquid watch grant WATCH_ID --human-topic TOPIC --input grant.json
+agentsquid watch activate WATCH_ID --human-topic TOPIC --input activation.json
 agentsquid watch cancel WATCH_ID --input cancel.json
 ```
 
@@ -163,3 +166,30 @@ before credential cleanup, preventing a delayed mint from surviving revocation.
 Grant IDs are validated before SQL; malformed identifiers return a sanitized
 client error. Foreign keys are enabled by the existing shared database connector,
 so deleting a watch cascades to its grant records.
+
+
+## Observation lifecycle and recovery
+
+Lifespan starts one bounded `WatchLoop` only when globally enabled and cancels
+and awaits it before closing the service. Registered executable/MCP probes use
+server-owned authentication. Per-turn tokens are never retained for polling.
+Loop timeouts include the configured probe timeout and its cleanup allowance;
+provider failures use existing bounded retries/backoff and sanitized diagnostics.
+
+For activation, `activation.json` contains `version`, `grant_id`, and an optional
+`operation_key`. The grant must be unrevoked and cover the watch’s entire expiry.
+Pause stops new polls and invalidates in-flight observations. Resume reconciles
+from the saved cursor without renewing expiry. Cancel prevents further polling.
+Expiry supersedes pending events and blocks late ingestion. Closed source results
+complete the watch. Lifecycle changes remain readable through list/show; topic
+UI and durable lifecycle notifications are still later work.
+
+Observed revisions and cursor advancement commit atomically. Events stay
+`pending`; no agent consumer acknowledges them in this slice. Shutdown cancels
+probe I/O and preserves outstanding leases. On restart, abandoned claims are
+reclaimed after lease expiry, overdue checks coalesce into one poll, and replayed
+source revisions retain their event identity. Downtime does not extend lifetime.
+A disposable real-server test verifies a changed `/health` boot time, saved cursor
+and expiry, durable pending events, replay deduplication, a subsequent change,
+and cancellation. It makes a saved poll overdue to avoid a wall-clock interval
+sleep; it does not claim exactly-once external effects or automatic agent work.

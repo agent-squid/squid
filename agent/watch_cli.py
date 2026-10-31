@@ -13,7 +13,7 @@ from .watch_urls import valid_api_url
 
 def main(argv):
     parser = argparse.ArgumentParser(prog='agentsquid ' + argv[0],
-        description='Observation-only watch operations. Polling and automatic turns are not enabled.',
+        description='Observation-only watch operations. No automatic agent turns or publication.',
         epilog='Use agentsquid watch --help for commands. SQUID_API_URL must name the issuing instance. '
                'Agent calls use SQUID_TURN_TOKEN; --human-topic uses SQUID_WATCH_CONTROL_TOKEN. '
                'Mutation input is a JSON object: create needs adapter, target, request_key; '

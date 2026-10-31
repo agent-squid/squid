@@ -435,9 +435,11 @@ async def _lifespan(_app: FastAPI):
                 log.error("Shore host connection stopped and requires daemon restart or login")
         shore_task.add_done_callback(_log_shore_failure)
     try:
+        _app.state.watch_service.start_monitoring()
         yield
     finally:
         watch_launch.configure(None)
+        await _app.state.watch_service.stop_monitoring()
         await asyncio.to_thread(_app.state.watch_service.close)
         _shore_connection = None
         if shore_task is not None:

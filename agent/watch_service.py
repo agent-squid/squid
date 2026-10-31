@@ -6,6 +6,7 @@ a grant. Message text/reference alone is not approval. API credentials constrain
 calls here; they do not sandbox an agent's ambient filesystem/shell access.
 """
 from dataclasses import dataclass
+import asyncio
 import hashlib
 import math
 import secrets
@@ -15,6 +16,10 @@ from uuid import uuid4
 
 from . import watches
 from .watch_policy import OPERATIONS
+
+
+class WatchUnavailable(RuntimeError):
+    pass
 
 
 class WatchDenied(PermissionError):
@@ -51,6 +56,83 @@ class WatchService:
         self._credentials = {}
         self._lock = threading.RLock()
         self._closed = False
+        self._monitoring_task = None
+
+    @property
+    def monitoring_enabled(self):
+        task = self._monitoring_task
+        return not self._closed and self.configuration.enabled and task is not None and not task.done()
+
+    def start_monitoring(self):
+        """Host-only lifecycle hook; polling grants no agent-dispatch authority."""
+        if self._closed or not self.configuration.enabled or self.monitoring_enabled:
+            return
+        from .watch_probes import CLEANUP_TIMEOUT
+        timeout = max([30] + [adapter.probe.timeout + CLEANUP_TIMEOUT + 1
+                              for adapter in self.configuration.adapters.values()
+                              if hasattr(adapter, 'probe')])
+        loop = watches.WatchLoop(self.configuration.adapters, timeout=timeout, clock=self.clock,
+                                 claim=self.claim_due, finish=self.finish_poll, prepare=self.prepare_poll)
+        self._monitoring_task = asyncio.create_task(loop.run(), name='squid-watch-observation')
+
+    async def stop_monitoring(self):
+        task, self._monitoring_task = self._monitoring_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    def _poll_guard(self, conn, row, now, *, claimed=False):
+        # A worker may have waited for SQLite or the service lock. Authorization
+        # uses the current clock inside the write transaction, not its enqueue time.
+        now = max(now, self.clock())
+        if row['expires_at'] <= now:
+            conn.execute('''UPDATE watches SET status='expired',version=version+1,
+                claim_token=NULL,lease_until=NULL,pause_reason=NULL WHERE id=? AND status='active' ''',
+                (row['id'],))
+            conn.execute("UPDATE watch_events SET disposition='superseded' WHERE watch_id=? AND disposition='pending'",
+                         (row['id'],))
+            return False
+        if claimed and (row['lease_until'] is None or row['lease_until'] <= now):
+            return False
+        policy = self.configuration.effective_policy(row['topic'])
+        reason = None
+        if (self._closed or not policy.enabled or row['adapter'] not in policy.adapters
+                or row['adapter'] not in self.configuration.adapters
+                or row['poll_interval'] < policy.min_poll_seconds
+                or row['expires_at'] - now > policy.max_lifetime_seconds):
+            reason = 'policy_changed'
+        elif conn.execute('''SELECT 1 FROM watch_grants WHERE watch_id=?
+                AND revoked_at IS NULL AND expires_at>? AND expires_at>=? LIMIT 1''',
+                (row['id'], now, row['expires_at'])).fetchone() is None:
+            reason = 'grant_required'
+        if reason is None:
+            return True
+        conn.execute('''UPDATE watches SET status='paused', version=version+1,
+            claim_token=NULL, lease_until=NULL, pause_reason=? WHERE id=? AND status='active' ''',
+            (reason, row['id']))
+        return False
+
+    def claim_due(self, **kwargs):
+        with self._lock:
+            return watches.claim_due(**kwargs, _guard=self._poll_guard)
+
+    def finish_poll(self, watch, **kwargs):
+        with self._lock:
+            return watches.finish_poll(watch, **kwargs,
+                                       _guard=lambda conn, row, now: self._poll_guard(conn, row, now, claimed=True))
+
+    def prepare_poll(self, watch, *, now):
+        with self._lock:
+            conn = watches._connect()
+            try:
+                with conn:
+                    conn.execute('BEGIN IMMEDIATE')
+                    row = conn.execute('''SELECT * FROM watches WHERE id=? AND status='active'
+                        AND version=? AND claim_token=? AND lease_until>? AND expires_at>?''',
+                        (watch['id'], watch['version'], watch['claim_token'], now, now)).fetchone()
+                    return row is not None and self._poll_guard(conn, dict(row), now, claimed=True)
+            finally:
+                conn.close()
 
     def close(self):
         with self._lock:
@@ -86,7 +168,7 @@ class WatchService:
                 raise WatchDenied()
             return dict(scope='observation', topic=credential.topic,
                         operations=sorted(credential.operations & policy.operations),
-                        adapters=sorted(policy.adapters), monitoring_enabled=False,
+                        adapters=sorted(policy.adapters), monitoring_enabled=self.monitoring_enabled,
                         dispatch_enabled=False, publication_enabled=False,
                         min_poll_seconds=policy.min_poll_seconds,
                         max_lifetime_seconds=policy.max_lifetime_seconds)
@@ -143,7 +225,8 @@ class WatchService:
             finally:
                 conn.close()
 
-    def transition(self, token, watch_id, *, version, action, grant_id=None, operation_key=None):
+    def transition(self, token, watch_id, *, version, action, grant_id=None, operation_key=None,
+                   require_monitoring=False):
         if grant_id is not None and not _text(grant_id):
             raise ValueError('invalid grant identity')
         if action not in OPERATIONS - {'create', 'list', 'show'}:
@@ -156,6 +239,8 @@ class WatchService:
             def guard(conn, row):
                 credential, policy = self._authorize(token, action)
                 if action in {'activate', 'resume'}:
+                    if require_monitoring and not self.monitoring_enabled:
+                        raise WatchUnavailable()
                     if (row['expires_at'] <= self.clock() or row['adapter'] not in policy.adapters
                             or row['poll_interval'] < policy.min_poll_seconds):
                         raise WatchDenied()
@@ -164,8 +249,8 @@ class WatchService:
                     if grant_id not in credential.grants:
                         raise WatchDenied()
                     grant = conn.execute('''SELECT 1 FROM watch_grants WHERE id=?
-                        AND watch_id=? AND revoked_at IS NULL AND expires_at>?''',
-                        (grant_id, row['id'], self.clock())).fetchone()
+                        AND watch_id=? AND revoked_at IS NULL AND expires_at>? AND expires_at>=?''',
+                        (grant_id, row['id'], self.clock(), row['expires_at'])).fetchone()
                     if grant is None:
                         raise WatchDenied()
 

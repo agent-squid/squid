@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .watch_async import call
-from .watch_service import WatchControl, WatchDenied
+from .watch_service import WatchControl, WatchDenied, WatchUnavailable
 
 router = APIRouter()
 
@@ -94,10 +94,18 @@ async def invoke(request, operation, watch_id=None, *, human_topic=None):
         fields(body, ('version',), ('grant_id', 'operation_key'))
         if operation in {'activate', 'resume'}:
             await call(service.check_operation, token, operation)
-            # The observation engine is not started by lifespan yet. A saved
-            # registration must never be presented as a working monitor.
-            return JSONResponse({'error': 'watch_monitoring_unavailable'}, status_code=409)
-        return await call(service.transition, token, watch_id, action=operation, **body)
+            if not service.monitoring_enabled:
+                return JSONResponse({'error': 'watch_monitoring_unavailable'}, status_code=409)
+            if human_topic is not None:
+                # The authenticated operator may attach an exact grant; model
+                # arguments cannot expand an agent credential's grant scope.
+                await call(control.revoke_turn, turn)
+                token = await call(control.mint, turn=turn, topic=human_topic,
+                                   operations=policy.operations, grants=[body.get('grant_id')],
+                                   expires_at=service.clock() + 60)
+        return await call(service.transition, token, watch_id, action=operation, require_monitoring=True, **body)
+    except WatchUnavailable:
+        return JSONResponse({'error': 'watch_monitoring_unavailable'}, status_code=409)
     except (WatchDenied, ValueError, TypeError, UnicodeError) as exc:
         return failure(exc)
     finally:

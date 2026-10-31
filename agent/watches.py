@@ -1,6 +1,6 @@
 """Internal durable observation loop. No agent dispatch or publication authority.
 
-Adapters perform reads only. Creation/activation must eventually be reached
+Adapters perform reads only. Production polling and lifecycle operations are reached
 through the authorized service; this module deliberately exposes no transport.
 """
 import asyncio
@@ -164,7 +164,7 @@ def transition_watch(watch_id, *, topic, version, action, now, operation_key=Non
         conn.close()
 
 
-def claim_due(*, now, lease_seconds, limit):
+def claim_due(*, now, lease_seconds, limit, _guard=None):
     conn = _connect()
     try:
         # Read-only fast path avoids taking the shared DB write lock while
@@ -184,11 +184,16 @@ def claim_due(*, now, lease_seconds, limit):
             conn.execute("""UPDATE watches SET status='expired',version=version+1,
                 claim_token=NULL,lease_until=NULL,pause_reason=NULL
                 WHERE status IN ('proposed','active','paused') AND expires_at<=?""", (now,))
+            conn.execute("""UPDATE watch_events SET disposition='superseded'
+                WHERE disposition='pending' AND watch_id IN (
+                    SELECT id FROM watches WHERE status='expired')""")
             rows = conn.execute("""SELECT * FROM watches WHERE status='active'
                 AND next_poll<=? AND (lease_until IS NULL OR lease_until<=?)
                 ORDER BY next_poll,id LIMIT ?""", (now, now, limit)).fetchall()
             claims = []
             for row in rows:
+                if _guard is not None and not _guard(conn, dict(row), now):
+                    continue
                 token = uuid4().hex
                 conn.execute('UPDATE watches SET claim_token=?,lease_until=? WHERE id=?',
                              (token, now + lease_seconds, row['id']))
@@ -222,7 +227,7 @@ def encode_event_payload(payload):
     return encoded
 
 
-def finish_poll(watch, *, now, observation=None, error=None):
+def finish_poll(watch, *, now, observation=None, error=None, _guard=None):
     # Bound data before opening the transaction. Failure leaves the old cursor
     # unchanged so retries cannot skip incompletely ingested observations.
     events = []
@@ -243,6 +248,8 @@ def finish_poll(watch, *, now, observation=None, error=None):
                 AND version=? AND claim_token=? AND lease_until>? AND expires_at>?""",
                 (watch['id'], watch['version'], watch['claim_token'], now, now)).fetchone()
             if row is None:
+                return False
+            if _guard is not None and not _guard(conn, dict(row), now):
                 return False
             failures = row['failures'] + 1 if error else 0
             delay = min(max(3600, row['poll_interval']),
@@ -266,13 +273,17 @@ def finish_poll(watch, *, now, observation=None, error=None):
 
 
 class WatchLoop:
-    def __init__(self, adapters: dict[str, Adapter], *, concurrency=4, timeout=30, clock=time.time):
+    def __init__(self, adapters: dict[str, Adapter], *, concurrency=4, timeout=30, clock=time.time,
+                 claim=None, finish=None, prepare=None):
         if concurrency < 1 or timeout <= 0:
             raise ValueError('invalid watch worker bounds')
         for adapter in adapters.values():
             validate_timeout = getattr(adapter, 'validate_loop_timeout', None)
             if validate_timeout is not None:
                 validate_timeout(timeout)
+        self.claim = claim or claim_due
+        self.finish = finish or finish_poll
+        self.prepare = prepare
         self.adapters = adapters
         self.concurrency = concurrency
         self.timeout = timeout
@@ -280,12 +291,15 @@ class WatchLoop:
         self._tick_lock = asyncio.Lock()
 
     async def _poll(self, watch):
+        from .watch_async import call
         try:
+            if self.prepare is not None and not await call(self.prepare, watch, now=self.clock()):
+                return
             adapter = self.adapters.get(watch['adapter'])
             if adapter is None:
                 raise ValueError('unsupported adapter')
             observation = await asyncio.wait_for(adapter.poll(watch), self.timeout)
-            await asyncio.to_thread(finish_poll, watch, now=self.clock(), observation=observation)
+            await call(self.finish, watch, now=self.clock(), observation=observation)
         except asyncio.CancelledError:
             # Leave the lease in place: restart reclaims it after expiry.
             raise
@@ -294,7 +308,7 @@ class WatchLoop:
             log.warning('Watch poll failed watch_id=%s error_type=%s',
                         watch['id'], type(exc).__name__)
             try:
-                await asyncio.to_thread(finish_poll, watch, now=self.clock(),
+                await call(self.finish, watch, now=self.clock(),
                                         error=type(exc).__name__)
             except Exception as persistence_error:
                 log.error('Watch failure persistence failed watch_id=%s error_type=%s',
@@ -302,8 +316,9 @@ class WatchLoop:
                 raise
 
     async def tick(self):
+        from .watch_async import call
         async with self._tick_lock:
-            claims = await asyncio.to_thread(claim_due, now=self.clock(),
+            claims = await call(self.claim, now=self.clock(),
                                             lease_seconds=self.timeout + 30, limit=self.concurrency)
             # A persistence failure must not release the tick lock while
             # sibling polls are still running and consume worker capacity.

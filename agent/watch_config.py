@@ -23,8 +23,9 @@ class WatchConfiguration:
 def load_watch_configuration(config: dict) -> WatchConfiguration:
     """Validate even disabled registrations, without opening any transports.
 
-    The enabled switch makes adapters available to future authorized services;
-    it does not start polling, activate watches, or authorize mutations.
+    The enabled switch makes adapters available to the authorized observation
+    worker. Loading alone does not start polling, activate watches, or authorize
+    mutations; the server lifespan owns the worker.
     """
     section = config.get('watches', {})
     if not isinstance(section, dict) or set(section) - {'enabled', 'registry', 'policy', 'topics'}:
