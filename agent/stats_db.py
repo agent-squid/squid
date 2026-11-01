@@ -541,7 +541,7 @@ def _validate_flow_plan(steps: list[dict]) -> dict[str, list[str]]:
 
 
 def create_flow_run(flow_run_id: str, route: str, original_prompt_msg_id: Optional[int], steps: list[dict],
-                    *, execution_mode: str, if_not_exists: bool = False) -> dict:
+                    *, execution_mode: str, if_not_exists: bool = False, watch_owned: bool = False) -> dict:
     """Persist a complete run plan atomically. A duplicate run id/key fails."""
     if not flow_run_id or not route or not steps:
         raise ValueError("flow_run_id, route, and at least one step are required")
@@ -557,15 +557,16 @@ def create_flow_run(flow_run_id: str, route: str, original_prompt_msg_id: Option
         if existing:
             if not if_not_exists:
                 raise sqlite3.IntegrityError("duplicate flow_run_id")
-            if existing["route"] != route or existing["execution_mode"] != execution_mode:
+            if (existing["route"] != route or existing["execution_mode"] != execution_mode
+                    or bool(existing["watch_owned"]) != watch_owned):
                 raise ValueError("flow_run_id already belongs to a different route or execution mode")
             conn.rollback()
             return dict(existing)
         conn.execute(
             """INSERT INTO flow_runs
-               (flow_run_id, route, original_prompt_msg_id, execution_mode, status)
-               VALUES (?, ?, ?, ?, 'scheduled')""",
-            (flow_run_id, route, original_prompt_msg_id, execution_mode),
+               (flow_run_id, route, original_prompt_msg_id, execution_mode, status, watch_owned)
+               VALUES (?, ?, ?, ?, 'scheduled', ?)""",
+            (flow_run_id, route, original_prompt_msg_id, execution_mode, int(watch_owned)),
         )
         for step in steps:
             dependencies = dependency_map[str(step["step_id"])]
@@ -1018,6 +1019,10 @@ def init_db() -> None:
                 WHERE status='paused'""")
         if "observation_plan" not in _table_columns(conn, "watches"):
             conn.execute("ALTER TABLE watches ADD COLUMN observation_plan TEXT")
+        if "flow_route" not in _table_columns(conn, "watch_execution_grants"):
+            conn.execute("ALTER TABLE watch_execution_grants ADD COLUMN flow_route TEXT")
+        if "flow_run_id" not in _table_columns(conn, "watch_runs"):
+            conn.execute("ALTER TABLE watch_runs ADD COLUMN flow_run_id TEXT")
         flow_run_columns = _table_columns(conn, "flow_runs")
         if "execution_mode" not in flow_run_columns:
             # All pre-cutover plans were executed by the transcript scheduler.
@@ -1025,6 +1030,28 @@ def init_db() -> None:
                 "ALTER TABLE flow_runs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'shadow' "
                 "CHECK(execution_mode IN ('shadow', 'durable'))"
             )
+        conn.execute("SAVEPOINT watch_flow_deletion_migration")
+        if "watch_owned" not in _table_columns(conn, "flow_runs"):
+            conn.execute("ALTER TABLE flow_runs ADD COLUMN watch_owned INTEGER NOT NULL DEFAULT 0")
+            # Older watch flows used a reserved watch-<32 lowercase hex> ID.
+            # Backfill even orphaned rows whose watch was deleted by older code.
+            conn.execute("""UPDATE flow_runs SET watch_owned=1 WHERE flow_run_id IN
+                (SELECT flow_run_id FROM watch_runs WHERE flow_run_id IS NOT NULL)
+                OR (length(flow_run_id)=38 AND substr(flow_run_id,1,6)='watch-'
+                    AND substr(flow_run_id,7) NOT GLOB '*[^0-9a-f]*')""")
+            orphans = [row[0] for row in conn.execute("""SELECT flow_run_id FROM flow_runs f
+                WHERE watch_owned=1 AND NOT EXISTS
+                (SELECT 1 FROM watch_runs w WHERE w.flow_run_id=f.flow_run_id)""")]
+            _cancel_watch_flow_rows(conn, orphans, 'Watch ownership missing during migration')
+        if next(row for row in conn.execute('PRAGMA table_info(watch_flow_turns)') if row[1] == 'msg_id')[3]:
+            conn.execute("""CREATE TABLE watch_flow_turns_nullable (
+                run_id TEXT NOT NULL REFERENCES watch_runs(id) ON DELETE CASCADE,
+                step_id TEXT NOT NULL, msg_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL,
+                started_at REAL, PRIMARY KEY(run_id,step_id), UNIQUE(msg_id))""")
+            conn.execute('INSERT INTO watch_flow_turns_nullable SELECT * FROM watch_flow_turns')
+            conn.execute('DROP TABLE watch_flow_turns')
+            conn.execute('ALTER TABLE watch_flow_turns_nullable RENAME TO watch_flow_turns')
+        conn.execute("RELEASE watch_flow_deletion_migration")
         _migrate_flow_steps_run_scoped_identity(conn)
         flow_step_columns = _table_columns(conn, "flow_steps")
         if "delay_seconds" not in flow_step_columns:
@@ -1481,8 +1508,51 @@ def set_topic_hidden(name: str, hidden: bool) -> bool:
     return cur.rowcount > 0
 
 
+
+def _cancel_watch_flow_rows(conn, flow_ids, reason):
+    """Caller owns the deletion/migration transaction; keep terminal evidence."""
+    now = _utc_now_iso()
+    for flow_id in flow_ids:
+        conn.execute("""UPDATE flow_runs SET status='cancelled', cancellation_reason=?,
+            completed_at=COALESCE(completed_at,?) WHERE flow_run_id=?
+            AND status NOT IN ('completed','failed','cancelled')""", (reason,now,flow_id))
+        conn.execute("""UPDATE flow_steps SET status='cancelled', error=COALESCE(error,?),
+            completed_at=COALESCE(completed_at,?),updated_at=? WHERE flow_run_id=?
+            AND status NOT IN ('done','error','cancelled')""", (reason,now,now,flow_id))
+
+
+def _stop_watch_flows_for_history_delete(conn, clause, parameters):
+    selected = 'SELECT id FROM chat_messages WHERE ' + clause
+    affected = conn.execute("""SELECT DISTINCT r.id,r.watch_id,r.flow_run_id,r.started_at
+        FROM watch_runs r JOIN flow_steps s ON s.flow_run_id=r.flow_run_id
+        WHERE s.user_msg_id IN (""" + selected + ") OR s.assistant_msg_id IN (" + selected + ")",
+        (*parameters,*parameters)).fetchall()
+    _cancel_watch_flow_rows(conn, [row['flow_run_id'] for row in affected], 'Flow history deleted')
+    for row in affected:
+        active = conn.execute("""UPDATE watch_runs SET state=?,outcome='flow_history_deleted',
+            completed_at=strftime('%s','now') WHERE id=? AND state IN ('claimed','queued','running')""",
+            ('ambiguous' if row['started_at'] is not None else 'cancelled',row['id'])).rowcount
+        if active:
+            conn.execute("""UPDATE watches SET status='paused',version=version+1,
+                pause_reason='flow_history_deleted',claim_token=NULL,lease_until=NULL
+                WHERE id=? AND status='active'""", (row['watch_id'],))
+            # Terminate surviving queued messages, including those of other members.
+            pending = conn.execute("""SELECT * FROM chat_messages WHERE flow_run_id=?
+                AND role='assistant' AND status='pending'""", (row['flow_run_id'],)).fetchall()
+            for message in pending:
+                conn.execute("UPDATE chat_messages SET status='cancelled' WHERE id=?", (message['id'],))
+                _insert_realtime_event(conn, 'message.changed', message['topic'], message['agent'], message['id'], None,
+                    dict(id=message['id'],role='assistant',status='cancelled',watch_run_id=row['id']))
+
 def delete_topic(name: str) -> bool:
     with _connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        flow_ids = [r[0] for r in conn.execute("""SELECT f.flow_run_id FROM flow_runs f
+            WHERE (f.watch_owned=1 AND EXISTS
+                (SELECT 1 FROM flow_steps s WHERE s.flow_run_id=f.flow_run_id AND s.topic=?))
+            OR EXISTS (SELECT 1 FROM watch_runs r JOIN watches w ON w.id=r.watch_id
+                WHERE r.flow_run_id=f.flow_run_id AND w.topic=?)""", (name,name))]
+        _cancel_watch_flow_rows(conn, flow_ids, 'Watch topic deleted')
         conn.execute("DELETE FROM watch_runs WHERE watch_id IN (SELECT id FROM watches WHERE topic=?)", (name,))
         conn.execute("DELETE FROM watches WHERE topic=?", (name,))
         conn.execute(
@@ -1501,10 +1571,12 @@ def delete_topic(name: str) -> bool:
 
 def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> None:
     with _connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
         # Keep durable run history while detaching only messages being removed.
         clause = "topic=? AND agent=?"
         if adhoc is not None:
             clause += " AND adhoc=1" if adhoc else " AND (adhoc=0 OR adhoc IS NULL)"
+        _stop_watch_flows_for_history_delete(conn, clause, (topic, agent))
         for column in ('user_msg_id', 'assistant_msg_id'):
             conn.execute("UPDATE watch_runs SET " + column + "=NULL WHERE " + column +
                          " IN (SELECT id FROM chat_messages WHERE " + clause + ")", (topic, agent))

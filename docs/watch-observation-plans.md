@@ -148,3 +148,39 @@ and incomplete responses never imply closure or silence. Unchanged polls invoke
 no model. Existing registered probes continue to work without migration.
 
 The adapter name `plan` is reserved even when no connections are configured.
+
+
+## Run a flow for each event batch
+
+An authenticated execution grant selects exactly one `agent` or `flow_route`.
+For example, save this input and use
+`agentsquid watch execution-grant WATCH_ID --human-topic t --input grant.json`:
+
+```json
+{
+  "flow_route": "#t@a>@b",
+  "instructions": "Implement fixes locally, then review the result. Do not publish.",
+  "max_runs": 2,
+  "max_attempts": 1,
+  "request_key": "implement-review"
+}
+```
+
+Both agents must exist. Routes use Squid Flow syntax and must compile to 2–8
+same-topic sequential steps with no delays, forks or joins. The canonical route,
+compiled plan, all member configurations and topic roots are bound to the grant;
+changes require a replacement grant. Running setup through a flow does not
+implicitly authorize future executions of that flow.
+
+One watch run means one entire flow attempt; at most eight agent turns execute
+per attempt. Polling continues between flow runs. Every step rechecks grants,
+expiry and current source state and uses the normal queue and isolated worktree
+path. Later steps receive predecessor output as bounded task data. Captured events
+are acknowledged only after all steps have verified completion and clean sync.
+New events arriving during execution remain pending for a later batch.
+
+`agentsquid watch runs WATCH_ID` includes `flow_run_id`, whose messages and steps
+are available through existing Flow inspection. Failed steps stop downstream work.
+A partial flow interrupted by restart, shutdown or human priority pauses for
+inspection; Squid does not blindly rerun its completed prefix. Revocation and
+cancellation prevent subsequent steps. Publication remains unavailable.

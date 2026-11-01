@@ -383,3 +383,23 @@ Worktree blockers defer execution without consuming the model budget. The durabl
 run outcome records `worktree_blocked`; dispatch waits 60 seconds before trying
 that watch again, including after restart. Observation polling continues during
 this delay, and authorization is checked again before execution.
+
+
+## Flow execution targets
+
+Execution grants now accept exactly one `agent` or `flow_route`, using the same
+authenticated human control path. A flow grant binds its same-topic sequential
+plan and every member's configuration/roots. One finite watch-run budget unit
+covers an entire 2–8-turn flow attempt. Partial ambiguous runs pause rather than
+replaying a completed prefix; events require successful completion and clean sync
+of every step. See [flow grant input and limitations](watch-observation-plans.md#run-a-flow-for-each-event-batch).
+Observation and publication authority remain separate; no publication is enabled.
+
+
+Watch-flow ownership survives deletion of its watch: it is recorded permanently
+on the Flow run. Deleting a topic atomically cancels watch flows and pending
+steps before removing watch state. Clearing an agent's selected history stops
+and pauses affected active flows; per-step message references become null while
+start evidence is retained. Successfully completed outcomes are preserved.
+Native Flow scheduling cannot take over these flows after deletion. Upgrades
+backfill legacy ownership and cancel orphaned watch flows.

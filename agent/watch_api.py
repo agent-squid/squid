@@ -94,14 +94,14 @@ async def invoke(request, operation, watch_id=None, *, human_topic=None):
             fields(body, ('adapter', 'target', 'request_key'), ('poll_interval', 'expires_at'))
             return await call(service.create, token, **body)
         if operation == 'execution-grant' and human_topic is not None:
-            fields(body, ('agent', 'instructions', 'max_runs', 'max_attempts', 'request_key'))
+            fields(body, ('instructions', 'max_runs', 'max_attempts', 'request_key'), ('agent', 'flow_route'))
             from .watch_runs import execution_grant
             audit = json.dumps(dict(id=turn, principal='host-control:' + expected.hex()[:16],
                                     action='grant_local_work', topic=human_topic, watch_id=watch_id))
             grant = await call(execution_grant, service, topic=human_topic, watch_id=watch_id,
                                user_action=audit, **body)
             return dict(grant_id=grant['id'], scope='local_work', watch_id=watch_id,
-                        agent=grant['agent'], max_runs=grant['max_runs'], max_attempts=grant['max_attempts'],
+                        agent=grant['agent'] if not grant['flow_route'] else None, flow_route=grant['flow_route'], max_runs=grant['max_runs'], max_attempts=grant['max_attempts'],
                         revoked=grant['revoked_at'] is not None)
         if operation == 'execution-revoke' and human_topic is not None:
             fields(body, ('grant_id',))

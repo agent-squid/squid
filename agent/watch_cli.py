@@ -20,7 +20,7 @@ def main(argv):
                'Mutation input is a JSON object: create needs target, request_key and plan (or legacy adapter); '
                'validate needs target and plan; tools --discover lists durable MCP read tools; '
                'lifecycle actions need version and optionally operation_key/grant_id; '
-               'grant needs expires_at; revoke needs grant_id; execution-grant needs agent, instructions, '
+               'grant needs expires_at; revoke needs grant_id; execution-grant needs exactly one of agent/flow_route, instructions, '
                'max_runs, max_attempts, request_key; execution-revoke needs grant_id. runs lists durable outcomes.')
     parser.add_argument('--api-url', help='Explicit Squid instance URL (overrides SQUID_API_URL)')
     if argv[0] == 'tools':

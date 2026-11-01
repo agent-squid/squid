@@ -1133,7 +1133,8 @@ async def _prepare_chat_turn(
     if watch_run_id is not None:
         from .watch_runs import prepare_messages
         user_msg_id, asst_msg_id = await asyncio.to_thread(
-            prepare_messages, watch_run_id, topic=topic, agent=resolved_agent, content=message, adhoc=adhoc)
+            prepare_messages, watch_run_id, topic=topic, agent=resolved_agent, content=message, adhoc=adhoc,
+            flow_run_id=flow_run_id, flow_route=flow_route, flow_step_id=flow_step_id, context_ids=stored_context_ids)
     else:
         user_msg_id = insert_user_message(topic, resolved_agent, message,
                                           context_ids=stored_context_ids,

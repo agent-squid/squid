@@ -5923,3 +5923,25 @@ mark.search-kw-highlight {
 #claude-login-code-row label { width: 100%; }
 #claude-login-code { min-width: 0; flex: 1; padding: 0.6rem; font-size: 16px;
   background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 5px; }
+
+/* Outside the transcript so streaming and pagination cannot hide undo. */
+#status-jump-notice {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary, var(--bg));
+  color: var(--text);
+  font-size: 0.85rem;
+}
+#status-jump-notice span { flex: 1; }
+#status-jump-notice button {
+  background: transparent;
+  color: var(--accent);
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+}

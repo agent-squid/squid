@@ -2263,11 +2263,12 @@ function setLiveGroupHidden(hidden) {
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
     // Search scope can't be matched client-side (keywords aren't tracked on the live
     // bubble), so a search in progress forces the whole group hidden. A filter scope can
-    // be matched — only hide groups that don't belong to it.
-    const stayHidden = hidden && (searchActive || !itemMatchesFilter({
+    // be matched — only hide groups that don't belong to it. Pending groups
+    // cannot match response-only bookmark/bad filters.
+    const stayHidden = hidden && (searchActive || hasResponseOnlyFilter() || !itemMatchesFilter({
       topic: thinking.dataset.topic || 'default',
       agent: thinking.dataset.agent || null,
-      adhoc: thinking.dataset.adhoc === '1',
+      adhoc: ['1', 'true'].includes(thinking.dataset.adhoc),
       flow_route: thinking.dataset.flowRoute || null,
     }, historyFilter));
     liveGroupElements(thinking).forEach(node => node.classList.toggle('live-hidden', stayHidden));
@@ -2275,6 +2276,7 @@ function setLiveGroupHidden(hidden) {
 }
 
 function reloadHistory(filter = {}) {
+  document.getElementById('status-jump-notice')?.remove();
   historyFilter = filter;
   historyOffset = 0;
   historyExhausted = false;
@@ -2288,9 +2290,11 @@ function reloadHistory(filter = {}) {
   invalidateHistoryLoad();
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
   if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
-  document.querySelectorAll('.history-item, .boot-banner, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
-  // Remove live (non-history) messages too — completed ones are in the DB and will reload
   const preserveForLive = collectLiveGroupElements();
+  document.querySelectorAll('.history-item, .boot-banner, .tool-block-history, #messages > .cmd-feedback').forEach(el => {
+    if (!preserveForLive.has(el)) el.remove();
+  });
+  // Remove live (non-history) messages too — completed ones are in the DB and will reload
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
     if (!preserveForLive.has(el)) el.remove();
   });
@@ -2859,24 +2863,113 @@ function initHistoryWindowScroll() {
   }
 }
 
-async function jumpToMessage(msgId, flowRunId = null) {
+// Status navigation must reveal hidden live groups before scrolling to them.
+async function jumpToStatusMessage(msgId) {
+  const saved = {
+    filter: { ...historyFilter }, search: searchActive && searchState ? { ...searchState } : null,
+    prompts: promptOnlyHistory, bookmarks: bookmarkOnlyHistory, bad: badOnlyHistory,
+  };
+  let cleared = false;
+  const clearForJump = () => {
+    cleared = true;
+    searchActive = false;
+    searchState = null;
+    searchLoading = false;
+    document.getElementById('search-bar').classList.remove('active');
+    updateSearchButton();
+    promptOnlyHistory = false;
+    bookmarkOnlyHistory = false;
+    badOnlyHistory = false;
+    updatePromptOnlyButton();
+    updateBookmarkButton();
+    document.querySelectorAll('.search-result-item').forEach(el => el.remove());
+    reloadHistory({});
+  };
+  const bubble = messages.querySelector(`.msg-thinking:not(.msg-thinking-done)[data-msg-id="${msgId}"]`);
+  if (bubble) {
+    if (searchActive || hasResponseOnlyFilter() || promptOnlyHistory || !itemMatchesFilter({
+      topic: bubble.dataset.topic || 'default', agent: bubble.dataset.agent || null,
+      adhoc: ['1', 'true'].includes(bubble.dataset.adhoc), flow_route: bubble.dataset.flowRoute || null,
+    }, historyFilter)) clearForJump();
+    if (currentView !== 'chat') navigateView('chat');
+  } else {
+    await jumpToMessage(msgId, null, clearForJump);
+  }
+  const target = messages.querySelector(`.msg[data-msg-id="${msgId}"]`);
+  if (cleared && target) {
+    document.getElementById('status-jump-notice')?.remove();
+    const notice = document.createElement('div');
+    notice.id = 'status-jump-notice';
+    notice.setAttribute('role', 'status');
+    const label = document.createElement('span');
+    label.textContent = 'Filter off for status';
+    notice.appendChild(label);
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.textContent = 'Restore filter';
+    restore.addEventListener('click', () => {
+      notice.remove();
+      promptOnlyHistory = saved.prompts;
+      bookmarkOnlyHistory = saved.bookmarks;
+      badOnlyHistory = saved.bad;
+      updatePromptOnlyButton();
+      updateBookmarkButton();
+      applyHistoryFilter(saved.filter);
+      if (saved.search) {
+        searchState = saved.search;
+        searchActive = true;
+        searchLoading = false;
+        invalidateHistoryLoad();
+        setLiveGroupHidden(true);
+        _updateSearchBar();
+        loadSearchResults();
+      }
+    });
+    notice.appendChild(restore);
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.textContent = '×';
+    dismiss.setAttribute('aria-label', 'Dismiss filter notice');
+    dismiss.addEventListener('click', () => notice.remove());
+    notice.appendChild(dismiss);
+    form.before(notice);
+  }
+  if (target) {
+    target.scrollIntoView({ block: 'center' });
+    target.classList.add('msg-jump-highlight');
+    setTimeout(() => target.classList.remove('msg-jump-highlight'), 1800);
+  }
+}
+
+async function jumpToMessage(msgId, flowRunId = null, clearForJump = null) {
   const targetLabel = flowRunId ? `flow:${flowRunId}` : String(msgId);
   const feedbackEl = showCmdFeedback(`jump ${targetLabel}...`);
   const generation = historyGeneration;
 
   try {
-    const params = historyUrlParams();
+    // Search/prompt navigation clears the scope; fetch that same scope so
+    // the initial window and subsequent pagination use identical filters.
+    const params = clearForJump && (searchActive || promptOnlyHistory)
+      ? new URLSearchParams() : historyUrlParams();
     if (flowRunId) params.set('flow_run_id', flowRunId);
     else params.set('msg_id', msgId);
     params.set('before', 20);
     params.set('after', 20);
-    const res = await fetch(`/history/around?${params.toString()}`);
-    const data = await res.json();
+    let res = await fetch(`/history/around?${params.toString()}`);
+    let data = await res.json();
+    let outsideFilter = false;
+    if (clearForJump && res.ok && !data.found) {
+      const unfiltered = new URLSearchParams({ before: '20', after: '20', msg_id: String(msgId) });
+      res = await fetch(`/history/around?${unfiltered}`);
+      data = await res.json();
+      outsideFilter = !!data.found;
+    }
     if (!res.ok || !data.found) {
       feedbackEl.textContent = `jump ${targetLabel} — not found`;
       return;
     }
     if (generation !== historyGeneration) return;
+    if (clearForJump && (outsideFilter || searchActive || promptOnlyHistory)) clearForJump();
 
     invalidateHistoryLoad();
     historyWindowMode = true;
@@ -2899,8 +2992,10 @@ async function jumpToMessage(msgId, flowRunId = null) {
     }
     if (topSentinel) { topSentinel.remove(); topSentinel = null; }
     if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
-    document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
     const preserveForLive = collectLiveGroupElements();
+    document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => {
+      if (!preserveForLive.has(el)) el.remove();
+    });
     document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
       if (!preserveForLive.has(el)) el.remove();
     });
@@ -4373,6 +4468,9 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
   if (!m) return;
 
   const prompt = m[5];
+  // Keep a filter's literal scope: chip promotion resolves an omitted agent
+  // to the topic's latest agent, which would narrow a topic-only filter.
+  if (parseCommand(prompt)?.command === 'filter') return;
   const promptStart = val.length - prompt.length;
   if (!force && (input.selectionStart < promptStart || input.selectionEnd < promptStart)) return;
 
@@ -8210,6 +8308,7 @@ function makeWipBubble(item) {
   bubble.className = 'msg assistant msg-thinking history-item';
   bubble.dataset.msgId = String(item.id);
   bubble.dataset.topic = item.topic || 'default';
+  if (item.flow_route) bubble.dataset.flowRoute = item.flow_route;
   if (item.agent) bubble.dataset.agent = item.agent;
   if (item.adhoc != null) bubble.dataset.adhoc = item.adhoc ? 'true' : 'false';
   if (item.timestamp) bubble.dataset.orderAt = item.timestamp;
@@ -12362,14 +12461,7 @@ function renderProcPopup(processes, queued) {
     row.addEventListener('click', e => {
       if (e.target.closest('.proc-stop-btn')) return;
       procStatusPopup.classList.remove('open');
-      const bubble = messages.querySelector(`.msg-thinking[data-msg-id="${msgId}"]`);
-      if (bubble) {
-        bubble.scrollIntoView({ block: 'center' });
-        bubble.classList.add('msg-jump-highlight');
-        setTimeout(() => bubble.classList.remove('msg-jump-highlight'), 1800);
-      } else {
-        jumpToMessage(msgId);
-      }
+      jumpToStatusMessage(msgId);
     });
   });
 

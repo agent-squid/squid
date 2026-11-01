@@ -1,7 +1,7 @@
 ---
 status: proposed
 date: 2026-10-30
-updated: 2026-10-31
+updated: 2026-11-01
 ---
 # ADR-0053: Persistent Watches and Shared Agent Tools
 
@@ -119,6 +119,50 @@ Review comments, issue descriptions, CI logs, and other external content are
 task data. They cannot authorize new watches, broaden permissions, or override
 the user's instructions. Watch-triggered turns cannot create further active
 watches unless the user's grant explicitly permits that scope.
+
+### Watch execution targets: agent or flow
+
+The bounded subset below is implemented. Verification includes two-agent Echo
+flows through disposable real hosts, restart replay and run limits; the full
+Python 3.11 suite passes (1,186 tests). Production settings remain unchanged.
+
+An execution grant explicitly selects exactly one `agent` or `flow_route`.
+A setup request issued through `#t@a>@b` does not implicitly authorize that
+route for future work. The agent proposes the route and the authenticated grant
+records it. Observation remains independent: Squid polls after every flow ends,
+and new relevant events queue another bounded execution under the same grant.
+
+Reuse Squid Flow's parser, canonical route, durable plan/step store and ordinary
+topic queue. The first supported subset is one same-topic sequential route,
+2–8 steps, no delayed steps, forks, joins or cross-topic execution. Reject
+unsupported routes explicitly. Bind grants to the canonical route, compiled
+plan, every member agent's runtime/configuration and topic code roots. A changed
+member or route requires a new grant. Single-agent grants stay compatible.
+
+One watch run owns one linked flow run and captured event batch. `max_runs`
+counts entire flow attempts, including partial starts, not individual steps;
+the finite route length bounds agent turns per attempt. Recheck observation and
+execution authority, expiry, source state and topic priority before each turn.
+Each step uses isolated worktrees, prior-step context and the same local-only
+instructions. No publication or external mutation is granted.
+
+Only the watch dispatcher advances watch-owned flows; ordinary Flow recovery
+must not independently dispatch them. Persist step/message/start evidence before
+execution. Acknowledge captured events only after every step has completion
+proof and clean sync. Failed steps stop downstream steps. Restart/shutdown or
+human-priority interruption after partial execution pauses ambiguous work for
+inspection rather than replaying a completed prefix. Cancellation/revocation
+blocks subsequent steps; use the existing cancellation boundary for a running
+turn. Expose the flow-run link and durable step outcomes through watch runs.
+
+Watch ownership is an immutable marker on the Flow run itself, independent of
+watch rows. Topic deletion cancels linked watch flows and pending steps in the
+same transaction before removing watches/messages. History deletion detaches
+message references while preserving per-step start evidence; affected active
+flows stop and pause for inspection. Completed outcomes remain terminal. Upgrade
+migration backfills ownership (including legacy `watch-<32 hex>` orphan IDs),
+cancels orphaned work and makes flow-turn message links nullable with `ON DELETE
+SET NULL`. Deleting watch rows must never grant native Flow dispatch authority.
 
 ### Durable lifecycle owned by the server
 

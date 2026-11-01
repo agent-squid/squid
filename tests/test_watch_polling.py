@@ -188,7 +188,7 @@ async def test_disabled_configuration_does_not_start_worker(setup):
     assert service._monitoring_task is None
 
 
-@pytest.mark.parametrize('execution', [False, True])
+@pytest.mark.parametrize('execution', [False, True, 'flow'])
 @pytest.mark.parametrize('generic_plan', [False, True])
 def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, execution, generic_plan):
     if generic_plan:
@@ -227,7 +227,7 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
         configuration['server']['host'] = '127.0.0.1'
         configuration['server']['port'] = port
         configuration['test_harness_enabled'] = True
-        configuration['watches'] = {'enabled': True, 'policy': {'execution_enabled': execution, 'max_runs': 2}, 'registry': {'probes': {
+        configuration['watches'] = {'enabled': True, 'policy': {'execution_enabled': bool(execution), 'max_runs': 2}, 'registry': {'probes': {
             'local': {'argv': [sys.executable, str(probe), str(state)]}}}}
         if generic_plan:
             configuration['watches'].pop('registry')
@@ -294,7 +294,11 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                 if execution:
                     agent_response = client.post('/config/agents', json={'name': 'watch-echo', 'harness': 'echo', 'provider': 'echo'})
                     assert agent_response.status_code == 200
-                    execution_response = client.post(path + '/execution-grant', json=dict(agent='watch-echo',
+                    target = dict(agent='watch-echo')
+                    if execution == 'flow':
+                        assert client.post('/config/agents', json={'name': 'watch-review', 'harness': 'echo', 'provider': 'echo'}).status_code == 200
+                        target = dict(flow_route='#squid@watch-echo>@watch-review')
+                    execution_response = client.post(path + '/execution-grant', json=dict(**target,
                         instructions='Inspect the event and report locally', max_runs=2, max_attempts=1, request_key='execute'))
                     assert execution_response.status_code == 200
                 source('v2', True)
@@ -332,7 +336,11 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                     assert db("SELECT COUNT(*) FROM watch_runs")[0][0] == 2
                 else:
                     assert db("SELECT COUNT(*) FROM watch_events WHERE disposition='pending'")[0][0] == 2
-                assert db("SELECT COUNT(*) FROM chat_messages WHERE role='assistant'")[0][0] == (2 if execution else 0)
+                assert db("SELECT COUNT(*) FROM chat_messages WHERE role='assistant'")[0][0] == (4 if execution == 'flow' else 2 if execution else 0)
+                if execution == 'flow':
+                    assert db("SELECT COUNT(*) FROM flow_steps WHERE status='done'")[0][0] == 4
+                    assert db("SELECT COUNT(*) FROM watch_flow_turns WHERE started_at IS NOT NULL")[0][0] == 4
+                    assert all(r[0] for r in db('SELECT flow_run_id FROM watch_runs'))
                 cancelled = client.post(path + '/cancel', json={'version': client.get(path).json()['version']})
                 assert cancelled.json()['status'] == 'cancelled'
             finally:

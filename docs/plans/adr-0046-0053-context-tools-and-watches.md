@@ -1,6 +1,6 @@
 # Implementation plan: transparent context, shared tools, and persistent watches
 
-Status: implementation in progress. Updated: 2026-10-31.
+Status: implementation in progress. Updated: 2026-11-01.
 
 Design authorities: [ADR-0046](../decisions/0046-layered-runtime-and-user-context-injection.md)
 and [ADR-0053](../decisions/0053-persistent-watches-and-shared-agent-tools.md).
@@ -665,3 +665,51 @@ Completion means a user can authorize a watch, see exactly what it permits,
 close the UI, restart Squid, observe a new event or deadline launch the expected
 ordinary turn, inspect its context/outcome, and stop the watch without losing
 events or publishing unrelated changes. Continuous waiting itself runs no LLM.
+
+
+## Watch flow execution targets (2026-11-01)
+
+Status: bounded same-topic sequential execution implemented. Grants persist a
+canonical `flow_route` and all-member/plan revision. Watch runs link durable Flow
+runs and per-step start/message evidence; native Flow advancement/recovery skips
+watch-owned runs. Predecessor context, isolated execution, authorization/source
+refresh, full-flow acknowledgement and conservative partial recovery are covered.
+Validation: 125 focused watch/API/Flow tests, followed by the full Python 3.11
+suite (1,186 tests, two dependency deprecation warnings), passed. Disposable-host
+Echo tests cover two members per run, provider-shaped MCP plans and legacy probes,
+`/health` boot-time restart recovery, replay deduplication and run limits. No live
+agent, production configuration, Shore files or publication behavior changed.
+
+Implement ADR-0053's explicit `agent` / `flow_route` target union before enabling
+flow execution. Reuse the Flow parser/plan/store and topic queue; retain existing
+single-agent behavior. Support only same-topic sequential 2–8-step plans without
+delays, forks or joins initially. Keep production configuration unchanged.
+
+1. Extend grants with a canonical route and all-member/plan fingerprint; migrate
+   existing grants unchanged. Validate route scope, members and finite budgets.
+2. Persist a deterministic flow-run link and per-turn start/message evidence.
+   Watch dispatch owns advancement; prevent ordinary Flow continuation/recovery
+   from independently starting watch-owned steps.
+3. Execute steps in order via normal preparation/queue/worktree paths, with pinned
+   predecessor context and authorization/source refresh before every turn. One
+   watch attempt consumes one run budget, with at most eight agent turns.
+4. Settle only after all linked steps prove completion and clean sync. Stop on
+   errors, revoked authority, expiry, cancellation or user priority; pause partial
+   ambiguous outcomes on restart rather than replaying a successful prefix.
+5. Verify agent compatibility, route rejection and idempotency, changed member
+   configuration, end-to-end two-agent Echo dispatch and acknowledgement, step
+   failure/revocation, priority, run limits, recovery, and no native double dispatch.
+   Update CLI help and the operator contract with concrete flow-grant input.
+
+
+### Flow deletion review fixes (2026-11-01)
+
+Implemented immutable watch ownership on Flow runs, atomic topic-deletion
+cancellation, nullable flow-turn message references, and active-flow cancellation
+and pause during filtered agent-history deletion. Migration preserves existing
+start evidence, backfills legacy ownership and cancels orphaned watch flows.
+Regression coverage includes native takeover after deletion, all history filters,
+queued reviewers, completed outcomes, rollback and upgrade/idempotency behavior.
+Verification: 103 focused tests and the full Python 3.11 suite (1,195 tests) passed,
+with two dependency deprecation warnings. Production configuration and publication
+remain unchanged.

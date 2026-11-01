@@ -910,6 +910,9 @@ async def _dispatch_claimed_durable_step(flow_run_id: str, step: dict) -> bool:
 
 
 async def _dispatch_ready_durable_steps(flow_run_id: str) -> int:
+    from .watch_flows import owned
+    if owned(flow_run_id):
+        return 0
     now = _utc_now_iso()
     claimed_steps = []
     for step in get_due_flow_steps(now, flow_run_id=flow_run_id):
@@ -932,6 +935,9 @@ async def _dispatch_ready_durable_steps(flow_run_id: str) -> int:
 
 def _schedule_durable_wakeups(flow_run_id: str) -> None:
     """Use persisted due times for live wake-up; recovery owns restart safety."""
+    from .watch_flows import owned
+    if owned(flow_run_id):
+        return
     now = datetime.now(timezone.utc)
     for step in get_flow_steps(flow_run_id):
         if step["status"] != "scheduled" or not step.get("due_at"):
@@ -961,6 +967,9 @@ def _schedule_durable_wakeups(flow_run_id: str) -> None:
 async def complete_durable_step(msg_id: int, *, error: Optional[str] = None) -> bool:
     """Persist a worker terminal outcome and dispatch newly eligible work."""
     step = get_flow_step_for_message(msg_id)
+    from .watch_flows import owned
+    if step and owned(step['flow_run_id']):
+        return True
     if not step:
         return False
     if step["status"] in {"done", "error", "cancelled"}:
@@ -980,6 +989,9 @@ async def complete_durable_step(msg_id: int, *, error: Optional[str] = None) -> 
 def _reconcile_durable_step(step: dict, *, startup: bool) -> bool:
     """Resolve one abandoned claim/running step from its durable chat state."""
     flow_run_id = step["flow_run_id"]
+    from .watch_flows import owned
+    if owned(flow_run_id):
+        return False
     step_id = step["step_id"]
     assistant_id = step.get("assistant_msg_id")
     if not assistant_id and step["status"] == "claimed":

@@ -74,6 +74,7 @@ test('/filter with #topic only omits adhoc param from /history', async ({ page }
 
   await page.waitForTimeout(300);
   expect(capturedUrl).toMatch(/topic=squid/);
+  expect(capturedUrl).not.toMatch(/agent=/);
   expect(capturedUrl).not.toMatch(/adhoc/);
 });
 
@@ -646,7 +647,9 @@ test('a recovered pending item is shown only while it matches the active filter'
   await page.fill('#input', '/f #other');
   await page.keyboard.press('Enter');
   await page.waitForTimeout(300);
-  await expect(page.locator('.msg-thinking.history-item')).toHaveCount(0);
+  // Keep the recovered stream connected while its group is filtered out.
+  await expect(page.locator('.msg-thinking.history-item')).toHaveCount(1);
+  await expect(page.locator('.msg-thinking.history-item')).toBeHidden();
 });
 
 test('/f #topic* filters the whole subtree and sends topic_subtree=true', async ({ page }) => {

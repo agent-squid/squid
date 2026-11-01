@@ -51,6 +51,10 @@ class WatchDispatch:
             if run_id in self.tasks:
                 continue
             await call(store.settle, self.service, run_id, interrupted=True)
+            run, _, _, _ = await call(store.details, run_id)
+            if run['flow_run_id']:
+                from .watch_flows import cancel
+                await call(cancel, run['flow_run_id'], 'Watch flow interrupted')
             await call(store.finish_dispatch, run_id)
 
     async def dispatch(self, run_id):
@@ -58,6 +62,10 @@ class WatchDispatch:
         from fastapi.responses import JSONResponse
         try:
             run, watch, grant, events = await call(store.details, run_id)
+            if grant['flow_route']:
+                from .watch_flows import dispatch
+                await dispatch(self, run_id)
+                return
             prepared = await _prepare_chat_turn(message=store.prompt_for(run, watch, grant, events),
                 topic=watch['topic'], agent=grant['agent'], source='watch', watch_run_id=run_id)
             if isinstance(prepared, JSONResponse):
@@ -136,7 +144,11 @@ class WatchDispatch:
                 return None
             await self.reject(run_id, 'authorization_changed')
             return None
-        return store.prompt_for(run, watch, grant, events, snapshot)
+        prompt = store.prompt_for(run, watch, grant, events, snapshot)
+        if grant['flow_route']:
+            from .watch_flows import predecessor_context
+            prompt += await call(predecessor_context, run_id)
+        return prompt
 
     def authorized(self, run_id):
         with self.service._lock:
@@ -145,7 +157,7 @@ class WatchDispatch:
                 with conn:
                     conn.execute('BEGIN IMMEDIATE')
                     run = conn.execute('SELECT * FROM watch_runs WHERE id=?', (run_id,)).fetchone()
-                    if run is None or run['state'] not in {'queued', 'running'}:
+                    if run is None or run['state'] not in {'claimed', 'queued', 'running'}:
                         return False
                     watch = dict(conn.execute('SELECT * FROM watches WHERE id=?', (run['watch_id'],)).fetchone())
                     grant = conn.execute('SELECT * FROM watch_execution_grants WHERE id=?', (run['grant_id'],)).fetchone()
@@ -154,7 +166,12 @@ class WatchDispatch:
                 conn.close()
 
     async def defer(self, run_id, reason='user_work_priority'):
-        await call(store.finish_dispatch, run_id, 'deferred', reason, now=self.service.clock())
+        run, _, _, _ = await call(store.details, run_id)
+        if run['flow_run_id'] and run['started_at'] is not None:
+            await call(store.finish_dispatch, run_id, 'ambiguous', 'flow_interrupted_by_user',
+                       pause_watch=True, now=self.service.clock())
+        else:
+            await call(store.finish_dispatch, run_id, 'deferred', reason, now=self.service.clock())
 
     async def stop(self):
         from .runners import kill_proc_by_msg_id

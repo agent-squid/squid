@@ -528,3 +528,341 @@ async def test_execution_refresh_rechecks_grant_between_reads(setup):
     assert await runtime.before_execute(run_id) is None
     assert reads == ['first']
     assert rows('watch_runs')[0]['started_at'] is None
+
+
+def flow_grant(setup, *, route='#squid@watch-agent>@review-agent', max_runs=1):
+    service, _, _, row, _, _ = setup
+    config = stats_db.get_agent('watch-agent')
+    stats_db.upsert_agent('review-agent', 'codex', 'openai', None, cwd=config['cwd'])
+    with stats_db._connect() as conn:
+        conn.execute('UPDATE watch_execution_grants SET revoked_at=99')
+    return watch_runs.execution_grant(service, topic='squid', watch_id=row['id'], flow_route=route,
+        instructions='Implement then review local changes', max_runs=max_runs, max_attempts=1,
+        request_key='flow', user_action='human:flow')
+
+
+def test_flow_grant_explicit_scope_and_member_revision(setup):
+    grant = flow_grant(setup)
+    service, _, _, watch, _, _ = setup
+    assert grant['flow_route'] == '#squid@watch-agent>@review-agent'
+    again = watch_runs.execution_grant(service, topic='squid', watch_id=watch['id'], flow_route=grant['flow_route'],
+        instructions=grant['instructions'], max_runs=1, max_attempts=1, request_key='flow', user_action='retry')
+    assert again == grant
+    config = stats_db.get_agent('review-agent')
+    stats_db.upsert_agent('review-agent', 'codex', 'openai', 'changed', cwd=config['cwd'])
+    assert claimed(setup) is None
+    assert rows('watches')[0]['pause_reason'] == 'execution_not_authorized'
+
+
+@pytest.mark.parametrize('route', ['#other@watch-agent>@review-agent',
+    '#squid@watch-agent=:1s>@review-agent', '#squid@watch-agent=2>@review-agent',
+    '#squid@watch-agent', '#squid@watch-agent>@missing'])
+def test_unsupported_watch_flow_rejected(setup, route):
+    with pytest.raises(ValueError):
+        flow_grant(setup, route=route)
+
+
+@pytest.mark.asyncio
+async def test_flow_dispatch_two_agents_and_single_run_budget(setup, monkeypatch):
+    from agent import flow
+    grant = flow_grant(setup)
+    service = setup[0]
+    entered, native = [], []
+    async def unexpected(*args, **kwargs):
+        native.append(True)
+        return False
+    monkeypatch.setattr(flow, '_dispatch_claimed_durable_step', unexpected)
+    async def runner(prompt, **kwargs):
+        message = stats_db.get_message(kwargs['msg_id'])
+        if message['agent'] == 'review-agent':
+            assert 'Implementation complete' in prompt
+            assert 'Previous granted flow steps' in prompt
+        assert 'local isolated files only' in prompt
+        entered.append(message['agent'])
+        yield 'Implementation complete' if message['agent'] == 'watch-agent' else 'Review complete'
+    monkeypatch.setattr('agent.runners.run_codex', runner)
+    dispatcher = TopicDispatcher()
+    runtime = WatchDispatch(service, dispatcher)
+    service.dispatch_runtime = runtime
+    run_id = claimed(setup)
+    try:
+        await asyncio.wait_for(runtime.dispatch(run_id), 10)
+        assert entered == ['watch-agent', 'review-agent']
+        run = rows('watch_runs')[0]
+        assert run['state'] == 'succeeded'
+        assert run['flow_run_id'] == 'watch-' + run_id
+        assert [s['status'] for s in stats_db.get_flow_steps(run['flow_run_id'])] == ['done', 'done']
+        assert rows('watch_events')[0]['disposition'] == 'handled'
+        assert len(rows('watch_flow_turns')) == 2
+        assert all(t['started_at'] is not None for t in rows('watch_flow_turns'))
+        assert not native
+        with stats_db._connect() as conn:
+            conn.execute("INSERT INTO watch_events VALUES(?,'later','{}',101,'pending')", (setup[3]['id'],))
+        assert claimed(setup) is None
+        assert rows('watches')[0]['pause_reason'] == 'execution_budget'
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_flow_revocation_stops_downstream_and_does_not_ack(setup, monkeypatch):
+    grant = flow_grant(setup)
+    service, _, _, watch, _, _ = setup
+    entered = []
+    async def runner(prompt, **kwargs):
+        entered.append(stats_db.get_message(kwargs['msg_id'])['agent'])
+        watch_runs.revoke_execution(service, topic='squid', watch_id=watch['id'], grant_id=grant['id'])
+        yield 'First turn completed after revocation'
+    monkeypatch.setattr('agent.runners.run_codex', runner)
+    dispatcher = TopicDispatcher()
+    runtime = WatchDispatch(service, dispatcher)
+    service.dispatch_runtime = runtime
+    try:
+        await asyncio.wait_for(runtime.dispatch(claimed(setup)), 10)
+        assert entered == ['watch-agent']
+        assert rows('watch_events')[0]['disposition'] == 'pending'
+        assert rows('watch_runs')[0]['state'] == 'ambiguous'
+        assert rows('flow_runs')[0]['status'] == 'cancelled'
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_partial_watch_flow_recovery_cannot_ack_or_dispatch_natively(setup):
+    from agent import flow, watch_flows
+    flow_grant(setup)
+    service = setup[0]
+    run_id = claimed(setup)
+    flow_id, plan = watch_flows.initialize(run_id, '#squid@watch-agent>@review-agent', 'squid')
+    step = plan[0]
+    stats_db.claim_flow_step(flow_id, step['step_id'], stats_db._utc_now_iso())
+    _, assistant = watch_runs.prepare_messages(run_id, topic='squid', agent='watch-agent', content='watch',
+        flow_run_id=flow_id, flow_route='#squid@watch-agent>@review-agent', flow_step_id=step['step_id'])
+    watch_runs.set_state(run_id, 'queued')
+    assert watch_runs.begin(service, run_id)
+    stats_db.update_assistant_message(assistant, 'prefix done', None, 'done')
+    stats_db.insert_run_event(assistant, 1, 'done', None)
+    watch_flows.mark_step(flow_id, step['step_id'], 'running')
+    watch_flows.mark_step(flow_id, step['step_id'], 'done')
+    assert await flow._dispatch_ready_durable_steps(flow_id) == 0
+    runtime = WatchDispatch(service, TopicDispatcher())
+    await runtime.recover()
+    assert rows('watch_runs')[0]['state'] == 'ambiguous'
+    assert rows('watch_events')[0]['disposition'] == 'pending'
+    assert rows('flow_runs')[0]['status'] == 'cancelled'
+
+
+@pytest.mark.asyncio
+async def test_failed_flow_step_stops_downstream(setup, monkeypatch):
+    from agent.runners import CLIError
+    flow_grant(setup)
+    service = setup[0]
+    entered = []
+    async def runner(prompt, **kwargs):
+        entered.append(stats_db.get_message(kwargs['msg_id'])['agent'])
+        raise CLIError('fixture failure')
+        yield ''
+    monkeypatch.setattr('agent.runners.run_codex', runner)
+    runtime = WatchDispatch(service, TopicDispatcher())
+    service.dispatch_runtime = runtime
+    await asyncio.wait_for(runtime.dispatch(claimed(setup)), 10)
+    assert entered == ['watch-agent']
+    assert rows('watch_runs')[0]['state'] == 'failed'
+    assert rows('watch_events')[0]['disposition'] == 'pending'
+    assert all(s['status'] in {'error', 'cancelled'} for s in stats_db.get_flow_steps(rows('watch_runs')[0]['flow_run_id']))
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_flow_human_priority_after_prefix_pauses_without_replay(setup, monkeypatch):
+    flow_grant(setup)
+    service = setup[0]
+    entered = []
+    async def runner(prompt, **kwargs):
+        entered.append(stats_db.get_message(kwargs['msg_id'])['agent'])
+        user = stats_db.insert_user_message('squid', 'watch-agent', 'human work')
+        stats_db.insert_assistant_message('squid', 'watch-agent', user)
+        yield 'prefix done'
+    monkeypatch.setattr('agent.runners.run_codex', runner)
+    runtime = WatchDispatch(service, TopicDispatcher())
+    service.dispatch_runtime = runtime
+    await asyncio.wait_for(runtime.dispatch(claimed(setup)), 10)
+    assert entered == ['watch-agent']
+    assert rows('watch_runs')[0]['state'] == 'ambiguous'
+    assert rows('watch_events')[0]['disposition'] == 'pending'
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_flow_queue_deferral_after_start_is_ambiguous(setup):
+    from agent import watch_flows
+    flow_grant(setup)
+    service = setup[0]
+    run_id = claimed(setup)
+    flow_id, plan = watch_flows.initialize(run_id, '#squid@watch-agent>@review-agent', 'squid')
+    step = plan[0]
+    stats_db.claim_flow_step(flow_id, step['step_id'], stats_db._utc_now_iso())
+    watch_runs.prepare_messages(run_id, topic='squid', agent='watch-agent', content='watch',
+        flow_run_id=flow_id, flow_route='#squid@watch-agent>@review-agent', flow_step_id=step['step_id'])
+    watch_runs.set_state(run_id, 'queued')
+    assert watch_runs.begin(service, run_id)
+    runtime = WatchDispatch(service, TopicDispatcher())
+    await runtime.defer(run_id)
+    assert rows('watch_runs')[0]['state'] == 'ambiguous'
+    assert rows('watches')[0]['pause_reason'] == 'flow_interrupted_by_user'
+    assert rows('watch_events')[0]['disposition'] == 'pending'
+
+
+def prepared_flow_prefix(setup):
+    from agent import watch_flows
+    flow_grant(setup)
+    service = setup[0]
+    stats_db.upsert_topic('squid', 'watch-agent')
+    run_id = claimed(setup)
+    route = '#squid@watch-agent>@review-agent'
+    flow_id, plan = watch_flows.initialize(run_id, route, 'squid')
+    first = plan[0]
+    stats_db.claim_flow_step(flow_id, first['step_id'], stats_db._utc_now_iso())
+    user, assistant = watch_runs.prepare_messages(run_id, topic='squid', agent='watch-agent', content='watch',
+        flow_run_id=flow_id, flow_route=route, flow_step_id=first['step_id'])
+    watch_runs.set_state(run_id, 'queued')
+    assert watch_runs.begin(service, run_id)
+    stats_db.update_assistant_message(assistant, 'prefix done', None, 'done')
+    stats_db.insert_run_event(assistant, 1, 'done', None)
+    watch_flows.mark_step(flow_id, first['step_id'], 'running')
+    watch_flows.mark_step(flow_id, first['step_id'], 'done')
+    return run_id, flow_id, plan, user, assistant
+
+
+@pytest.mark.asyncio
+async def test_topic_delete_preserves_ownership_and_blocks_native_dispatch(setup, monkeypatch):
+    from agent import flow, watch_flows
+    run_id, flow_id, plan, _, _ = prepared_flow_prefix(setup)
+    assert stats_db.delete_topic('squid')
+    assert rows('watch_runs') == []
+    assert rows('watches') == []
+    assert watch_flows.owned(flow_id)
+    assert stats_db.get_flow_run(flow_id)['status'] == 'cancelled'
+    assert [s['status'] for s in stats_db.get_flow_steps(flow_id)] == ['done', 'cancelled']
+    async def unexpected(*args):
+        pytest.fail('deleted watch flow must never dispatch through native Flow')
+    monkeypatch.setattr(flow, '_dispatch_claimed_durable_step', unexpected)
+    assert await flow._dispatch_ready_durable_steps(flow_id) == 0
+    await flow.recover_durable_flows(startup=True)
+    with pytest.raises(ValueError):
+        stats_db.create_flow_run(flow_id, '#squid@watch-agent>@review-agent', None, plan,
+                                 execution_mode='durable', if_not_exists=True)
+    assert stats_db.get_topic('squid') is None
+
+
+@pytest.mark.parametrize('adhoc', [None, False, True])
+def test_delete_flow_history_detaches_evidence_and_pauses(setup, adhoc):
+    from agent import watch_flows
+    run_id, flow_id, _, _, assistant = prepared_flow_prefix(setup)
+    if adhoc is True:
+        with stats_db._connect() as conn:
+            conn.execute('UPDATE chat_messages SET adhoc=1 WHERE id=?', (assistant,))
+    stats_db.delete_topic_agent('squid', 'watch-agent', adhoc=adhoc)
+    assert stats_db.get_message(assistant) is None
+    evidence = rows('watch_flow_turns')[0]
+    assert evidence['msg_id'] is None and evidence['started_at'] is not None
+    run = rows('watch_runs')[0]
+    assert run['id'] == run_id and run['state'] == 'ambiguous'
+    assert run['outcome'] == 'flow_history_deleted'
+    assert rows('watches')[0]['pause_reason'] == 'flow_history_deleted'
+    assert rows('watch_events')[0]['disposition'] == 'pending'
+    assert stats_db.get_flow_run(flow_id)['status'] == 'cancelled'
+    assert watch_flows.owned(flow_id)
+    assert not WatchDispatch(setup[0], TopicDispatcher()).authorized(run_id)
+    with stats_db._connect() as conn:
+        assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+def test_deleting_prefix_history_stops_queued_reviewer(setup):
+    from agent import watch_flows
+    run_id, flow_id, plan, _, assistant = prepared_flow_prefix(setup)
+    step = plan[1]
+    stats_db.claim_flow_step(flow_id, step['step_id'], stats_db._utc_now_iso())
+    _, reviewer = watch_runs.prepare_messages(run_id, topic='squid', agent='review-agent', content='review',
+        flow_run_id=flow_id, flow_route='#squid@watch-agent>@review-agent', flow_step_id=step['step_id'])
+    watch_runs.set_state(run_id, 'queued')
+    watch_flows.mark_step(flow_id, step['step_id'], 'running')
+    stats_db.delete_topic_agent('squid', 'watch-agent')
+    assert stats_db.get_message(assistant) is None
+    assert stats_db.get_message(reviewer)['status'] == 'cancelled'
+    assert rows('watch_runs')[0]['assistant_msg_id'] == reviewer
+    assert rows('watch_runs')[0]['state'] == 'ambiguous'
+    assert not watch_runs.begin(setup[0], run_id)
+    assert stats_db.get_flow_run(flow_id)['status'] == 'cancelled'
+
+
+def test_delete_completed_flow_history_preserves_terminal_outcome(setup):
+    from agent import watch_flows
+    run_id, flow_id, plan, _, _ = prepared_flow_prefix(setup)
+    step = plan[1]
+    stats_db.claim_flow_step(flow_id, step['step_id'], stats_db._utc_now_iso())
+    _, reviewer = watch_runs.prepare_messages(run_id, topic='squid', agent='review-agent', content='review',
+        flow_run_id=flow_id, flow_route='#squid@watch-agent>@review-agent', flow_step_id=step['step_id'])
+    watch_runs.set_state(run_id, 'queued')
+    assert watch_runs.begin(setup[0], run_id)
+    watch_flows.mark_step(flow_id, step['step_id'], 'running')
+    stats_db.update_assistant_message(reviewer, 'review done', None, 'done')
+    stats_db.insert_run_event(reviewer, 1, 'done', None)
+    watch_flows.mark_step(flow_id, step['step_id'], 'done')
+    watch_runs.settle(setup[0], run_id)
+    assert rows('watch_runs')[0]['state'] == 'succeeded'
+    stats_db.delete_topic_agent('squid', 'watch-agent')
+    assert rows('watch_runs')[0]['state'] == 'succeeded'
+    assert stats_db.get_flow_run(flow_id)['status'] == 'completed'
+    assert rows('watches')[0]['status'] == 'active'
+    assert rows('watch_events')[0]['disposition'] == 'handled'
+    assert len(rows('watch_flow_turns')) == 2
+
+
+def test_topic_deletion_cancellation_rolls_back_atomically(setup):
+    import sqlite3
+    _, flow_id, _, _, _ = prepared_flow_prefix(setup)
+    with stats_db._connect() as conn:
+        conn.execute("""CREATE TRIGGER reject_topic_delete BEFORE DELETE ON topics
+            BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match='fixture rollback'):
+        stats_db.delete_topic('squid')
+    assert len(rows('watch_runs')) == 1
+    assert rows('watches')[0]['status'] == 'active'
+    assert stats_db.get_flow_run(flow_id)['status'] == 'running'
+    assert [s['status'] for s in stats_db.get_flow_steps(flow_id)] == ['done', 'pending']
+
+
+def test_existing_flow_schema_migration_preserves_evidence(setup):
+    from agent import watch_flows
+    _, flow_id, _, _, assistant = prepared_flow_prefix(setup)
+    with stats_db._connect() as conn:
+        conn.execute('ALTER TABLE flow_runs DROP COLUMN watch_owned')
+        conn.execute('''CREATE TABLE watch_flow_turns_legacy (
+            run_id TEXT NOT NULL REFERENCES watch_runs(id) ON DELETE CASCADE,
+            step_id TEXT NOT NULL, msg_id INTEGER NOT NULL REFERENCES chat_messages(id),
+            started_at REAL, PRIMARY KEY(run_id,step_id), UNIQUE(msg_id))''')
+        conn.execute('INSERT INTO watch_flow_turns_legacy SELECT * FROM watch_flow_turns')
+        conn.execute('DROP TABLE watch_flow_turns')
+        conn.execute('ALTER TABLE watch_flow_turns_legacy RENAME TO watch_flow_turns')
+    stats_db.init_db()
+    stats_db.init_db()
+    assert watch_flows.owned(flow_id)
+    assert rows('watch_flow_turns')[0]['msg_id'] == assistant
+    stats_db.delete_topic_agent('squid', 'watch-agent')
+    assert rows('watch_flow_turns')[0]['msg_id'] is None
+    assert rows('watch_flow_turns')[0]['started_at'] is not None
+
+
+@pytest.mark.asyncio
+async def test_upgrade_cancels_legacy_orphaned_watch_flow(setup):
+    from agent import watch_flows, flow
+    _, flow_id, _, _, _ = prepared_flow_prefix(setup)
+    with stats_db._connect() as conn:
+        conn.execute('DELETE FROM watch_runs')
+        conn.execute('DELETE FROM watches')
+        conn.execute('ALTER TABLE flow_runs DROP COLUMN watch_owned')
+    stats_db.init_db()
+    assert watch_flows.owned(flow_id)
+    assert stats_db.get_flow_run(flow_id)['status'] == 'cancelled'
+    assert await flow._dispatch_ready_durable_steps(flow_id) == 0
