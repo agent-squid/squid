@@ -123,3 +123,16 @@ def test_human_file_auth_and_explicit_url_without_environment(transport, monkeyp
     monkeypatch.delenv('SQUID_TURN_TOKEN')
     assert watch_cli.main(['watch', 'list', '--api-url', 'http://127.0.0.1:2222']) == 1
     assert len(transport) == 1
+
+
+def test_plan_discovery_and_validation_routes(transport, tmp_path):
+    assert watch_cli.main(['tools', '--discover']) == 0
+    assert transport[-1].url.path == '/watch-tools'
+    assert watch_cli.main(['tools', '--discover', '--human-topic', 'squid']) == 0
+    assert transport[-1].url.path == '/watch-control/squid/watch-tools'
+    payload = tmp_path / 'plan.json'
+    payload.write_text(json.dumps({'target': 'I-1', 'plan': {}}))
+    assert watch_cli.main(['watch', 'validate', '--input', str(payload)]) == 0
+    assert transport[-1].url.path == '/watches/validate'
+    assert watch_cli.main(['watch', 'validate', '--input', str(payload), '--human-topic', 'squid']) == 0
+    assert transport[-1].url.path == '/watch-control/squid/watches/validate'

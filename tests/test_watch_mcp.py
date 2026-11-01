@@ -114,7 +114,7 @@ def test_discovery_baseline_comment_edit_and_close(tmp_path, transport):
     async def run():
         async with connect(path, transport) as session:
             tools = (await session.list_tools()).tools
-            assert [t.name for t in tools] == ['task_snapshot']
+            assert {t.name for t in tools} == {'task_snapshot', 'read_issue', 'read_pr'}
             assert tools[0].inputSchema['required'] == ['target']
             probe = adapter(session)
             watch = {'target': 'TASK-1', 'cursor': None}

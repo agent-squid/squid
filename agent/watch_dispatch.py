@@ -105,7 +105,12 @@ class WatchDispatch:
             return None
         try:
             timeout = getattr(getattr(adapter, 'probe', None), 'timeout', 20) + 2
-            probe = asyncio.create_task(adapter.poll(watch))
+            async def authorize_read():
+                if not self.accepting or not await call(self.authorized, run_id):
+                    raise PermissionError('watch authorization changed')
+            poll = getattr(adapter, 'poll_authorized', None)
+            operation = poll(watch, authorize_read) if poll is not None else adapter.poll(watch)
+            probe = asyncio.create_task(operation)
             self.probes.add(probe)
             try:
                 observation = await asyncio.wait_for(probe, timeout)

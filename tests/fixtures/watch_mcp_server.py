@@ -28,6 +28,16 @@ def make_server(state_path: Path, *, port=8000):
         return {key: value for key, value in task.items()
                 if key in {'revision', 'changed', 'summary', 'url', 'closed'}}
 
+    @server.tool()
+    async def read_issue(issueId: str) -> dict[str, Any]:
+        """Read a provider-shaped issue response without Squid normalization."""
+        return json.loads(state_path.read_text())['issues'][issueId]
+
+    @server.tool()
+    async def read_pr(repository: str, number: int) -> dict[str, Any]:
+        """Read a provider-shaped PR response using different input arguments."""
+        return json.loads(state_path.read_text())['prs'][f'{repository}#{number}']
+
     return server
 
 

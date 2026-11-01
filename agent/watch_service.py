@@ -8,6 +8,7 @@ calls here; they do not sandbox an agent's ambient filesystem/shell access.
 from dataclasses import dataclass
 import asyncio
 import hashlib
+import json
 import math
 import secrets
 import threading
@@ -36,7 +37,13 @@ def _time(value):
 
 
 def _public(row):
-    return {k: v for k, v in dict(row).items() if k not in {'claim_token', 'lease_until'}}
+    result = {k: v for k, v in dict(row).items() if k not in {'claim_token', 'lease_until'}}
+    from .watch_plans import PLAN_ERRORS, digest
+    if result.get('observation_plan'):
+        result['plan_digest'] = digest(json.loads(result['observation_plan']))
+    if result.get('last_error') in PLAN_ERRORS:
+        result['last_error_hint'] = PLAN_ERRORS[result['last_error']]
+    return result
 
 
 @dataclass(frozen=True, repr=False)
@@ -193,16 +200,95 @@ class WatchService:
                 raise WatchDenied()
             return dict(scope='observation', topic=credential.topic,
                         operations=sorted(credential.operations & policy.operations),
-                        adapters=sorted(policy.adapters), monitoring_enabled=self.monitoring_enabled,
+                        adapters=sorted(policy.adapters), observation_plans='plan' in policy.adapters,
+                        observation_tools_endpoint='/watch-tools', plan_validation_endpoint='/watches/validate',
+                        monitoring_enabled=self.monitoring_enabled,
                         dispatch_enabled=self.dispatch_enabled and policy.execution_enabled, publication_enabled=False,
                         min_poll_seconds=policy.min_poll_seconds,
                         max_lifetime_seconds=policy.max_lifetime_seconds,
                         max_runs=policy.max_runs, max_attempts=policy.max_attempts,
                         execution_scope='local_work' if policy.execution_enabled else None)
 
-    def create(self, token, *, adapter, target, request_key, poll_interval=30, expires_at=None):
+    def _plan_adapter(self, token):
+        from .watch_plans import PlanError
+        with self._lock:
+            _, policy = self._authorize(token, 'create')
+            adapter = self.configuration.adapters.get('plan')
+            if adapter is None:
+                raise PlanError('plan_connection_required')
+            if 'plan' not in policy.adapters:
+                raise WatchDenied()
+            return adapter
+
+    async def discover_observation_tools(self, token):
+        from .watch_async import call
+        adapter = await call(self._plan_adapter, token)
+        async def authorize():
+            await call(self._plan_adapter, token)
+        result = await asyncio.wait_for(adapter.discover(authorize=authorize), 20)
+        await authorize()
+        return result
+
+    async def validate_plan(self, token, *, target, plan):
+        from .watch_plans import digest
+        from .watch_async import call
+        adapter = await call(self._plan_adapter, token)
+        if not _text(target):
+            raise ValueError('invalid watch target')
+        plan = adapter.check(plan)
+        async def authorize():
+            await call(self._plan_adapter, token)
+        observation, schemas = await asyncio.wait_for(adapter.evaluate(plan, authorize=authorize), 20)
+        await authorize()
+        saved = dict(plan=plan, schemas=schemas, target=target, connections=adapter.connection_digests(plan))
+        return dict(plan_digest=digest(saved), validated=saved,
+                    preview=dict(candidate_events=len(observation.events), closed=observation.closed,
+                                 baseline='first active poll (not this preview)' if plan['initial'] == 'quiet' else 'actionable',
+                                 completeness='bounded snapshot; intermediate changes may be missed'))
+
+    def _existing_plan(self, token, *, target, plan, request_key, poll_interval, expires_at):
+        from .watch_plans import validate, canonical
+        plan = validate(plan)
+        with self._lock:
+            self._plan_adapter(token)
+            credential, _ = self._authorize(token, 'create')
+            if not _text(target) or not _text(request_key) or not _time(poll_interval):
+                raise ValueError('invalid watch identity')
+            conn = watches._connect()
+            try:
+                row = conn.execute('SELECT * FROM watches WHERE topic=? AND request_key=?',
+                                   (credential.topic, request_key)).fetchone()
+                if row is None:
+                    return None
+                saved = json.loads(row['observation_plan']) if row['observation_plan'] else None
+                if (row['adapter'] != 'plan' or saved is None or row['target'] != target
+                        or canonical(saved['plan']) != canonical(plan)
+                        or row['poll_interval'] != poll_interval
+                        or (expires_at is not None and row['expires_at'] != expires_at)):
+                    raise ValueError('request key already used with different watch parameters')
+                return _public(row)
+            finally:
+                conn.close()
+
+    async def create_plan(self, token, *, target, plan, request_key, poll_interval=30, expires_at=None):
+        from .watch_plans import canonical
+        from .watch_async import call
+        existing = await call(self._existing_plan, token, target=target, plan=plan,
+                              request_key=request_key, poll_interval=poll_interval, expires_at=expires_at)
+        if existing is not None:
+            return existing
+        validated = await self.validate_plan(token, target=target, plan=plan)
+        # No caller can supply validation evidence through the public create API.
+        return await call(self.create, token, adapter='plan', target=target,
+                          request_key=request_key, poll_interval=poll_interval, expires_at=expires_at,
+                          _observation_plan=canonical(validated['validated']))
+
+    def create(self, token, *, adapter, target, request_key, poll_interval=30, expires_at=None,
+               _observation_plan=None):
         with self._lock:
             credential, policy = self._authorize(token, 'create')
+            if adapter == 'plan' and _observation_plan is None:
+                raise ValueError('observation plan validation required')
             if adapter not in policy.adapters:
                 raise WatchDenied()
             if not _text(target) or not _text(request_key):
@@ -224,6 +310,7 @@ class WatchService:
             return _public(watches.create_watch(
                 topic=credential.topic, adapter=adapter, target=target, request_key=request_key,
                 poll_interval=poll_interval, expires_at=expires_at, now=now, _guard=guard,
+                observation_plan=_observation_plan,
                 _default_ttl=min(watches.DEFAULT_WATCH_TTL, policy.max_lifetime_seconds)))
 
     def show(self, token, watch_id):

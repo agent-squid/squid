@@ -1,4 +1,5 @@
 """Observation-only watch transport. Human controls use a separate host secret."""
+import asyncio
 import hashlib
 import ipaddress
 import json
@@ -8,6 +9,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from .watch_mcp import MCPProbeError
 from .watch_async import call
 from .watch_service import WatchControl, WatchDenied, WatchUnavailable
 
@@ -34,6 +36,9 @@ def fields(body, required=(), optional=()):
 
 
 def failure(exc):
+    from .watch_plans import PlanError, PLAN_ERRORS
+    if isinstance(exc, PlanError):
+        return JSONResponse({'error': exc.code, 'hint': PLAN_ERRORS[exc.code]}, status_code=400)
     if isinstance(exc, WatchDenied):
         return JSONResponse({'error': 'watch_not_authorized'}, status_code=403)
     # Never return arbitrary exception/provider text or request payloads.
@@ -58,6 +63,8 @@ async def invoke(request, operation, watch_id=None, *, human_topic=None):
             turn = 'human:' + uuid4().hex
             token = await call(control.mint, turn=turn, topic=human_topic, operations=policy.operations,
                                  expires_at=service.clock() + 60)
+        if operation == 'observation-tools':
+            return await service.discover_observation_tools(token)
         if operation == 'tools':
             return await call(service.discover, token)
         if operation == 'list':
@@ -76,7 +83,14 @@ async def invoke(request, operation, watch_id=None, *, human_topic=None):
                 raise ValueError('watch request too large')
             raw.extend(chunk)
         body = json.loads(raw)
+        if operation == 'validate':
+            fields(body, ('target', 'plan'))
+            result = await service.validate_plan(token, **body)
+            return {k: v for k, v in result.items() if k != 'validated'}
         if operation == 'create':
+            if isinstance(body, dict) and 'plan' in body:
+                fields(body, ('target', 'plan', 'request_key'), ('poll_interval', 'expires_at'))
+                return await service.create_plan(token, **body)
             fields(body, ('adapter', 'target', 'request_key'), ('poll_interval', 'expires_at'))
             return await call(service.create, token, **body)
         if operation == 'execution-grant' and human_topic is not None:
@@ -123,6 +137,10 @@ async def invoke(request, operation, watch_id=None, *, human_topic=None):
                                    operations=policy.operations, grants=[body.get('grant_id')],
                                    expires_at=service.clock() + 60)
         return await call(service.transition, token, watch_id, action=operation, require_monitoring=True, **body)
+    except MCPProbeError:
+        return JSONResponse({'error': 'plan_connection_unavailable'}, status_code=400)
+    except asyncio.TimeoutError:
+        return JSONResponse({'error': 'plan_timeout'}, status_code=400)
     except WatchUnavailable:
         return JSONResponse({'error': 'watch_monitoring_unavailable'}, status_code=409)
     except (WatchDenied, ValueError, TypeError, UnicodeError) as exc:
@@ -147,6 +165,16 @@ async def create_watch(request: Request):
     return await invoke(request, 'create')
 
 
+@router.get('/watch-tools')
+async def observation_tools(request: Request):
+    return await invoke(request, 'observation-tools')
+
+
+@router.post('/watches/validate')
+async def validate_plan(request: Request):
+    return await invoke(request, 'validate')
+
+
 @router.get('/watches/{watch_id}')
 async def show_watch(request: Request, watch_id: str):
     return await invoke(request, 'show', watch_id)
@@ -162,6 +190,21 @@ async def transition_watch(request: Request, watch_id: str, action: str):
 @router.api_route('/watch-control/{topic}/watches', methods=['GET', 'POST'])
 async def human_watches(request: Request, topic: str):
     return await invoke(request, 'list' if request.method == 'GET' else 'create', human_topic=topic)
+
+
+@router.get('/watch-control/{topic}/tools')
+async def human_tools(request: Request, topic: str):
+    return await invoke(request, 'tools', human_topic=topic)
+
+
+@router.get('/watch-control/{topic}/watch-tools')
+async def human_observation_tools(request: Request, topic: str):
+    return await invoke(request, 'observation-tools', human_topic=topic)
+
+
+@router.post('/watch-control/{topic}/watches/validate')
+async def human_validate_plan(request: Request, topic: str):
+    return await invoke(request, 'validate', human_topic=topic)
 
 
 @router.get('/watch-control/{topic}/watches/{watch_id}')

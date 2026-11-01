@@ -1,5 +1,9 @@
 # Trusted watch probe registry (internal)
 
+For agent-built plans using ordinary tool arguments/results without per-tool
+probe wrappers, see [observation plans](watch-observation-plans.md). This page
+describes the existing fixed-probe compatibility path.
+
 `agent.watch_mcp.load_probe_registry(mapping)` builds named `ProbeAdapter`s.
 Loading does not connect, spawn processes, start polling, or activate watches.
 The host loads this mapping from `watches.registry` in `squid.yaml` during

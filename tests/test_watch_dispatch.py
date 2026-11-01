@@ -508,3 +508,23 @@ async def test_dispatch_preserves_worktree_blocker_reason(setup, monkeypatch):
     assert rows('watches')[0]['status'] == 'active'
     assert claimed(setup) is None
     assert rows('chat_messages') == []
+
+
+@pytest.mark.asyncio
+async def test_execution_refresh_rechecks_grant_between_reads(setup):
+    service, _, _, row, execution, _ = setup
+    run_id, _ = queued(setup)
+    reads = []
+    class Adapter:
+        async def poll_authorized(self, watch, authorize):
+            await authorize()
+            reads.append('first')
+            watch_runs.revoke_execution(service, topic='squid', watch_id=row['id'], grant_id=execution['id'])
+            await authorize()
+            reads.append('second')
+            return watches.Observation('fresh')
+    service.configuration = replace(service.configuration, adapters={'local': Adapter()})
+    runtime = WatchDispatch(service, object())
+    assert await runtime.before_execute(run_id) is None
+    assert reads == ['first']
+    assert rows('watch_runs')[0]['started_at'] is None

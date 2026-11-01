@@ -1016,6 +1016,8 @@ def init_db() -> None:
             conn.execute("""UPDATE watches SET pause_reason=
                 CASE WHEN failures>=5 THEN 'poll_failures' ELSE 'manual' END
                 WHERE status='paused'""")
+        if "observation_plan" not in _table_columns(conn, "watches"):
+            conn.execute("ALTER TABLE watches ADD COLUMN observation_plan TEXT")
         flow_run_columns = _table_columns(conn, "flow_runs")
         if "execution_mode" not in flow_run_columns:
             # All pre-cutover plans were executed by the transcript scheduler.

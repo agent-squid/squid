@@ -4,7 +4,7 @@ Only host-owned configuration may reach this module. Registrations declare read
 operations; tool discovery is not authority to invoke additional tools.
 """
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 import json
 import logging
@@ -176,3 +176,112 @@ def load_probe_registry(config):
             return await _call(servers[server], tool, arguments, registered.output_limit, registered.timeout)
         adapters[name] = ProbeAdapter(probe, call_tool=call if probe.server else None)
     return adapters
+
+
+class MCPDiscoveryLimit(MCPProbeError):
+    """The provider catalog exceeds the supported discovery bounds."""
+
+
+_observation_sessions = ContextVar('watch_mcp_sessions', default=None)
+
+
+@asynccontextmanager
+async def observation_sessions():
+    # Scope reuse and log redaction to one observation, including session cleanup.
+    _install_log_redaction()
+    logging_token = _probe_logging.set(True)
+    try:
+        async with AsyncExitStack() as stack:
+            token = _observation_sessions.set((stack, {}))
+            try:
+                yield
+            finally:
+                _observation_sessions.reset(token)
+                # Close without throwing a plan/authorization error through SDK
+                # task groups, which otherwise wrap it in an ExceptionGroup.
+                try:
+                    await stack.aclose()
+                except Exception:
+                    raise MCPProbeError('MCP observation cleanup failed') from None
+    finally:
+        _probe_logging.reset(logging_token)
+
+
+async def prepare_observation_connection(config):
+    pool = _observation_sessions.get()
+    if pool is not None:
+        stack, sessions = pool
+        key = json.dumps(config, sort_keys=True)
+        if key not in sessions:
+            # SDK cancel scopes must be entered/exited by the observation task,
+            # not by the per-operation wait_for tasks below.
+            try:
+                sessions[key] = await stack.enter_async_context(_connect(config))
+            except (asyncio.CancelledError, MCPCredentialError):
+                raise
+            except Exception:
+                raise MCPProbeError('MCP observation connection failed') from None
+
+
+@asynccontextmanager
+async def _observation_connect(config):
+    pool = _observation_sessions.get()
+    if pool is None:
+        async with _connect(config) as session:
+            yield session
+    else:
+        _, sessions = pool
+        yield sessions[json.dumps(config, sort_keys=True)]
+
+
+async def discover_tools(config):
+    """Bounded tool metadata discovery; never return provider exception text."""
+    _install_log_redaction()
+    token = _probe_logging.set(True)
+    try:
+        async def read():
+            async with _observation_connect(config) as session:
+                page = await session.list_tools()
+                if page.nextCursor or len(page.tools) > 200:
+                    raise MCPDiscoveryLimit('MCP tool discovery exceeds limit')
+                tools = [dict(name=t.name, input_schema=t.inputSchema,
+                              output_schema=getattr(t, 'outputSchema', None),
+                              description=(getattr(t, 'description', None) or '')[:2048]) for t in page.tools]
+                if len(json.dumps(tools, allow_nan=False).encode()) > 65536:
+                    raise MCPDiscoveryLimit('MCP tool discovery exceeds limit')
+                return tools
+        return await asyncio.wait_for(read(), 20)
+    except (asyncio.CancelledError, MCPCredentialError, MCPDiscoveryLimit):
+        raise
+    except Exception:
+        raise MCPProbeError('MCP tool discovery failed') from None
+    finally:
+        _probe_logging.reset(token)
+
+
+async def call_observation_tool(config, tool, arguments):
+    """Ordinary MCP results may use structuredContent or a JSON text object."""
+    _install_log_redaction()
+    token = _probe_logging.set(True)
+    try:
+        async def read():
+            async with _observation_connect(config) as session:
+                result = await session.call_tool(tool, arguments)
+                if result.isError:
+                    raise MCPProbeError('MCP observation failed')
+                data = result.structuredContent
+                if data is None:
+                    blocks = result.content
+                    if len(blocks) != 1 or blocks[0].type != 'text' or len(blocks[0].text.encode()) > 65536:
+                        raise MCPProbeError('MCP observation requires JSON object')
+                    data = json.loads(blocks[0].text)
+                if not isinstance(data, dict) or len(json.dumps(data, allow_nan=False).encode()) > 65536:
+                    raise MCPProbeError('MCP observation requires bounded JSON object')
+                return data
+        return await asyncio.wait_for(read(), 20)
+    except (asyncio.CancelledError, MCPCredentialError, MCPDiscoveryLimit):
+        raise
+    except Exception:
+        raise MCPProbeError('MCP observation failed') from None
+    finally:
+        _probe_logging.reset(token)

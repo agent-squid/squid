@@ -189,7 +189,10 @@ async def test_disabled_configuration_does_not_start_worker(setup):
 
 
 @pytest.mark.parametrize('execution', [False, True])
-def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, execution):
+@pytest.mark.parametrize('generic_plan', [False, True])
+def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, execution, generic_plan):
+    if generic_plan:
+        pytest.importorskip('mcp')
     import json
     import os
     from pathlib import Path
@@ -205,7 +208,8 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
     state = home / 'source.json'
     def source(revision, changed=False):
         temporary = state.with_suffix('.new')
-        temporary.write_text(json.dumps({'revision': revision, 'changed': changed, 'summary': revision}))
+        snapshot = {'revision': revision, 'changed': changed, 'summary': revision}
+        temporary.write_text(json.dumps({'prs': {'owner/repo#1': snapshot}} if generic_plan else snapshot))
         temporary.replace(state)
     source('v1')
     probe = home / 'probe.py'
@@ -225,6 +229,12 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
         configuration['test_harness_enabled'] = True
         configuration['watches'] = {'enabled': True, 'policy': {'execution_enabled': execution, 'max_runs': 2}, 'registry': {'probes': {
             'local': {'argv': [sys.executable, str(probe), str(state)]}}}}
+        if generic_plan:
+            configuration['watches'].pop('registry')
+            configuration['watches']['connections'] = {'github': {
+                'connection': {'transport': 'stdio', 'argv': [sys.executable,
+                    str(root / 'tests/fixtures/watch_mcp_server.py'), '--state', str(state)]},
+                'read_tools': ['read_pr']}}
         (home / '.squid' / 'squid.yaml').write_text(yaml.safe_dump(configuration))
         def start():
             return subprocess.Popen([sys.executable, str(root / 'tests/fixtures/watch_host.py'),
@@ -261,13 +271,20 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                 process = start()
                 first_boot = wait_for(lambda: client.get('/health').json().get('boot_time'))
                 path = '/watch-control/squid/watches'
-                response = client.post(path, json={'adapter': 'local', 'target': 'task:1', 'request_key': 'create'})
+                payload = {'adapter': 'local', 'target': 'task:1', 'request_key': 'create'}
+                if generic_plan:
+                    payload.pop('adapter')
+                    payload['plan'] = dict(version=1, initial='quiet', steps=[dict(server='github',
+                        tool='read_pr', arguments={'repository': 'owner/repo', 'number': 1},
+                        identity=['/revision'], when={'path': '/changed', 'equals': True})])
+                # Plan creation includes MCP negotiation and real read validation.
+                response = client.post(path, json=payload, timeout=10)
                 assert response.status_code == 200
                 row = response.json()
                 path += '/' + row['id']
                 grant = client.post(path + '/grant', json={'expires_at': row['expires_at']}).json()['grant_id']
                 assert client.post(path + '/activate', json={'version': 0, 'grant_id': grant}).json()['status'] == 'active'
-                wait_for(lambda: client.get(path).json().get('cursor') == 'v1')
+                wait_for(lambda: client.get(path).json().get('cursor') == ('[]' if generic_plan else 'v1'))
                 assert db('SELECT COUNT(*) FROM watch_events')[0][0] == 0
                 def reschedule():
                     current = client.get(path).json()
@@ -282,7 +299,7 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                     assert execution_response.status_code == 200
                 source('v2', True)
                 reschedule()
-                wait_for(lambda: client.get(path).json().get('cursor') == 'v2')
+                wait_for(lambda: db('SELECT COUNT(*) FROM watch_events')[0][0] == 1)
                 assert db('SELECT COUNT(*) FROM watch_events')[0][0] == 1
                 if execution:
                     wait_for(lambda: db("SELECT COUNT(*) FROM watch_runs WHERE state='succeeded'")[0][0] == 1)
@@ -299,12 +316,12 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                 assert second_boot != first_boot
                 wait_for(lambda: db('SELECT next_poll FROM watches')[0][0] > 0)
                 current = client.get(path).json()
-                assert current['status'] == 'active' and current['cursor'] == 'v2'
+                assert current['status'] == 'active' and current['cursor'] == ('[]' if generic_plan else 'v2')
                 assert current['expires_at'] == saved_expiry
                 assert db('SELECT COUNT(*) FROM watch_events')[0][0] == 1
                 source('v3', True)
                 reschedule()
-                wait_for(lambda: client.get(path).json().get('cursor') == 'v3')
+                wait_for(lambda: db('SELECT COUNT(*) FROM watch_events')[0][0] == 2)
                 if execution:
                     wait_for(lambda: db("SELECT COUNT(*) FROM watch_runs WHERE state='succeeded'")[0][0] == 2)
                     assert db("SELECT COUNT(*) FROM watch_events WHERE disposition='handled'")[0][0] == 2

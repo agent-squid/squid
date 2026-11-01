@@ -178,7 +178,34 @@ symbol names are navigation anchors, not promises about their final placement.
   file credentials remains unverified. See the [smoke-test configuration and
   limits](../watch-authorization.md#bounded-observation-smoke-test). No live
   agent execution or publication was tested or authorized by this preparation.
-- Next watch slice: agent-built observation plans (design below), richer source-specific predicates
+- Agent-built observation-plan v1 implemented: host MCP connections with explicit
+  read-tool approval, on-demand tool/plan schemas, real-read validation and preview,
+  immutable plan/schema/connection bindings, fixed sanitized setup errors, and
+  normal authorized polling/dispatch. Bounded snapshot plans support up to four
+  independent reads, JSON Pointer extraction, source identities and equality
+  predicates. Legacy probes remain compatible. Pagination, step bindings and
+  automatic stale-head reconciliation remain pending; no production settings
+  or publication behavior changed. See [supported contract](../watch-observation-plans.md).
+  Verification: full Python 3.11 suite passed (1,158 tests; two dependency
+  deprecation warnings). Coverage includes actual stdio discovery against two
+  provider response shapes and disposable-host plan polling/local-work dispatch,
+  `/health` boot-time restart recovery, replay deduplication and run limits.
+  No production watch or provider account was used.
+- Observation-plan review hardening (2026-11-01): schema validation uses an
+  isolated worker with a three-second budget and an explicit deny-all retrieval
+  registry (including dynamic references). Polling and execution refresh recheck
+  authorization before subsequent operations; service locks run off-loop. MCP
+  sessions/catalogs are reused within one observation, create retries return the
+  saved watch independently of provider availability/schema drift, and `plan` is
+  always reserved. Catalog-limit errors, argument-scope trust and the first-poll
+  quiet baseline now have explicit feedback/documentation. Regression coverage
+  includes revoke/cancel/expiry between reads, execution refresh revocation,
+  external-reference HTTP traps, a pathological regex, lock contention, session
+  reuse and offline idempotent retry. Verification: 131 focused tests and the
+  full Python 3.11 suite (1,172 tests) passed; two dependency deprecation warnings
+  remain. Real-host restart checks use `/health` boot time; production settings
+  and Shore files were unchanged.
+- Next watch slice: richer observation plans (design below), richer source-specific predicates
   and stale-head reconciliation, and operational UI/ambiguous-run resolution.
   Deadline and publication infrastructure remain separate milestones.
 - Milestones 2 and 5–8 remain unimplemented. No automatic publication is enabled.
@@ -403,8 +430,8 @@ this is not a distributed worker rollout.
 ### Generic observation plans: next implementation slice
 
 Design change (2026-10-31): replace mandatory per-tool probe configuration with
-agent-built declarative plans, as specified in ADR-0053. This is planned work;
-the shipped API still requires a registered adapter. Keep existing probes and
+agent-built declarative plans, as specified in ADR-0053. The full design remains planned work;
+the API now accepts the v1 snapshot plan subset documented above; richer plan features remain pending. Keep existing probes and
 all observation/execution grants working. No production enablement, migration
 activation, or publication is authorized by this document.
 

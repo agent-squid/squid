@@ -415,6 +415,19 @@ work**. Keep ADR status `proposed`: the full lifecycle and end-to-end verificati
 requirements are not complete. The detailed implementation history and remaining
 milestones are in the [implementation plan](../plans/adr-0046-0053-context-tools-and-watches.md).
 
+A first [agent-built observation-plan subset](../watch-observation-plans.md)
+now supports host MCP read-tool discovery, schema/real-read validation, immutable
+plan persistence, deterministic extraction/equality predicates and polling through
+the existing worker. It accepts ordinary provider argument/result shapes without
+per-tool probe wrappers. Pagination, step bindings, full PR reconciliation and
+native MCP/skill delivery remain pending. This does not complete the ADR. Review hardening adds a deny-all schema retrieval
+registry and isolated time-bounded schema worker, per-operation authorization for
+polls and execution refreshes, off-loop service locking, per-observation MCP
+session/catalog reuse, and provider-independent create retries. Tool approval
+currently covers all schema-valid arguments accessible to the host credential;
+the [operator contract](../watch-observation-plans.md) documents that trust boundary
+and the first-active-poll quiet-baseline behavior.
+
 Implemented scope includes the durable observation store, bounded polling,
 atomic cursor/event ingestion, trusted executable/MCP probe registry and concrete
 MCP client, global/topic policy narrowing, durable exact-watch grants, scoped
@@ -460,7 +473,7 @@ cancellation were checked in production. Active production polling with file
 credentials remains unverified; this preparation does not establish PR handling
 or agent execution. These are deployment settings, not shipped defaults.
 
-Agent-built observation plans, generic tool discovery and durable access, GitHub
+Richer observation plans (pagination and step bindings), GitHub
 PR predicates and stale-head reconciliation, deadline rules,
 native MCP tool/skill delivery, persistent harness refresh, operational watch
 UI and ambiguous-run resolution, and controlled publication remain pending.

@@ -61,7 +61,7 @@ DEFAULT_WATCH_TTL = 24 * 60 * 60
 
 
 def create_watch(*, topic, adapter, target, request_key, poll_interval, now, expires_at=None, _guard=None,
-                 _default_ttl=DEFAULT_WATCH_TTL):
+                 _default_ttl=DEFAULT_WATCH_TTL, observation_plan=None):
     """Creation keys are permanent per topic; a new watch needs a new key.
 
     The internal service guard runs under the write transaction before mutation.
@@ -91,16 +91,16 @@ def create_watch(*, topic, adapter, target, request_key, poll_interval, now, exp
                 if expires_at <= now:
                     raise ValueError('watch requires future expiry')
                 conn.execute("""INSERT INTO watches
-                    (id,topic,adapter,target,request_key,poll_interval,expires_at,next_poll)
-                    VALUES (?,?,?,?,?,?,?,?)""",
-                    (uuid4().hex, topic, adapter, target, request_key, poll_interval, expires_at, now))
+                    (id,topic,adapter,target,request_key,poll_interval,expires_at,next_poll,observation_plan)
+                    VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (uuid4().hex, topic, adapter, target, request_key, poll_interval, expires_at, now, observation_plan))
                 existing = conn.execute('SELECT * FROM watches WHERE topic=? AND request_key=?',
                                         (topic, request_key)).fetchone()
             row = dict(existing)
             if default_expiry:
                 expires_at = row['expires_at']  # Retries never extend the original window.
             if any(row[k] != v for k, v in dict(adapter=adapter, target=target,
-                                               poll_interval=poll_interval, expires_at=expires_at).items()):
+                                               poll_interval=poll_interval, expires_at=expires_at, observation_plan=observation_plan).items()):
                 raise ValueError('request key already used with different watch parameters')
             return row
     finally:
@@ -298,7 +298,12 @@ class WatchLoop:
             adapter = self.adapters.get(watch['adapter'])
             if adapter is None:
                 raise ValueError('unsupported adapter')
-            observation = await asyncio.wait_for(adapter.poll(watch), self.timeout)
+            async def authorize():
+                if self.prepare is not None and not await call(self.prepare, watch, now=self.clock()):
+                    raise PermissionError('watch authorization changed')
+            poll = getattr(adapter, 'poll_authorized', None)
+            operation = poll(watch, authorize) if poll is not None else adapter.poll(watch)
+            observation = await asyncio.wait_for(operation, self.timeout)
             await call(self.finish, watch, now=self.clock(), observation=observation)
         except asyncio.CancelledError:
             # Leave the lease in place: restart reclaims it after expiry.
@@ -307,9 +312,10 @@ class WatchLoop:
             # Provider exceptions may carry credentials or raw response bodies.
             log.warning('Watch poll failed watch_id=%s error_type=%s',
                         watch['id'], type(exc).__name__)
+            from .watch_plans import PlanError, PLAN_ERRORS
+            error = exc.code if isinstance(exc, PlanError) and exc.code in PLAN_ERRORS else type(exc).__name__
             try:
-                await call(self.finish, watch, now=self.clock(),
-                                        error=type(exc).__name__)
+                await call(self.finish, watch, now=self.clock(), error=error)
             except Exception as persistence_error:
                 log.error('Watch failure persistence failed watch_id=%s error_type=%s',
                           watch['id'], type(persistence_error).__name__)
