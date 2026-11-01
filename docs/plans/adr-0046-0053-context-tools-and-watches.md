@@ -153,15 +153,32 @@ symbol names are navigation anchors, not promises about their final placement.
   3.11; 159 focused tests passed on Python 3.10, both including disposable real
   hosts. Final focused controls checks passed (97 tests), followed by 40 final
   dispatch/polling checks covering shutdown and real-host recovery; lockfile checked.
-- Disabled-mode verification (2026-10-31): production configuration remains
-  unchanged, with no `watches` section. Loading that configuration confirms
+- Initial disabled-mode verification (2026-10-31): production configuration at
+  that point had no `watches` section. Loading that configuration confirmed
   `enabled: false`, no exposed adapters, and no monitoring or dispatch worker.
-  The running server reports `/health` status `ok` at version `0.1.6rc26`;
+  The running server reported `/health` status `ok` at version `0.1.6rc26`;
   `/`, `/topics`, `/queue`, and `/processes` return HTTP 200. Full Squid suite:
   1,133 tests passed on Python 3.11 (two dependency deprecation warnings).
   This verifies disabled-mode compatibility; it is not a new restart, live
   agent-turn, or production watch activation test. No configuration was enabled.
-- Next watch slice: dedicated GitHub PR adapter, richer source-specific predicates
+- Operator credential-file support and restart review: enabled cold startup
+  without an environment override provisions `~/.squid/watch-control.token`
+  (owner-only regular file, mode `0600`). Human CLI operations use this file and
+  `--api-url` without requiring exported variables. Agent operations still need
+  scoped turn credentials. Explicit environment credentials take precedence;
+  self-restart then preserves the inherited verifier before file access, so
+  existing operator keys do not silently rotate. Regression tests cover missing
+  and existing key files and rejection of invalid restart verifiers. Latest full
+  Python 3.11 suite: 1,140 passed, two dependency deprecation warnings.
+- Production smoke-test preparation: global observation/execution switches and
+  the synthetic `prod-smoke-clock` probe were configured. A dedicated
+  `watch-prod-test` topic narrows policy to observation only, a 180-second maximum
+  lifetime, and a 30-second minimum poll interval. Production proposal creation,
+  denial of ungranted activation, and cancellation passed; active polling with
+  file credentials remains unverified. See the [smoke-test configuration and
+  limits](../watch-authorization.md#bounded-observation-smoke-test). No live
+  agent execution or publication was tested or authorized by this preparation.
+- Next watch slice: agent-built observation plans (design below), richer source-specific predicates
   and stale-head reconciliation, and operational UI/ambiguous-run resolution.
   Deadline and publication infrastructure remain separate milestones.
 - Milestones 2 and 5–8 remain unimplemented. No automatic publication is enabled.
@@ -186,7 +203,7 @@ adapter, deadlines, or publication stage is shipped.
 | Real-server restart and end-to-end automatic handling | Observation and opt-in Echo dispatch/restart/budget coverage implemented |
 
 Next completion target: register one authorized watch through the service,
-observe a GitHub PR change through a dedicated adapter, dispatch a bounded
+observe a GitHub PR change through an agent-built plan, dispatch a bounded
 ordinary topic turn, reconcile stale CI heads and review feedback, and inspect
 its durable outcome through operational controls. Generic probe/Echo coverage
 already verifies dispatch, captured-event acknowledgement and restart without
@@ -207,7 +224,7 @@ The engine/store can be developed independently of context UI and MCP wiring.
 | 1. Runtime templates and assembly | Inventory | Existing turns receive equivalent, inspectable instructions |
 | 2. Context audit and viewer | 1 | Users can inspect added context and distinguish historical changes |
 | 3. Tool policy, scoped API, CLI | 1 | A turn can register an authorized watch through one shared interface |
-| 4. Durable watch engine and PR adapter | 3 | PR changes enqueue bounded ordinary turns across restarts |
+| 4. Durable engine and generic observation plans | 3 | PR changes enqueue bounded ordinary turns across restarts |
 | 5. Deadline rules | 4 | Supported response windows survive downtime and trigger once per generation |
 | 6. MCP and skill delivery | 3; use 4 for end-to-end validation | Supported harnesses discover the same centrally configured tools |
 | 7. Lifecycle UI and recovery coverage | 2, 4; 5 for deadline controls | Users can inspect, pause, resume, and cancel watches |
@@ -341,7 +358,7 @@ Proposed HTTP operations:
 | Pause/resume/cancel | `POST /watches/{id}/{action}` | Version-checked transition; idempotent repeat |
 | Activate proposal | `POST /watches/{id}/activate` | Authenticated human grant or existing trusted activation policy |
 
-The create payload includes target, adapter, topic, execution agent,
+The proposed create payload includes target, observation plan (or legacy adapter), topic, execution agent,
 instructions, triggers, requested actions, poll interval, stop conditions,
 deadline rules, watch expiry, limits, request key, and grant reference. Return
 structured failures for unsupported predicates, insufficient scope, invalid
@@ -359,7 +376,7 @@ Acceptance: two instances route correctly; cross-topic IDs cannot be queried
 or changed; expired/revoked tokens fail; grants cannot be broadened; duplicate
 creates return one watch; existing server/login/pair commands still work.
 
-## Milestone 4: durable engine and first PR adapter
+## Milestone 4: durable engine and agent-built observation plans
 
 ### Storage and claims
 
@@ -383,14 +400,62 @@ sleeping tasks are wakeup optimizations. Conditional claims/leases protect
 against overlapping ticks. Support the current single-server deployment;
 this is not a distributed worker rollout.
 
-### Generic probes before dedicated adapters
+### Generic observation plans: next implementation slice
 
-Use the implemented Probe/ProbeAdapter contract for local authenticated binaries
-and central MCP services. Register read-only operations with fixed argv or
-server/tool, timeout, output limit, and provider-to-contract mapping. Add trusted
-configuration validation and a concrete MCP client that unwraps structuredContent
-and rejects isError. Never expose arbitrary watch-supplied shell commands.
-Test actual transport reconnection/authentication before claiming MCP support.
+Design change (2026-10-31): replace mandatory per-tool probe configuration with
+agent-built declarative plans, as specified in ADR-0053. This is planned work;
+the shipped API still requires a registered adapter. Keep existing probes and
+all observation/execution grants working. No production enablement, migration
+activation, or publication is authorized by this document.
+
+Implement in these reviewable steps:
+
+1. **Durable tool discovery.** Inspect existing host/harness connection ownership
+   and reuse it where possible. Expose topic-permitted read operations, schemas,
+   result formats, availability and limits through shared discovery. Identify
+   which tools the server can call after the originating CLI exits. If no host
+   connection exists, return a specific connection/access setup requirement.
+   Do not assume native harness tools or session tokens are reusable by Squid.
+2. **Plan schema and evaluator.** Define a versioned JSON contract for operation
+   references/arguments, bounded step bindings, extraction, pagination, event
+   identities, filters, baseline and stop predicates. Implement only a bounded
+   declarative vocabulary, with structured and JSON/text result handling explicitly
+   advertised. Reject unsupported parsing/predicates; never run generated code.
+   Map tool output into the existing observation/event boundary.
+3. **Validation and preview.** Add scoped API/CLI operations to validate a plan
+   using real authorized reads and show a bounded baseline/event/completeness
+   preview. Static checks precede I/O; proposal creation alone starts nothing.
+   Enforce operation policy independently of model claims or tool annotations.
+   Return stable sanitized errors for missing access, schema mismatch, absent
+   event identities, unsupported conditions and exhausted pagination limits.
+4. **Persistence and authority.** Store immutable plan versions/digests, target,
+   connection references, validation evidence and cursors through existing DB
+   migrations. Bind observation grants and validation to the exact plan; changing
+   read scope requires revalidation and matching authorization. Include the plan
+   digest in creation idempotency/conflict checks. Preserve legacy adapter rows,
+   grants and restart behavior; never silently convert or activate them.
+5. **Polling and dispatch.** Execute persisted plans from the lifespan worker
+   using host-owned credentials after the request process exits. Recheck current
+   policy/access before reads and ingestion. Reuse bounded retries, atomic event
+   ingestion, queue priority, separate local-work grants and run recovery.
+   Unchanged polls launch no model. Schema drift and incomplete observations
+   must not advance completeness cursors or falsely satisfy stop/deadline rules.
+6. **Agent discovery and vertical verification.** Teach the shared CLI help and
+   eventual MCP/skill surface to discover, build, validate, save and activate a
+   plan, then report its actual status. Test "watch this PR and resolve issues"
+   and an unrelated issue source through the same evaluator with different tool
+   argument/result shapes; no per-tool YAML or custom wrappers. Use a disposable
+   host and fixture credentials; verify after the originating process exits and
+   after restart using `/health` or `BOOT_TIME`.
+
+Acceptance includes multi-tool PR state/CI/reviews, edited feedback, distinct CI
+attempts and repeated status cycles, pagination limits, quiet/actionable initial
+state, closure, stale heads, revoked access, schema changes, malformed/oversized
+results, plan tampering, cross-topic references, secret redaction and restart
+replay. Assert no LLM invocation on unchanged polls. Exercise a source that cannot
+supply required data and verify actionable setup feedback instead of a fabricated
+watch or generic "configure a probe" response. Keep optional optimized adapters
+as extensions; dedicated GitHub or Linear implementations are not prerequisites.
 
 Finish service expiry policy: configurable 24-hour default/max and absolute
 expiry in responses; the internal store already implements the default and
@@ -400,9 +465,9 @@ still need dispatch integration.
 
 ### PR observation and execution
 
-Implement an adapter interface for canonicalization, snapshot/poll, current
-state reconciliation, event normalization, prompt materialization, and supported
-mutations. The first implementation accepts GitHub PR URLs, including the
+Use the generic plan for reads and event normalization; reuse shared interfaces
+for canonicalization, current-state reconciliation and prompt materialization.
+External mutations remain outside observation-plan execution. The first plan validation case accepts GitHub PR URLs, including the
 underlying PR of a Graphite workflow. Resolve ambiguous Graphite-only links
 explicitly rather than guessing repositories. Authenticate with the existing
 host GitHub mechanism; if using `gh`, invoke argv directly with timeouts and

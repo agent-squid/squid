@@ -157,38 +157,74 @@ Guarantee durable ingestion and idempotent dispatch identity; do not promise
 exactly-once external side effects. Ambiguous publishing outcomes require
 remote-state reconciliation before another attempt.
 
-### Generic observation probes
+### Agent-built observation plans
 
-A source-specific plugin is optional. Register either an executable argv or a
-server/tool pair on an existing central MCP service. Executables use existing
-unattended host authentication; MCP uses a server-owned authenticated client.
-Registration is trusted configuration, not arbitrary shell text from a watch.
-Source access does not grant authority to act on detected changes.
+The user asks for an outcome, such as "watch this PR and resolve issues".
+The ordinary request turn discovers Squid's watch capability, discovers suitable
+connected read tools, resolves the canonical target, and builds a persisted
+observation plan. Users configure service connections and authorize scope; they
+must not configure a probe or write a provider wrapper for each tool or target.
+This supersedes the fixed probe registry as the required user-facing setup.
+Existing registered probes remain a compatibility path and optional optimized
+adapters remain useful, but neither is a prerequisite for a new source.
 
-Both transports accept `{target, cursor}` and return a bounded JSON object:
-`{revision, changed?, summary?, url?, closed?}`. A provider wrapper maps raw
-output into this contract. Revisions identify immutable source versions, including
-comment edits and run attempts. Recurring labels (`ci:fail`) and content hashes
-alone are insufficient: a later occurrence needs its own source version/attempt
-ID. Re-observing an old version is a replay and retains its original event key.
-Hashing previous plus current status does not distinguish repeated cycles.
-Status-only probes without occurrence identities are not supported. Initial snapshots establish a quiet baseline
-unless `changed: true` explicitly identifies actionable current state. Later
-revision changes generate deterministic deduplicated events; `changed: false`
-advances the baseline without dispatch. Adapters needing lossless individual
-comments must reconcile pagination/history before returning a new revision;
-snapshot comparison alone does not promise every intermediate change.
+Discovery exposes topic-permitted, server-executable read operations, input
+schemas, supported result forms, connection availability, and plan capabilities
+without credentials. A tool visible only inside a harness session is not
+necessarily callable by the server after that turn exits. Plans reference
+host-owned connections and credential handles, never copied session credentials,
+model-supplied endpoints, or executable commands. The host determines permitted
+operations; tool descriptions and MCP read-only annotations alone are not proof
+of authority or absence of side effects.
 
-Polling uses no LLM. One central MCP service can cover Linear, Graphite, and
-other sources through registered probes. Source-specific adapters remain useful
-for richer predicates, completeness, and reconciliation. The ordinary request
-turn resolves ambiguous corporate task references with its available context
-and tools, then registers a canonical target and concrete handling scope.
+The versioned, declarative plan contains canonical target, operation references,
+validated arguments and bounded bindings between steps, result extraction,
+pagination/completeness rules, source event/revision identities, deterministic
+filters, baseline behavior, and stop predicates. It uses a small, explicitly
+supported expression vocabulary; no generated Python/JavaScript, shell, eval,
+or arbitrary provider wrappers. Tool-specific argument and response shapes are
+mapped by the plan, rather than requiring providers to accept `{target, cursor}`
+and emit Squid's revision contract. Bound calls, pages, execution time, result
+size, and retained event payloads. Preserve existing atomic cursor/event ingestion.
+
+Before activation, the server checks schema, operation policy, durable access,
+and plan limits, then performs authorized read validation against actual source
+responses. Return a bounded preview of baseline, candidate events, stop state,
+and completeness; saving or validating a proposal does not activate monitoring
+or dispatch work. Validation reads require scoped read authority independently
+of the later observation grant. Bind validation and the exact-watch grant to an
+immutable plan version/digest and target. Changed plans require revalidation
+and matching authority; never silently expand an active watch's read scope.
+
+Revisions identify immutable source versions, including comment edits and run
+attempts. Recurring status labels or content hashes alone cannot distinguish
+new occurrences from replay. Re-observed source versions retain their event
+keys. Initial state baselines quietly unless the requested rule explicitly
+includes currently actionable failures or unresolved feedback. Pagination must
+complete before advancing a completeness cursor; bounded snapshots must declare
+that intermediate changes may be missed. Reject rules requiring unavailable
+history or occurrence identities rather than inventing completeness.
+
+After activation, the server executes the saved plan without an LLM on each
+poll. Relevant events enqueue a normal, separately authorized agent turn;
+unchanged observations enqueue nothing. Provider failures, missing credentials,
+schema drift, and incomplete reads are errors, never evidence of silence or
+closure. Retry within existing bounds, then pause with a sanitized, actionable
+reason. Discovery/validation must explain precisely which connection, permission,
+field, or deterministic operation is missing when setup cannot succeed. Do not
+send users to configure a custom probe as the default fallback.
+
+Native harness scheduling can be useful outside Squid. This decision provides
+one lifecycle for Squid's one-shot CLI turns across harnesses, with topic queue,
+grants, isolation, and restart recovery. It does not claim native products lack
+scheduling or that their schedules automatically survive a Squid turn's exit.
+For this lifecycle, discovery teaches agents to use Squid's shared API/CLI (or
+its equivalent MCP surface); harness-native scheduling is not a hidden fallback.
 
 ### Poll first, enqueue only actionable changes
 
-The first adapter watches one GitHub PR per watch, including PRs viewed through
-Graphite. Poll PR state, CI results, and review feedback using authenticated
+The first end-to-end observation plan watches one GitHub PR per watch, including
+PRs viewed through Graphite. A dedicated GitHub adapter is not required. Poll PR state, CI results, and review feedback using authenticated
 GitHub access; use conditional requests where supported. It needs no public
 webhook endpoint. Polling intervals and backoff respect provider limits, and
 checks do not invoke an LLM. API/authentication failures remain errors, not
@@ -316,14 +352,14 @@ or authorization, and do not add blanket blocking of unrelated tools in v1.
 ## Delivery and non-goals
 
 Implement the server store/API, central tool registry, shared CLI and MCP
-adapter, skill delivery with harness fallbacks, PR poller, queue/recovery path,
+adapter, skill delivery with harness fallbacks, generic observation-plan execution, PR validation, queue/recovery path,
 and lifecycle visibility. Include durable deadline infrastructure; expose
 specific response/timeout rules only when an adapter implements their required
 observations and actions. Autonomous publication
 requires the separate sync/commit/push stage above. Until then, expose any
 released capability accurately as monitoring or local work only.
 
-Dedicated Linear issue adapters, inbound webhooks (potentially through Shore),
+Dedicated Linear issue adapters (generic Linear tool plans are in scope), inbound webhooks (potentially through Shore),
 multiple targets per watch, distributed workers, automatic merge,
 and general-purpose cron scheduling are later work. All adapters must feed
 the same durable event and authorization boundary.
@@ -342,6 +378,15 @@ the same durable event and authorization boundary.
   careful coordination with repository isolation and publication.
 
 ## Required verification
+
+Verify plan discovery/build/validation/execution against GitHub-shaped and
+unrelated issue-tool schemas without per-tool probe YAML or wrapper code.
+Cover server access after the originating process exits, schema drift,
+unsupported predicates, bounded pagination and incomplete reads, source identity
+cycles/edits/replays, quiet versus actionable baseline, plan/grant binding,
+connection revocation, credential redaction, and no LLM calls on unchanged polls.
+Existing fixed probes must retain their behavior during migration.
+
 
 Verify cross-harness command availability and correct instance selection;
 topic/token isolation, expiry, revocation, and redaction; proposal versus
@@ -389,15 +434,34 @@ Disabled configuration exposes no adapters and starts no polling or dispatch
 worker; durable recovery still reconciles linked evidence without authorizing
 new work.
 
-Production configuration remains unchanged. Disabled-mode verification on
-2026-10-31 confirmed the current configuration has no `watches` section and loads
-with enablement, monitoring, and dispatch all false. The running server reported
+Initial disabled-mode verification on 2026-10-31 used a configuration without a
+`watches` section and confirmed enablement, monitoring, and dispatch were all false. The running server reported
 `/health` status `ok` at version `0.1.6rc26`; `/`, `/topics`, `/queue`, and
 `/processes` returned HTTP 200. The full Squid suite passed: 1,133 tests on Python
 3.11, with two dependency deprecation warnings. This check did not restart the
 server, launch a live agent turn, or activate a production watch.
 
-Dedicated GitHub PR predicates and stale-head reconciliation, deadline rules,
+Operator authentication now supports an automatically provisioned owner-only
+`~/.squid/watch-control.token` on enabled cold startup without an environment
+override. Human CLI commands read the file and accept `--api-url`; agent calls
+still use scoped turn credentials. Explicit environment credentials take
+precedence, followed by the inherited self-restart verifier, then the file.
+Self-restart preserves the active verifier without silently creating or switching
+to a different key. See the [operator contract](../watch-authorization.md).
+Latest full Python 3.11 verification: 1,140 tests passed, with two dependency
+deprecation warnings, including regression coverage for enabled restarts with
+missing or existing key files and invalid inherited verifiers.
+
+Production smoke-test preparation subsequently enabled the watch switches and
+registered a synthetic clock probe. The dedicated `watch-prod-test` topic policy
+limits watch lifetime to 180 seconds, polling to at least 30 seconds, and disables
+agent execution. Proposal creation, rejection of ungranted activation, and
+cancellation were checked in production. Active production polling with file
+credentials remains unverified; this preparation does not establish PR handling
+or agent execution. These are deployment settings, not shipped defaults.
+
+Agent-built observation plans, generic tool discovery and durable access, GitHub
+PR predicates and stale-head reconciliation, deadline rules,
 native MCP tool/skill delivery, persistent harness refresh, operational watch
 UI and ambiguous-run resolution, and controlled publication remain pending.
 No automatic publication or external mutation is enabled. Generic probe/Echo

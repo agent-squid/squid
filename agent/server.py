@@ -386,7 +386,7 @@ async def _lifespan(_app: FastAPI):
     from .watch_service import WatchService
     _app.state.watch_service = WatchService(_app.state.watch_configuration)
     from .watch_auth import load_digest
-    _app.state.watch_control_digest = load_digest(os.environ)
+    _app.state.watch_control_digest = load_digest(os.environ, create=_app.state.watch_configuration.enabled)
     from . import watch_launch
     watch_host = _cfg["server"]["host"]
     if watch_host in {"0.0.0.0", "::"}:

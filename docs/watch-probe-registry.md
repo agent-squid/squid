@@ -16,7 +16,8 @@ grant controls and scoped one-shot agent credential delivery.
 Unknown watch settings and non-boolean enablement fail validation.
 Malformed watch configuration prevents the server from starting, even when
 `watches.enabled` is false. Omit `watches` to use defaults; an empty `watches:`
-key is YAML null and is rejected. If a manual edit prevents startup, correct
+key is YAML null and also loads as disabled defaults. Nested registry and policy
+values still require valid mappings. If a manual edit prevents startup, correct
 `squid.yaml` on the host before restarting; the web editor is unavailable until
 startup succeeds. Config-editor saves reject invalid settings before writing.
 

@@ -129,17 +129,34 @@ underlying service limits. Lifecycle JSON includes `version` and optional
 `operation_key`/`grant_id`. Conflicts return 409, denied credentials return 403,
 and malformed/unsupported requests return 400 without echoing request data.
 
-For human controls, provision a random secret of at least 32 characters in
-`SQUID_WATCH_CONTROL_TOKEN` in the server's launch environment. No control
-credential is generated or printed. Lifespan removes the plaintext from the
-process environment and stores its digest; absence disables human controls.
-Built-in self-restart hands only the verifier to the new process through a
-reserved startup variable, consumed before child launches; it never restores
-the plaintext secret. A fresh service-manager start still needs the original
-secret supplied by that manager. Human CLI invocations use
-that same secret in their own environment, plus explicit `SQUID_API_URL`, and
-select `--human-topic TOPIC`. Never put credentials in command arguments or
-agent prompts. This authenticates the operator, not natural-language claims.
+For human controls, enabled cold startup without an environment override provisions
+`~/.squid/watch-control.token` with a random key and mode `0600` if missing.
+The server and human CLI require an owner-only regular file owned by the current
+user; symlinks and unsafe permissions are rejected. The CLI reads this file only
+for explicit `--human-topic` operations. Agent operations still require their
+scoped turn credential. The file is operator authority: any process with access
+to the same user's files can read it; this is not a filesystem sandbox boundary.
+Do not copy it into prompts, transcripts, source control, or shared storage.
+
+`SQUID_WATCH_CONTROL_TOKEN` remains an optional override (32–512 characters).
+Startup consumes that override and strips it from harness children. Otherwise
+a self-restart validates and preserves the inherited verifier before reading or
+creating a file. Built-in restart carries only the verifier, never the plaintext
+secret; it does not silently switch an environment-provided key to a file key.
+Cold starts without an override use the file, so file-based operation needs no
+exported key. File-key changes take effect on a cold start.
+Disabled startup does not create a key file.
+
+Human CLI commands accept `--api-url` instead of requiring `SQUID_API_URL`:
+
+```sh
+agentsquid watch list --human-topic squid --api-url http://127.0.0.1:8000
+```
+
+The explicit URL still selects the instance; the credential file does not
+implicitly discover a server. Remote operators can continue to supply their
+matching credential through the environment. Credentials never appear in
+command arguments or normal output.
 
 Human endpoints live under `/watch-control/{topic}/watches`, supporting the
 same create/list/show/lifecycle paths. Additional `/{id}/grant` accepts only
@@ -151,7 +168,7 @@ operator credential, not an individually authenticated person. `/{id}/revoke` ac
 cannot access agent endpoints and turn credentials cannot access human controls.
 These endpoints are not added to Shore capabilities in this slice.
 
-Examples (credentials already supplied securely through the environment):
+Examples (instance URL supplied through `--api-url` or `SQUID_API_URL`):
 
 ```sh
 agentsquid watch create --input proposal.json
@@ -177,6 +194,64 @@ Grant IDs are validated before SQL; malformed identifiers return a sanitized
 client error. Foreign keys are enabled by the existing shared database connector,
 so deleting a watch cascades to its grant records.
 
+
+## Bounded observation smoke test
+
+The production test topic is `watch-prod-test`. Its deployment policy narrows
+the global settings as follows (these are not shipped defaults):
+
+```yaml
+watches:
+  enabled: true
+  registry:
+    probes:
+      prod-smoke-clock:
+        argv:
+          - /absolute/path/to/squid/.venv/bin/python
+          - -c
+          - 'import json,time; print(json.dumps({"revision": str(int(time.time())//30), "summary": "Production smoke-test clock tick"}))'
+        timeout: 5
+        output_limit: 1024
+  topics:
+    watch-prod-test:
+      execution_enabled: false
+      adapters: [prod-smoke-clock]
+      min_poll_seconds: 30
+      max_lifetime_seconds: 180
+      max_runs: 1
+      max_attempts: 1
+```
+
+Use a stable absolute interpreter path, not a per-turn isolated worktree path.
+Merge this example into existing watch configuration rather than replacing
+other registered probes or policies. Save through the configuration editor/API;
+watch settings take effect at startup. Migrating from an environment-provided
+key to the automatic file requires a cold stop/start without that override:
+self-restart intentionally retains the existing verifier. Run lifecycle commands
+outside an agent turn that the stop would terminate.
+
+The probe reads no external service and returns one immutable revision per
+30-second clock interval. Polling launches no model. The first snapshot quietly
+establishes a baseline; a later revision records a pending change event.
+`min_poll_seconds` is a lower bound, not a global schedule: create the watch with
+`poll_interval: 30` for this test. The 180-second ceiling bounds each watch's
+lifetime from creation (including time spent proposed), not the server or topic
+lifetime. Omitted expiry uses that ceiling; retries and restarts do not renew it.
+Topic execution is disabled even if global execution is enabled.
+
+Using `--human-topic watch-prod-test --api-url http://127.0.0.1:8000`, create a
+proposal with adapter `prod-smoke-clock`, a test target, a unique request key, and
+`poll_interval: 30`. Grant observation through the returned `expires_at`, activate
+with the returned grant ID and current version, then show the watch until its
+cursor advances. Cancel with its latest version when finished. Without an
+execution grant no model turn is authorized; this topic additionally disables
+execution by policy. Expiry or cancellation stops further polling. Observation
+records remain durable for inspection.
+
+Production checks so far cover loaded settings, proposal creation, denial of
+activation without a grant, and cancellation. Active polling with file credentials
+has not yet been verified. This synthetic test establishes no GitHub PR semantics,
+agent execution, or publication support.
 
 ## Observation lifecycle and recovery
 

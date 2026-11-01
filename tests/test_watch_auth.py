@@ -51,3 +51,58 @@ async def test_builtin_restart_passes_control_verifier_to_exec(monkeypatch):
     await asyncio.wait_for(complete.wait(), 2)
     assert 'SQUID_WATCH_CONTROL_TOKEN' not in captured
     assert load_digest(captured) == digest
+
+
+def test_file_credential_survives_cold_start_and_reexec():
+    from agent.watch_auth import control_token_file, file_token
+    digest = load_digest({}, create=True)
+    path = control_token_file()
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert len(file_token()) == 64
+    assert load_digest({}) == digest
+    assert load_digest(restart_environment({}, digest), create=True) == digest
+
+
+def test_disabled_start_does_not_create_credential():
+    from agent.watch_auth import control_token_file
+    assert load_digest({}) is None
+    assert not control_token_file().exists()
+
+
+def test_unsafe_file_permissions_and_symlinks_fail_closed(tmp_path):
+    from agent.watch_auth import control_token_file, file_token
+    path = control_token_file()
+    path.write_text('a' * 64)
+    path.chmod(0o644)
+    with pytest.raises(ValueError, match='owner-only'):
+        file_token()
+    path.unlink()
+    target = tmp_path / 'other-token'
+    target.write_text('b' * 64)
+    target.chmod(0o600)
+    path.symlink_to(target)
+    with pytest.raises(OSError):
+        file_token()
+
+
+@pytest.mark.parametrize('existing_file', [False, True])
+def test_enabled_restart_preserves_environment_override(existing_file):
+    from agent.watch_auth import control_token_file, file_token
+    path = control_token_file()
+    if existing_file:
+        file_token(create=True)
+    original = path.read_bytes() if existing_file else None
+    secret = 'explicit-operator-secret-' * 2
+    digest = load_digest({'SQUID_WATCH_CONTROL_TOKEN': secret}, create=True)
+    for _ in range(2):
+        environment = restart_environment({}, digest)
+        assert load_digest(environment, create=True) == digest
+        assert RESTART_DIGEST not in environment
+        assert (path.read_bytes() if path.exists() else None) == original
+
+
+def test_invalid_restart_verifier_cannot_fall_back_to_file():
+    from agent.watch_auth import file_token
+    file_token(create=True)
+    with pytest.raises(ValueError, match='restart verifier'):
+        load_digest({RESTART_DIGEST: 'invalid'}, create=True)

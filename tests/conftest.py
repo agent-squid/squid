@@ -27,3 +27,9 @@ def _no_real_shore_host_connection(monkeypatch):
     must not depend on that ambient, developer-specific state.
     """
     monkeypatch.setattr("agent.shore_transport.configured_host_connection", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_watch_control_file(tmp_path, monkeypatch):
+    monkeypatch.setattr('agent.watch_auth.control_token_file',
+                        lambda: tmp_path / 'watch-control.token')

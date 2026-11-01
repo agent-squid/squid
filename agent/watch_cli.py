@@ -9,19 +9,21 @@ from urllib.parse import quote
 import httpx
 
 from .watch_urls import valid_api_url
+from .watch_auth import file_token
 
 
 def main(argv):
     parser = argparse.ArgumentParser(prog='agentsquid ' + argv[0],
         description='Watch monitoring and explicitly granted local work. Publication is unavailable.',
         epilog='Use agentsquid watch --help for commands. SQUID_API_URL must name the issuing instance. '
-               'Agent calls use SQUID_TURN_TOKEN; --human-topic uses SQUID_WATCH_CONTROL_TOKEN. '
+               'Agent calls use SQUID_TURN_TOKEN; --human-topic uses SQUID_WATCH_CONTROL_TOKEN or ~/.squid/watch-control.token. '
                'Mutation input is a JSON object: create needs adapter, target, request_key; '
                'lifecycle actions need version and optionally operation_key/grant_id; '
                'grant needs expires_at; revoke needs grant_id; execution-grant needs agent, instructions, '
                'max_runs, max_attempts, request_key; execution-revoke needs grant_id. runs lists durable outcomes.')
+    parser.add_argument('--api-url', help='Explicit Squid instance URL (overrides SQUID_API_URL)')
     if argv[0] == 'tools':
-        parser.parse_args(argv[1:])
+        parsed = parser.parse_args(argv[1:])
         action = 'tools'
         args = None
     else:
@@ -32,13 +34,16 @@ def main(argv):
         parser.add_argument('--limit', type=int, default=100)
         parser.add_argument('--offset', type=int, default=0)
         args = parser.parse_args(argv[1:])
+        parsed = args
         action = args.action
     try:
-        url = os.environ.get('SQUID_API_URL', '')
+        url = parsed.api_url or os.environ.get('SQUID_API_URL', '')
         if not valid_api_url(url):
             raise ValueError()
         human = args and args.human_topic is not None
         token = os.environ.get('SQUID_WATCH_CONTROL_TOKEN' if human else 'SQUID_TURN_TOKEN', '')
+        if human and not token:
+            token = file_token()
         if not token or len(token) > 512:
             raise ValueError()
         path = '/tools' if action == 'tools' else '/watches'

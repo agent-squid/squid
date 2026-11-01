@@ -108,3 +108,18 @@ def test_execution_commands_use_human_control_and_runs_use_get(transport, tmp_pa
     assert watch_cli.main(['watch', 'runs', 'watch-id', '--human-topic', 'squid']) == 0
     assert transport[-1].url.path == '/watch-control/squid/watches/watch-id/runs'
     assert 'secret' not in str(capsys.readouterr())
+
+
+def test_human_file_auth_and_explicit_url_without_environment(transport, monkeypatch):
+    from agent.watch_auth import file_token
+    token = file_token(create=True)
+    monkeypatch.delenv('SQUID_WATCH_CONTROL_TOKEN')
+    monkeypatch.delenv('SQUID_API_URL')
+    assert watch_cli.main(['watch', 'list', '--human-topic', 'squid',
+                           '--api-url', 'http://127.0.0.1:2222']) == 0
+    assert transport[-1].headers['authorization'] == 'Bearer ' + token
+    assert transport[-1].url.port == 2222
+    # Agent operations still require the scoped turn credential.
+    monkeypatch.delenv('SQUID_TURN_TOKEN')
+    assert watch_cli.main(['watch', 'list', '--api-url', 'http://127.0.0.1:2222']) == 1
+    assert len(transport) == 1
