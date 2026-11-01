@@ -1,7 +1,7 @@
 ---
 status: proposed
 date: 2026-10-30
-updated: 2026-10-30
+updated: 2026-10-31
 ---
 # ADR-0053: Persistent Watches and Shared Agent Tools
 
@@ -17,8 +17,9 @@ harness's native tool or skill would require separate setup and behavior for
 each harness. We need one server-owned watch lifecycle that any shell-capable
 agent can manage, without an additional LLM classification pass.
 
-This ADR proposes new functionality. It does not claim watches, their CLI,
-authorization, or automatic publishing are implemented today.
+This ADR defines the full target functionality. Observation and generic local-work
+dispatch are partially implemented behind opt-in configuration; see implementation
+progress below. Automatic publication remains unimplemented.
 
 ## Decision
 
@@ -362,27 +363,42 @@ boundary and late responses, source outages, timeout/response races, generation
 resets, restart with overdue work, pause/resume, repeated rules, coalesced
 catch-up, watch expiry versus external expiry, and cancellation before mutation.
 
-## Implementation progress (2026-10-30)
+## Implementation progress (2026-10-31)
 
-Delivery status: **partial implementation, unavailable to users**. The internal
-observation core is complete for its current scope; the full watch lifecycle
-is not complete. Restarting the server does not start monitoring or handling
-comments. Keep ADR status `proposed`; internal scaffolding does not satisfy
-this ADR's end-to-end verification requirements.
+Delivery status: **partial implementation, opt-in observation and generic local
+work**. Keep ADR status `proposed`: the full lifecycle and end-to-end verification
+requirements are not complete. The detailed implementation history and remaining
+milestones are in the [implementation plan](../plans/adr-0046-0053-context-tools-and-watches.md).
 
-The durable internal store/loop and review fixes are implemented, including
-operation-key replay, cursor preservation, failure reset, idle lock avoidance,
-and pause reasons. `agent/watch_probes.py` adds bounded executable probes and
-an injected MCP-client bridge with one normalized revision contract. Creation
-defaults to 24 hours and retries preserve the original expiry.
+Implemented scope includes the durable observation store, bounded polling,
+atomic cursor/event ingestion, trusted executable/MCP probe registry and concrete
+MCP client, global/topic policy narrowing, durable exact-watch grants, scoped
+turn credentials, authenticated HTTP controls, shared JSON CLI, and one-shot
+launch delivery/revocation. Server lifespan owns worker startup and awaited
+shutdown. Generic local-work dispatch adds separate execution grants and finite
+budgets, durable run/event/message links, ordinary topic queue execution,
+captured-event acknowledgement after successful completion and clean sync, and
+recovery that pauses ambiguous started work. Disposable real-host tests cover
+observation and opt-in Echo dispatch, restart replay, and run limits.
 
-These components are internal: production registry/configuration, a concrete
-MCP transport/client, grants, API/CLI, lifespan startup, durable run dispatch,
-and publication remain pending. No user-facing automatic watch is enabled.
+`watches.enabled` defaults to false. Observation requires enablement, a registered
+adapter, and an active watch with a durable observation grant. Automatic local
+work additionally requires `execution_enabled: true` in watch policy and an
+exact-watch execution grant. Restart alone does not enable either capability.
+Disabled configuration exposes no adapters and starts no polling or dispatch
+worker; durable recovery still reconciles linked evidence without authorizing
+new work.
 
-Probe timeout handling supports the declared Python 3.10 minimum via
-`asyncio.wait_for`. Loop registration validates that the probe timeout plus
-the one-second cleanup allowance is strictly below the loop timeout. Cleanup
-kills the process group and closes pipes on timeout or cancellation; detached
-descendants cannot hold cleanup open indefinitely. Event validation uses the
-same JSON encoding and 64 KiB payload limit as persistence.
+Production configuration remains unchanged. Disabled-mode verification on
+2026-10-31 confirmed the current configuration has no `watches` section and loads
+with enablement, monitoring, and dispatch all false. The running server reported
+`/health` status `ok` at version `0.1.6rc26`; `/`, `/topics`, `/queue`, and
+`/processes` returned HTTP 200. The full Squid suite passed: 1,133 tests on Python
+3.11, with two dependency deprecation warnings. This check did not restart the
+server, launch a live agent turn, or activate a production watch.
+
+Dedicated GitHub PR predicates and stale-head reconciliation, deadline rules,
+native MCP tool/skill delivery, persistent harness refresh, operational watch
+UI and ambiguous-run resolution, and controlled publication remain pending.
+No automatic publication or external mutation is enabled. Generic probe/Echo
+coverage does not establish autonomous PR handling.

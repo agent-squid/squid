@@ -1,6 +1,6 @@
 # Implementation plan: transparent context, shared tools, and persistent watches
 
-Status: implementation in progress. Updated: 2026-10-30.
+Status: implementation in progress. Updated: 2026-10-31.
 
 Design authorities: [ADR-0046](../decisions/0046-layered-runtime-and-user-context-injection.md)
 and [ADR-0053](../decisions/0053-persistent-watches-and-shared-agent-tools.md).
@@ -8,7 +8,7 @@ Neither ADR nor this plan implies the capabilities already exist. Names for
 new files, endpoints, tables, and flags below are proposed contracts. Existing
 symbol names are navigation anchors, not promises about their final placement.
 
-## Progress (2026-10-30)
+## Progress (2026-10-31)
 
 - Milestone 1 runtime foundation complete: packaged templates, strict startup
   validation and caching, typed blocks, assembly after worktree resolution,
@@ -153,6 +153,14 @@ symbol names are navigation anchors, not promises about their final placement.
   3.11; 159 focused tests passed on Python 3.10, both including disposable real
   hosts. Final focused controls checks passed (97 tests), followed by 40 final
   dispatch/polling checks covering shutdown and real-host recovery; lockfile checked.
+- Disabled-mode verification (2026-10-31): production configuration remains
+  unchanged, with no `watches` section. Loading that configuration confirms
+  `enabled: false`, no exposed adapters, and no monitoring or dispatch worker.
+  The running server reports `/health` status `ok` at version `0.1.6rc26`;
+  `/`, `/topics`, `/queue`, and `/processes` return HTTP 200. Full Squid suite:
+  1,133 tests passed on Python 3.11 (two dependency deprecation warnings).
+  This verifies disabled-mode compatibility; it is not a new restart, live
+  agent-turn, or production watch activation test. No configuration was enabled.
 - Next watch slice: dedicated GitHub PR adapter, richer source-specific predicates
   and stale-head reconciliation, and operational UI/ambiguous-run resolution.
   Deadline and publication infrastructure remain separate milestones.
