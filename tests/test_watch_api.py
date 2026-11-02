@@ -375,3 +375,31 @@ async def test_queue_uses_original_request_for_discovery_hint(setup, monkeypatch
         assert ('Squid shared tools:' in captured[0]) == (not original.lstrip().startswith('/'))
     finally:
         watch_launch.configure(None)
+
+
+@pytest.mark.asyncio
+async def test_browser_watch_status_and_versioned_cancel(setup):
+    app, service, control, token, now = setup
+    row = service.create(token, **PAYLOAD)
+    grant = control.record_grant(topic='squid', watch_id=row['id'], user_action='test', expires_at=row['expires_at'])
+    active = control.mint(turn='activate', topic='squid', operations=OPERATIONS, grants=[grant], expires_at=1000)
+    service.transition(active, row['id'], version=0, action='activate', grant_id=grant)
+    async with client(app, token) as c:
+        response = await c.get('/watch-status')
+        assert response.status_code == 200
+        item = response.json()[0]
+        assert item['target'] == 'task:1'
+        assert item['status'] == 'active'
+        assert item['polling'] is False
+        with stats_db._connect() as conn:
+            conn.execute('UPDATE watches SET lease_until=? WHERE id=?', (now[0] + 60, row['id']))
+        assert (await c.get('/watch-status')).json()[0]['polling'] is True
+        assert not {'claim_token', 'lease_until', 'agent_revision', 'user_action'} & item.keys()
+        assert (await c.get('/watch-status', headers={'Origin': 'https://evil.example'})).status_code == 403
+        path = '/watch-status/' + row['id'] + '/cancel'
+        assert (await c.post(path, json={'version': 1}, headers={'Origin': 'https://evil.example'})).status_code == 403
+        assert (await c.post(path, json={'version': 0})).status_code == 409
+        assert (await c.post(path, json={'version': True})).status_code == 400
+        assert (await c.post(path, json={'version': 1})).json() == {'cancelled': True}
+        assert (await c.get('/watch-status')).json() == []
+    assert service.show(token, row['id'])['status'] == 'cancelled'

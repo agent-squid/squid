@@ -16,6 +16,62 @@ from .watch_service import WatchControl, WatchDenied, WatchUnavailable
 router = APIRouter()
 
 
+@router.get('/watch-status')
+async def watch_status(request: Request):
+    """Compact browser status; never expose grants, credentials or source payloads."""
+    from .server import _same_origin
+    if not _same_origin(request):
+        return JSONResponse({'error': 'forbidden'}, status_code=403)
+    service = request.app.state.watch_service
+    def snapshot():
+        from .watches import _connect
+        now = service.clock()
+        with _connect() as conn:
+            rows = conn.execute('''SELECT w.id,w.topic,w.target,w.status,w.version,
+                w.next_poll,w.expires_at,w.lease_until,w.last_error,w.pause_reason,
+                g.agent,g.flow_route,g.instructions
+                FROM watches w LEFT JOIN watch_execution_grants g
+                ON g.watch_id=w.id AND g.revoked_at IS NULL
+                WHERE w.status IN ('active','paused') AND w.expires_at>?
+                ORDER BY w.topic,w.id''', (now,)).fetchall()
+        result = []
+        for row in rows:
+            item = {k: row[k] for k in ('id','topic','target','status','version','next_poll',
+                                       'agent','flow_route','instructions')}
+            item['polling'] = row['lease_until'] is not None and row['lease_until'] > now
+            item['error'] = bool(row['last_error'])
+            item['monitoring'] = service.monitoring_enabled
+            result.append(item)
+        return result
+    return await call(snapshot)
+
+
+@router.post('/watch-status/{watch_id}/cancel')
+async def cancel_status_watch(request: Request, watch_id: str):
+    # Same host-control boundary as browser configuration/stop controls. This
+    # endpoint can only cancel; it cannot create grants or activate monitoring.
+    from .server import _same_origin
+    if not _same_origin(request):
+        return JSONResponse({'error': 'forbidden'}, status_code=403)
+    try:
+        body = fields(await request.json(), ('version',))
+        if type(body['version']) is not int or body['version'] < 0:
+            raise ValueError('invalid version')
+        service = request.app.state.watch_service
+        def cancel():
+            from .watches import _connect, transition_watch
+            with _connect() as conn:
+                row = conn.execute('SELECT topic FROM watches WHERE id=?', (watch_id,)).fetchone()
+            if row is None:
+                raise ValueError('watch not found')
+            transition_watch(watch_id, topic=row['topic'], version=body['version'],
+                             action='cancel', now=service.clock())
+        await call(cancel)
+        return {'cancelled': True}
+    except (ValueError, TypeError) as exc:
+        return failure(exc)
+
+
 def bearer(request):
     if request.url.scheme != 'https':
         try:

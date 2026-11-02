@@ -12309,6 +12309,7 @@ function updateProcStatusDot(processes, queued) {
   const hasIdle = !active && processes.some(isIdleProc);
   procStatusBtn.classList.toggle('has-procs', active || queued.length > 0);
   procStatusBtn.classList.toggle('has-idle', hasIdle);
+  procStatusBtn.classList.toggle('has-watches', watchStatusFresh && cachedWatchRows.some(w => w.status === 'active' && w.monitoring));
 }
 
 function quotaStatusProviderKey(ref) {
@@ -12385,7 +12386,7 @@ function renderProcPopup(processes, queued) {
   let body = renderQuotaStatus();
   const running = processes.filter(r => !isIdleProc(r));
   const idle = processes.filter(isIdleProc);
-  if (!processes.length && !queued.length) {
+  if (!processes.length && !queued.length && !cachedWatchRows.length) {
     body += '<div class="proc-status-empty">No active processes or queued prompts.</div>';
   } else {
     if (running.length) {
@@ -12425,7 +12426,39 @@ function renderProcPopup(processes, queued) {
     }
   }
 
+  if (cachedWatchRows.length) {
+    const rows = cachedWatchRows.map(w => {
+      const route = w.flow_route || (w.agent ? `#${w.topic}@${w.agent}` : `#${w.topic} · Watch`);
+      const status = !watchStatusFresh ? 'Offline' : w.status === 'paused' ? 'Paused' : !w.monitoring ? 'Offline'
+        : w.error ? 'Error' : w.polling ? 'Polling' : `Next ${Math.max(0, Math.ceil(w.next_poll - Date.now() / 1000))}s`;
+      return `<tr>
+        <td>${escapeHtml(route)}</td>
+        <td class="proc-queue-preview" title="${escapeHtml(w.target)}">${escapeHtml(w.instructions || w.target)}</td>
+        <td>${status}</td>
+        <td><button class="proc-watch-stop proc-deq-btn" data-watch-id="${escapeHtml(w.id)}" data-version="${w.version}" title="Cancel watch" aria-label="Cancel watch">✕</button></td>
+      </tr>`;
+    }).join('');
+    body += `<div class="proc-section-label">Watches</div><table><thead><tr><th>Route</th><th>Prompt</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
   procStatusPopup.innerHTML = header + body;
+  procStatusPopup.querySelectorAll('.proc-watch-stop').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/watch-status/${encodeURIComponent(btn.dataset.watchId)}/cancel`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ version: Number(btn.dataset.version) }),
+        });
+        if (!res.ok) throw new Error('Unable to cancel watch. Refresh and retry.');
+        await pollProcs();
+      } catch (error) {
+        btn.disabled = false;
+        btn.textContent = 'Retry';
+        btn.title = error.message;
+      }
+    });
+  });
 
   procStatusPopup.querySelectorAll('.proc-stop-btn').forEach(btn => {
     btn.addEventListener('click', async e => {
@@ -12465,7 +12498,7 @@ function renderProcPopup(processes, queued) {
     });
   });
 
-  procStatusPopup.querySelectorAll('.proc-deq-btn').forEach(btn => {
+  procStatusPopup.querySelectorAll('.proc-deq-btn:not(.proc-watch-stop)').forEach(btn => {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
       btn.disabled = true; btn.textContent = '…';
@@ -12508,6 +12541,9 @@ function toggleProcPopup() {
 
 let cachedProcRows  = [];
 let cachedQueueRows = [];
+let cachedWatchRows = [];
+let watchStatusLoading = false;
+let watchStatusFresh = false;
 let realtimeProcessStateReceived = false;
 
 function applyRealtimeProcessState(processes, queued) {
@@ -12524,7 +12560,7 @@ function applyRealtimeProcessState(processes, queued) {
   updateProcStatusDot(cachedProcRows, cachedQueueRows);
   if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
   const hasActive = cachedProcRows.some(r => !isIdleProc(r));
-  if (hasActive || cachedQueueRows.length || procPollHolds > 0 || procStatusPopup.classList.contains('open')) {
+  if (hasActive || cachedQueueRows.length || cachedWatchRows.length || procPollHolds > 0 || procStatusPopup.classList.contains('open')) {
     startProcPoll();
   } else {
     stopProcPoll();
@@ -12537,11 +12573,40 @@ function releaseRealtimeProcessState() {
   startProcPoll();
 }
 
+async function refreshWatchStatus() {
+  if (watchStatusLoading) return;
+  watchStatusLoading = true;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch('/watch-status', { signal: controller.signal });
+    if (!res.ok) throw new Error('Watch status unavailable');
+    const rows = await res.json();
+    if (!Array.isArray(rows)) throw new Error('Invalid watch status');
+    cachedWatchRows = rows;
+    watchStatusFresh = true;
+  } catch {
+    // Keep jobs available for inspection/cancellation, but never claim that a
+    // cached snapshot proves monitoring is still healthy.
+    watchStatusFresh = false;
+  } finally {
+    clearTimeout(timeout);
+    watchStatusLoading = false;
+  }
+  updateProcStatusDot(cachedProcRows, cachedQueueRows);
+  if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
+}
+
+// Discovery must outlive process polling: another tab or CLI can activate a
+// watch while this tab has no jobs and the status popup is closed.
+setInterval(refreshWatchStatus, 15000);
+
 async function pollProcs() {
+  await refreshWatchStatus();
   if (realtimeProcessStateReceived) {
     if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
     const hasActive = cachedProcRows.some(r => !isIdleProc(r));
-    if (!hasActive && !cachedQueueRows.length && procPollHolds === 0 && !procStatusPopup.classList.contains('open')) stopProcPoll();
+    if (!hasActive && !cachedQueueRows.length && !cachedWatchRows.length && procPollHolds === 0 && !procStatusPopup.classList.contains('open')) stopProcPoll();
     return;
   }
   const seq = ++procPollSeq;
@@ -12554,7 +12619,7 @@ async function pollProcs() {
     updateProcStatusDot(cachedProcRows, cachedQueueRows);
     if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
     const hasActive = cachedProcRows.some(r => !isIdleProc(r));
-    if (!hasActive && !cachedQueueRows.length && procPollHolds === 0 && !procStatusPopup.classList.contains('open')) stopProcPoll();
+    if (!hasActive && !cachedQueueRows.length && !cachedWatchRows.length && procPollHolds === 0 && !procStatusPopup.classList.contains('open')) stopProcPoll();
   } catch { /* ignore */ }
 }
 

@@ -5945,3 +5945,6 @@ mark.search-kw-highlight {
   cursor: pointer;
   font: inherit;
 }
+
+/* Monitoring jobs stay visible without the busy-process pulse. */
+#proc-status.has-watches:not(.has-procs)::after { background: var(--accent); }
