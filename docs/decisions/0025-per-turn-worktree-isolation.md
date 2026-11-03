@@ -1,7 +1,7 @@
 ---
 status: accepted (branchless isolation implemented; prior worktree/branch mechanism superseded)
 date: 2026-07-09
-updated: 2026-07-23
+updated: 2026-11-03
 ---
 # ADR-0025: Per-Turn Git Worktree Isolation for Agent Changes
 
@@ -28,7 +28,7 @@ as the historical record of the worktree/branch approach and why it was
 chosen over Options 1–3.
 
 `WORKTREE_ISOLATION_ENABLED` (`agent/config.py`, driven by `worktree.enabled`
-in `squid.yaml`, default `true`) gates the whole feature. With it off, every
+in `squid.yaml`, default `false`) gates the whole feature. With it off, every
 turn runs in **Fallback** (below): agents write directly to the real working
 tree, diffs are unscoped, and the model is not told it's a sole writer.
 
@@ -57,14 +57,55 @@ run requested Git/PR operations only in the backing repos. The UI `/publish`
 command and `squid-publish` helper remain compatibility publish paths through
 `POST /cmd`, but they are not advertised in the model-facing prompt.
 
+### 2026-11-03: Disable per-turn isolation by default
+
+**Decision.** Ship `worktree.enabled: false` in the example configuration and
+use `false` when the setting is omitted. Keep per-turn isolation available as
+an explicit opt-in. Existing explicit `true` settings continue to enable it;
+this change does not rewrite user configuration.
+
+**Why.** In daily use, frequent promotion conflicts and manual recovery have
+interrupted work, particularly around rebases and edits made to resolve merge
+conflicts. Each isolated turn starts from a snapshot, while the backing
+checkout can continue changing through user edits, Git operations, or other
+turns. Promoting the turn's edits therefore introduces another integration
+step after every response. Isolation protects the turn while it runs, but it
+does not remove conflicts when those independent edits are brought together.
+A conflict or failed promotion can then block subsequent turns against the
+repo until recovery completes. That interruption is too costly for the
+default workflow with the current recovery experience.
+
+**Tradeoff.** Direct writes avoid automatic per-turn promotion and let users
+and agents work in the same checkout during normal editing and Git recovery.
+They give up isolated edits and reliably turn-scoped diffs. Concurrent agents
+or user edits can still interfere, so disabling isolation does not solve
+concurrent editing; work in a shared checkout still requires coordination.
+
+**Alternative discussed, not implemented.** A persistent checkout and branch
+per topic could retain isolation across topics and move integration to an
+explicit merge when topic work is ready. Each topic would need its own
+directory: different branches in one checkout cannot isolate concurrent
+topics because switching branches changes the shared files. Agents within a
+topic would still need coordination, and topic branches could still develop
+merge conflicts as they diverge. This default change does not introduce
+persistent topic checkouts or automatic topic branching.
+
+**Before reconsidering the default.** Promotion and recovery should handle
+backing-checkout changes predictably, coordinate promotion per repo, avoid
+promotion during an active merge or rebase, and preserve isolated edits with
+a clear retry or manual recovery path. These are criteria for future work,
+not guarantees added by this change.
+
 ### Configuring the shipped implementation
 
-Shipped enabled in `config/squid.yaml.example`. To opt out, set
-`enabled: false` in `~/.squid/squid.yaml`:
+Isolation is opt-in and disabled in `config/squid.yaml.example`. Frequent
+promotion conflicts during rebases and manual conflict resolution make it
+unsuitable as the default. To opt in, set `enabled: true` in
+`~/.squid/squid.yaml`. Existing explicit settings are respected:
 
 ```yaml
 worktree:
-  enabled: false
+  enabled: true
   auto_link_ignored_dirs: true
   # Optional fallback for dependency/cache directory names Git does not report
   # as ignored. Leave unset; add only dependency/cache names Squid misses.

@@ -57,8 +57,8 @@ auth:
   allow_remote_keychain_unlock: false
 
 worktree:
-  # Per-turn code-root isolation. Set enabled: false to use direct writes.
-  enabled: true
+  # Per-turn code-root isolation. Opt in with enabled: true; otherwise use direct writes.
+  enabled: false
   # Symlink allowlisted Git-ignored dependency/cache directories such as
   # .venv/node_modules into turn worktrees so local tools do not need
   # reinstalling there.

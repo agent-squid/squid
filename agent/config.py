@@ -215,10 +215,10 @@ SQUID_HOMES = f"/tmp/{_CURRENT_USER}/squid-homes"
 # delete spool files sitting inside it.
 NATIVE_SHELL_SPOOL_DIR = f"/tmp/{_CURRENT_USER}/squid-shell-logs"
 
-# Per-turn Git worktree isolation (see ADR-0025). On by default; set
-# `worktree.enabled: false` in squid.yaml to use direct working-tree writes.
+# Per-turn Git worktree isolation (see ADR-0025). Off by default; set
+# `worktree.enabled: true` in squid.yaml to opt into isolated turn directories.
 _worktree_cfg = _cfg.get("worktree", {})
-WORKTREE_ISOLATION_ENABLED: bool = bool(_worktree_cfg.get("enabled", True))
+WORKTREE_ISOLATION_ENABLED: bool = bool(_worktree_cfg.get("enabled", False))
 WORKTREE_TRACK_DIRTY_CHANGES: bool = bool(_worktree_cfg.get("track_dirty_changes", True))
 
 # Dependency/cache directory names to symlink from a code root into each fresh

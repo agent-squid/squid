@@ -148,6 +148,14 @@ function renderAssistantMarkdown(content) {
   return marked.parse(escapeMarkdownTildes(content));
 }
 
+function setAssistantMarkdown(container, content) {
+  container.innerHTML = renderAssistantMarkdown(content);
+  // History and completed live bubbles can still be detached at this point.
+  requestAnimationFrame(() => {
+    if (container.isConnected) void _renderMarkdownDiagrams(container);
+  });
+}
+
 const HARNESS_MODEL_HINTS = Object.freeze({
   claudecode: 'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
   codex:      'e.g. o4-mini, o3',
@@ -6001,7 +6009,7 @@ async function sendMessage(text, opts = {}) {
       setShellResultMetadata(liveCtxSpan, raw);
       contentDiv.textContent = shellResultOutput(raw);
     } else {
-      contentDiv.innerHTML = renderAssistantMarkdown(raw);
+      setAssistantMarkdown(contentDiv, raw);
     }
     if (wasAtBottom) scrollToRevealBubble(bubble);
     return true;
@@ -6698,7 +6706,7 @@ async function sendMessage(text, opts = {}) {
                 setShellResultMetadata(liveCtxSpan, raw);
                 contentDiv.textContent = shellResultOutput(raw);
               } else {
-                contentDiv.innerHTML = renderAssistantMarkdown(raw);
+                setAssistantMarkdown(contentDiv, raw);
               }
               bubble.classList.add('history-item');
               if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
@@ -8223,7 +8231,7 @@ function appendHistoryItem(item, container) {
     asstContent.innerHTML = `<span class="msg-error">${cancelledTurnLabel(item.content)}</span>`;
   } else {
     if (nativeShell) asstContent.textContent = shellResultOutput(item.content || '');
-    else asstContent.innerHTML = renderAssistantMarkdown(item.content || '');
+    else setAssistantMarkdown(asstContent, item.content || '');
   }
   asstBubble.appendChild(asstContent);
   if (item.timestamp) asstBubble.dataset.ts = item.timestamp;
@@ -9310,7 +9318,7 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {
         clearInterval(timer);
         if (stopBtn) stopBtn.remove();
         contentEl.style.paddingRight = '';
-        contentEl.innerHTML = renderAssistantMarkdown(data.content || '');
+        setAssistantMarkdown(contentEl, data.content || '');
       } else if (data.status === 'error') {
         clearInterval(timer);
         if (stopBtn) stopBtn.remove();
@@ -9322,6 +9330,7 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {
         if (stopBtn) stopBtn.remove();
         contentEl.innerHTML = '<span class="msg-error">Response timed out.</span>';
       } else if (data.content) {
+        // Polling redraws this every two seconds; render diagrams only at completion.
         contentEl.innerHTML = renderAssistantMarkdown(data.content);
         addLoader(contentEl);
       }
@@ -9882,7 +9891,7 @@ function addMessage(role, content) {
   const div = document.createElement('div');
   div.className = `msg ${role}`;
   if (content) {
-    if (role === 'assistant') div.innerHTML = renderAssistantMarkdown(content);
+    if (role === 'assistant') setAssistantMarkdown(div, content);
     else div.textContent = content;
   }
   messages.appendChild(div);
@@ -19096,6 +19105,24 @@ function _loadMermaid() {
   return _mermaidLoader;
 }
 
+function _replaceMarkdownDiagram(code, diagram) {
+  const block = code.parentElement;
+  if (!messages.contains(block)) {
+    block.replaceWith(diagram);
+    return;
+  }
+  // Read the current viewport after Mermaid's async work: the user may have
+  // scrolled while rendering. Keep a bottom-pinned view pinned, or compensate
+  // for resized blocks entirely above the viewport without moving visible ones.
+  const pinned = messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 2;
+  const aboveViewport = block.getBoundingClientRect().bottom <= messages.getBoundingClientRect().top;
+  const previousHeight = messages.scrollHeight;
+  const previousTop = messages.scrollTop;
+  block.replaceWith(diagram);
+  if (pinned) messages.scrollTop = messages.scrollHeight - messages.clientHeight;
+  else if (aboveViewport) messages.scrollTop = previousTop + messages.scrollHeight - previousHeight;
+}
+
 async function _renderMarkdownDiagrams(preview) {
   const blocks = preview.querySelectorAll('pre > code.language-mermaid');
   if (!blocks.length) return;
@@ -19103,20 +19130,24 @@ async function _renderMarkdownDiagrams(preview) {
     const mermaid = await _loadMermaid();
     for (const code of blocks) {
       if (!preview.isConnected) return;
+      if (!preview.contains(code)) continue;
       try {
         const { svg } = await mermaid.render(`fv-mermaid-${++_mermaidDiagramId}`, code.textContent);
         if (!preview.isConnected) return;
+        if (!preview.contains(code)) continue;
         const diagram = document.createElement('div');
         diagram.className = 'fv-mermaid';
         diagram.innerHTML = svg;
-        code.parentElement.replaceWith(diagram);
+        _replaceMarkdownDiagram(code, diagram);
       } catch (error) {
         // Keep invalid diagrams readable and continue rendering the other blocks.
-        code.parentElement.title = `Mermaid: ${error.message || error}`;
+        if (preview.contains(code)) code.parentElement.title = `Mermaid: ${error.message || error}`;
       }
     }
   } catch (error) {
-    for (const code of blocks) code.parentElement.title = error.message;
+    for (const code of blocks) {
+      if (preview.contains(code)) code.parentElement.title = error.message;
+    }
   }
 }
 
