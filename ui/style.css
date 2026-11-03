@@ -3040,6 +3040,15 @@ body {
   color: var(--text-muted);
 }
 .fv-md-preview a { color: var(--accent-light); }
+.fv-mermaid {
+  margin: 0.65em 0;
+  padding: 1rem;
+  overflow-x: auto;
+  background: #fff;
+  border-radius: 6px;
+  color: #333;
+}
+.fv-mermaid svg { display: block; margin: 0 auto; }
 
 /* file viewer — CodeMirror edit mode */
 .cm-editor {

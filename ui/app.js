@@ -4664,7 +4664,14 @@ input.addEventListener('keydown', (e) => {
       return;
     }
     if (e.key === 'Tab') { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
-    if (e.key === 'Escape') { e.preventDefault(); _acRestoreDraft(); return; }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      // Route-history navigation applies the highlighted route immediately.
+      // Dismiss its list without restoring the route from before navigation.
+      if (acItems[acSel]?.previewApply) hideAutocomplete();
+      else _acRestoreDraft();
+      return;
+    }
   }
   if (!acOpen && composerHasOnlyRoute() && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
     const direction = e.key === 'ArrowLeft' ? 'previous' : 'next';
@@ -19062,6 +19069,57 @@ function _renderFileViewer(container, text, targetLine, endLine, path, changedLi
   });
 }
 
+// Load the bundled renderer only when a Markdown preview contains diagrams.
+let _mermaidLoader;
+let _mermaidDiagramId = 0;
+function _loadMermaid() {
+  if (!_mermaidLoader) {
+    _mermaidLoader = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/vendor/mermaid.min.js';
+      script.onload = () => {
+        window.mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          suppressErrorRendering: true,
+        });
+        resolve(window.mermaid);
+      };
+      script.onerror = () => {
+        script.remove();
+        _mermaidLoader = null;
+        reject(new Error('Unable to load Mermaid'));
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return _mermaidLoader;
+}
+
+async function _renderMarkdownDiagrams(preview) {
+  const blocks = preview.querySelectorAll('pre > code.language-mermaid');
+  if (!blocks.length) return;
+  try {
+    const mermaid = await _loadMermaid();
+    for (const code of blocks) {
+      if (!preview.isConnected) return;
+      try {
+        const { svg } = await mermaid.render(`fv-mermaid-${++_mermaidDiagramId}`, code.textContent);
+        if (!preview.isConnected) return;
+        const diagram = document.createElement('div');
+        diagram.className = 'fv-mermaid';
+        diagram.innerHTML = svg;
+        code.parentElement.replaceWith(diagram);
+      } catch (error) {
+        // Keep invalid diagrams readable and continue rendering the other blocks.
+        code.parentElement.title = `Mermaid: ${error.message || error}`;
+      }
+    }
+  } catch (error) {
+    for (const code of blocks) code.parentElement.title = error.message;
+  }
+}
+
 function _renderMarkdownFilePreview(container, text) {
   container.classList.remove('fv-web-preview-body');
   container.innerHTML = '';
@@ -19069,6 +19127,7 @@ function _renderMarkdownFilePreview(container, text) {
   preview.className = 'fv-md-preview';
   preview.innerHTML = renderAssistantMarkdown(text || '');
   container.appendChild(preview);
+  void _renderMarkdownDiagrams(preview);
 }
 
 function _renderTooLargeFilePreview(container, path, size) {

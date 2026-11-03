@@ -209,6 +209,12 @@ test('left and right browse recent routes from an empty composer', async ({ page
   await composer.press('ArrowRight');
   await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex');
   await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+
+  await composer.press('Escape');
+  await expect(page.locator('#autocomplete')).not.toHaveClass(/open/);
+  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+  await expect(composer).toHaveValue('');
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('squid_sticky_chip')).topic)).toBe('other');
 });
 
 test('left opens route autocomplete when the composer contains only a route', async ({ page }) => {
