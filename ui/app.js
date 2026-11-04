@@ -1833,17 +1833,33 @@ chipFilterBtn.addEventListener('click', async e => {
 
 chipSearchBtn.addEventListener('click', async e => {
   e.stopPropagation();
-  if (searchActive) {
+  if (searchActive || searchPanelOpen) {
     clearSearch();
+    input.focus();
     return;
   }
-  if (input.value.trimStart().startsWith('/s')) return;
-  const parsed = parseInput(input.value);
-  const keywords = input.value.trimStart().startsWith('#') ? parsed.message.trim() : input.value.trim();
   let scope = activeHistoryFilterScope();
   if (!scope) scope = routeScopeText(await resolveEffectiveComposerRoute());
-  const command = keywords ? `/s ${scope} ${keywords}` : `/s ${scope} `;
-  stashComposerAndEdit(command);
+  searchPanelOpen = true;
+  document.getElementById('search-bar-scope').value = scope || '#all';
+  const draft = input.value.trim();
+  document.getElementById('search-bar-keywords').value = draft.startsWith('/') ? '' : (draft.startsWith('#') ? parseInput(draft).message.trim() : draft);
+  document.getElementById('search-bar').classList.add('active');
+  updateSearchButton();
+  document.getElementById('search-bar-keywords').focus();
+  try {
+    const [topics, agents] = await Promise.all([_acTopics(), _acAgents()]);
+    const values = new Set(['#all', scope]);
+    for (const topic of topics) values.add(`#${topic.name}`);
+    for (const agent of agents) {
+      for (const suffix of ['', '!', '*']) values.add(`@${agent.name}${suffix}`);
+    }
+    document.getElementById('search-scope-options').replaceChildren(...[...values].filter(Boolean).map(value => {
+      const option = document.createElement('option');
+      option.value = value;
+      return option;
+    }));
+  } catch { /* Typed scopes remain available when suggestions cannot load. */ }
 });
 
 chipClearBtn.addEventListener('click', e => {
@@ -2114,8 +2130,8 @@ function updateFilterButton() {
 }
 
 function updateSearchButton() {
-  chipSearchBtn?.classList.toggle('active', !!searchActive);
-  chipSearchBtn?.setAttribute('aria-pressed', searchActive ? 'true' : 'false');
+  chipSearchBtn?.classList.toggle('active', searchActive || searchPanelOpen);
+  chipSearchBtn?.setAttribute('aria-pressed', (searchActive || searchPanelOpen) ? 'true' : 'false');
 }
 
 function hasHistoryFilterScope() {
@@ -2180,11 +2196,13 @@ function filterByFlowRoute(route, routeParts = null) {
 }
 
 function applyHistoryFilter(filter) {
-  if (searchActive) {
+  if (searchActive || searchPanelOpen) {
     searchActive = false;
     searchState = null;
     searchLoading = false;
+    searchPanelOpen = false;
     document.getElementById('search-bar').classList.remove('active');
+    updateSearchButton();
     document.querySelectorAll('.search-result-item, #messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
   }
   reloadHistory(filter);
@@ -2194,6 +2212,7 @@ function clearFilter() {
   if (searchActive && searchState) {
     searchState = { ...searchState, flow_route: null, topic: null, topicSubtree: false, agent: null, adhoc: null, explicitAll: false };
     persistSearchFilterScope(searchState);
+    _updateSearchScopeInput();
     searchLoading = false;
     document.querySelectorAll('.search-result-item').forEach(el => el.remove());
     document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
@@ -2294,6 +2313,7 @@ function setLiveGroupHidden(hidden) {
 }
 
 function reloadHistory(filter = {}) {
+  if (searchPanelOpen && !searchActive) clearSearch();
   document.getElementById('status-jump-notice')?.remove();
   historyFilter = filter;
   historyOffset = 0;
@@ -2442,6 +2462,7 @@ function removeFilterSegment(kind) {
   if (searchActive && searchState) {
     searchState = next;
     persistSearchFilterScope(searchState);
+    _updateSearchScopeInput();
     searchLoading = false;
     document.querySelectorAll('.search-result-item, #messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
     _updateFilterBadge();
@@ -2522,6 +2543,7 @@ function reconcilePendingBubble(msgId, preferredBubble) {
 }
 
 // ── search state ──────────────────────────────────────────────────────────────
+let searchPanelOpen = false;
 let searchActive = false;
 let searchState = null;  // { topic, agent, adhoc, explicitAll, keywords }
 let searchLoading = false;
@@ -2893,6 +2915,7 @@ async function jumpToStatusMessage(msgId) {
     searchActive = false;
     searchState = null;
     searchLoading = false;
+    searchPanelOpen = false;
     document.getElementById('search-bar').classList.remove('active');
     updateSearchButton();
     promptOnlyHistory = false;
@@ -3001,6 +3024,7 @@ async function jumpToMessage(msgId, flowRunId = null, clearForJump = null) {
       searchActive = false;
       searchState = null;
       searchLoading = false;
+      searchPanelOpen = false;
       document.getElementById('search-bar').classList.remove('active');
       updateSearchButton();
     }
@@ -3107,17 +3131,25 @@ function parseSearchInput(text) {
   return { flow_route: null, topic: null, agent: null, adhoc: null, explicitAll: false, explicitScope: false, keywords: rest };
 }
 
+function _updateSearchScopeInput() {
+  const scopeInput = document.getElementById('search-bar-scope');
+  scopeInput.value = searchScopeText(searchState) || '#all';
+  scopeInput.removeAttribute('aria-invalid');
+}
+
 function _updateSearchBar() {
   const bar = document.getElementById('search-bar');
   const kwEl = document.getElementById('search-bar-keywords');
 
   if (!searchActive || !searchState) {
-    bar.classList.remove('active');
+    bar.classList.toggle('active', searchPanelOpen);
     updateSearchButton();
     return;
   }
 
-  kwEl.textContent = searchState.keywords;
+  searchPanelOpen = true;
+  kwEl.value = searchState.keywords;
+  _updateSearchScopeInput();
   bar.classList.add('active');
   updateSearchButton();
   _updateFilterBadge();
@@ -3229,11 +3261,14 @@ function startSearch(rawArgs) {
 }
 
 function clearSearch() {
+  const hadSearch = searchActive;
+  searchPanelOpen = false;
   searchActive = false;
   searchState = null;
   searchLoading = false;
   document.getElementById('search-bar').classList.remove('active');
   updateSearchButton();
+  if (!hadSearch) return;
 
   document.querySelectorAll('.search-result-item, .date-divider').forEach(el => el.remove());
   document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
@@ -4632,7 +4667,7 @@ function closeEscSurfaces() {
   // Floating popup
   if (procStatusPopup?.classList.contains('open')) { procStatusPopup.classList.remove('open'); return true; }
   // Search overlay
-  if (searchActive) { clearSearch(); return true; }
+  if (searchActive || searchPanelOpen) { clearSearch(); input.focus(); return true; }
   // Inline panels (below search, above composer)
   if (pinPanel.classList.contains('open')) { closePinPanel({ restoreFocus: true }); return true; }
   if (authPanel.classList.contains('open')) { closeAuthPanel(); return true; }
@@ -17523,30 +17558,26 @@ function editActiveFilter() {
   stashComposerAndEdit(formatFilterCommand(active));
 }
 
-function formatSearchCommand(state) {
-  let cmd = '/s ';
-  if (state.flow_route) {
-    cmd += state.flow_route + ' ';
-  } else if (state.explicitAll || state.topic) {
-    cmd += state.explicitAll ? '#all' : '#' + state.topic + (state.topicSubtree ? '*' : '');
-    if (state.agent) cmd += '@' + state.agent;
-    if (state.agent && state.adhoc === true) cmd += '!';
-    else if (state.agent && state.adhoc === null) cmd += '*';
-    cmd += ' ';
-  } else if (state.agent) {
-    cmd += '@' + state.agent;
-    if (state.adhoc === true) cmd += '!';
-    else if (state.adhoc === null) cmd += '*';
-    cmd += ' ';
-  }
-  return (cmd + state.keywords).trim();
+for (const id of ['search-bar-scope', 'search-bar-keywords']) {
+  document.getElementById(id).addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    const scopeInput = document.getElementById('search-bar-scope');
+    const scope = scopeInput.value.trim();
+    const parsedScope = parseScopeInput(scope, { allowAll: true });
+    if (parsedScope === null) {
+      scopeInput.setAttribute('aria-invalid', 'true');
+      showCmdFeedback('Search scope: use #topic, @agent, @agent! (ad hoc), @agent* (both), a route, or #all.');
+      scopeInput.focus();
+      return;
+    }
+    scopeInput.removeAttribute('aria-invalid');
+    const keywords = document.getElementById('search-bar-keywords');
+    if (!keywords.value.trim()) { keywords.focus(); return; }
+    startSearch(`${parsedScope ? searchScopeText(parsedScope) + ' ' : ''}${keywords.value.trim()}`);
+  });
 }
-
-document.getElementById('search-bar-keywords').addEventListener('click', () => {
-  if (!searchActive || !searchState) return;
-  const cmd = formatSearchCommand(searchState);
-  stashComposerAndEdit(cmd);
-});
+document.getElementById('search-bar-scope').addEventListener('input', e => e.target.removeAttribute('aria-invalid'));
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && closeEscSurfaces()) {
     e.preventDefault();

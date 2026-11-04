@@ -5557,11 +5557,28 @@ button {
 /* Search bar */
 #search-bar {
   gap: 0.4rem;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  flex-wrap: nowrap;
 }
 #search-bar.active { display: flex; }
 .search-icon { color: #808090; font-size: 1.1em; line-height: 1; }
-#search-bar-keywords { color: var(--text); flex: 1; }
+#search-bar input {
+  min-width: 0;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 0.35rem 0.2rem;
+  font: inherit;
+  text-overflow: ellipsis;
+}
+#search-bar input:focus { outline: none; border-color: var(--accent); }
+#search-bar-scope { flex: 0 1 30%; max-width: 15rem; }
+#search-bar-keywords { flex: 1 1 70%; }
 #search-bar-clear {
+  flex-shrink: 0;
   background: none;
   border: none;
   color: #505060;
