@@ -1,3 +1,9 @@
+let shoreEnabled = false;
+const featureFlags = fetch('/config/features', { cache: 'no-store' })
+  .then(res => res.ok ? res.json() : {})
+  .then(flags => { shoreEnabled = flags.shore === true; })
+  .catch(() => {});
+
 
 const messages     = document.getElementById('messages');
 const form         = document.getElementById('form');
@@ -708,6 +714,8 @@ function initSettings() {
 /** 'configured' | 'host_only' (Shore endpoints are loopback-only, so a
  * tailnet/LAN browser can't pair or list devices) | 'unavailable'. */
 async function _shoreStatus() {
+  await featureFlags;
+  if (!shoreEnabled) return 'unavailable';
   try {
     const res = await fetch('/shore/devices');
     if (res.ok) return 'configured';
@@ -750,7 +758,9 @@ async function _pollPairingRequests() {
   if (document.visibilityState === 'visible') _pairingWatchTimer = setTimeout(_pollPairingRequests, delay);
 }
 
-function startPairingRequestWatcher() {
+async function startPairingRequestWatcher() {
+  await featureFlags;
+  if (!shoreEnabled) return;
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && !_pairingWatchTimer) _pollPairingRequests();
   });
@@ -923,7 +933,7 @@ async function openConnectModal(preferredTab) {
     asOption.textContent = shoreHostOnly ? SHORE_HOST_ONLY_MSG
       : "AgentSquid isn't set up on this host yet.\nRun `agentsquid login` in a terminal, then restart squid.";
     neither.appendChild(tsOption);
-    neither.appendChild(asOption);
+    if (shoreEnabled) neither.appendChild(asOption);
     box.appendChild(neither);
     modal.appendChild(box);
     document.body.appendChild(modal);
@@ -3745,7 +3755,7 @@ function parseCommand(message) {
   if (/^status$/i.test(t))       return { command: 'status' };
   if (/^help$/i.test(t))         return { command: 'help' };
   if (/^remote$/i.test(t))       return { command: 'remote' };
-  if (/^pair$/i.test(t))         return { command: 'pair' };
+  if (shoreEnabled && /^pair$/i.test(t))         return { command: 'pair' };
   const mf = t.match(/^(?:f|filter)(?:\s+([\s\S]*))?$/i);
   if (mf) {
     const args = (mf[1] || '').trim();
@@ -4124,6 +4134,8 @@ function resizeComposer() {
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
+  // Resolve command availability before parseInput/parseCommand classify /pair.
+  await featureFlags;
   editingExpandedSlug = false;
   expandedSlugEditToken++;
   const text = input.value.trim();
@@ -14734,9 +14746,9 @@ async function updateAutocomplete() {
     const slashIdx = val.lastIndexOf('/');
     const before   = val.slice(0, slashIdx);           // prefix to preserve (#topic@alias )
     const partial  = msgPart.slice(1).toLowerCase();   // typed after /
-    const matched  = SQUID_COMMANDS.filter(c =>
+    const matched  = SQUID_COMMANDS.filter(c => (c.name !== 'pair' || shoreEnabled) && (
       c.name.toLowerCase().startsWith(partial) ||
-      (c.alias && c.alias.toLowerCase().startsWith(partial))
+      (c.alias && c.alias.toLowerCase().startsWith(partial)))
     );
     if (matched.length) {
       _acRender(matched.map(c => ({

@@ -67,6 +67,13 @@ def realtime_heartbeat_seconds(config: dict) -> int:
     return _realtime_int(config, "heartbeat_seconds", 20)
 
 
+def shore_enabled(config: dict) -> bool:
+    value = _config_section(config, "shore").get("enabled", False)
+    if not isinstance(value, bool):
+        raise ValueError("shore.enabled must be a boolean")
+    return value
+
+
 def shore_identity_dir(config: dict) -> Path:
     shore = _config_section(config, "shore")
     value = shore.get("identity_dir", "~/.squid/shore")

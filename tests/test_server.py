@@ -2602,11 +2602,16 @@ def test_session_log_endpoint_includes_squid_turn_boundaries(tmp_path, monkeypat
     assert [t["turn_index"] for t in body["turns"]] == [1, 2]
 
 
+@pytest.fixture
+def shore_enabled_for_test(monkeypatch):
+    monkeypatch.setitem(server._cfg, "shore", {"enabled": True})
+
+
 def _loopback_client():
     return TestClient(server.app, client=("127.0.0.1", 12345))
 
 
-def test_shore_endpoints_require_loopback(monkeypatch):
+def test_shore_endpoints_require_loopback(monkeypatch, shore_enabled_for_test):
     monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=None))
     client = TestClient(server.app)  # default TestClient host is not loopback
     assert client.get("/shore/devices").status_code == 403
@@ -2618,7 +2623,7 @@ def test_shore_endpoints_require_loopback(monkeypatch):
     assert client.post("/shore/devices/revoke", json={"device_id": "x"}).status_code == 403
 
 
-def test_shore_endpoints_report_not_configured_when_shore_is_unset(monkeypatch):
+def test_shore_endpoints_report_not_configured_when_shore_is_unset(monkeypatch, shore_enabled_for_test):
     monkeypatch.setattr(server, "_shore_connection", None)
     client = _loopback_client()
     assert client.get("/shore/devices").status_code == 400
@@ -2630,7 +2635,7 @@ def test_shore_endpoints_report_not_configured_when_shore_is_unset(monkeypatch):
     assert client.post("/shore/devices/revoke", json={"device_id": "x"}).status_code == 400
 
 
-def test_shore_pairing_begin_and_status_round_trip(monkeypatch):
+def test_shore_pairing_begin_and_status_round_trip(monkeypatch, shore_enabled_for_test):
     channel = SimpleNamespace(
         begin_pairing=lambda ceremony_id: {"code": "ABCDEF", "offer": {"ceremony_id": ceremony_id}, "expires_at": 123.0},
         pairing_status=lambda ceremony_id: {"status": "pending"},
@@ -2657,7 +2662,7 @@ def test_shore_pairing_begin_and_status_round_trip(monkeypatch):
     assert status.json() == {"status": "pending"}
 
 
-def test_shore_pairing_begin_rejects_invalid_client_version_before_starting_ceremony(monkeypatch):
+def test_shore_pairing_begin_rejects_invalid_client_version_before_starting_ceremony(monkeypatch, shore_enabled_for_test):
     started = []
     channel = SimpleNamespace(begin_pairing=lambda ceremony_id: started.append(ceremony_id))
     monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=channel))
@@ -2674,7 +2679,7 @@ def test_shore_pairing_begin_rejects_invalid_client_version_before_starting_cere
     assert started == []
 
 
-def test_shore_pairing_begin_surfaces_protocol_errors(monkeypatch):
+def test_shore_pairing_begin_surfaces_protocol_errors(monkeypatch, shore_enabled_for_test):
     from agent.shore_crypto import ShoreProtocolError
 
     def raise_rate_limited(_ceremony_id):
@@ -2691,7 +2696,7 @@ def test_shore_pairing_begin_surfaces_protocol_errors(monkeypatch):
     assert res.json() == {"error": "pairing_rate_limited"}
 
 
-def test_shore_pairing_request_requires_local_approval(monkeypatch):
+def test_shore_pairing_request_requires_local_approval(monkeypatch, shore_enabled_for_test):
     approved, rejected = [], []
     async def approve(request_id, verification_code):
         approved.append((request_id, verification_code))
@@ -2714,7 +2719,7 @@ def test_shore_pairing_request_requires_local_approval(monkeypatch):
     assert rejected == ["request-2"]
 
 
-def test_shore_pairing_reject_is_loopback_only(monkeypatch):
+def test_shore_pairing_reject_is_loopback_only(monkeypatch, shore_enabled_for_test):
     monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(reject_pairing_request=lambda request_id: True))
     # Even over a loopback socket, a proxied (e.g. tailscale serve) request is remote.
     res = _loopback_client().post("/shore/pairing/requests/reject", json={"request_id": "request-1"},
@@ -2722,7 +2727,7 @@ def test_shore_pairing_reject_is_loopback_only(monkeypatch):
     assert res.status_code == 403
 
 
-def test_shore_devices_list_and_revoke(monkeypatch):
+def test_shore_devices_list_and_revoke(monkeypatch, shore_enabled_for_test):
     device = SimpleNamespace(device_id="018f1f25-8614-7e41-8c5c-fc0b6eefad62", key_epoch=1, capabilities=("dashboard.read.v1",), approved_at=1_700_000_000_000)
     channel = SimpleNamespace(list_devices=lambda: [device], revoke_device=lambda device_id: device_id == device.device_id)
     async def revoke_device(device_id):

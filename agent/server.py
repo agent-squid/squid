@@ -51,6 +51,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .features import shore_enabled
 from .auth_sessions import AUTH_SESSION_MODES
 from .config import (
     CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH,
@@ -421,7 +422,8 @@ async def _lifespan(_app: FastAPI):
     shore_task = None
     try:
         from .shore_transport import configured_host_connection
-        shore_connection = await asyncio.to_thread(configured_host_connection, shore_identity_dir(_cfg))
+        if shore_enabled():
+            shore_connection = await asyncio.to_thread(configured_host_connection, shore_identity_dir(_cfg))
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         log.error("Shore host connection disabled: %s", exc)
     _shore_connection = shore_connection
@@ -472,6 +474,22 @@ async def _cancel_background_task(task: "asyncio.Task | None") -> None:
 
 
 app = FastAPI(title="Squid", version=SQUID_VERSION, lifespan=_lifespan)
+
+
+@app.middleware("http")
+async def shore_feature_gate(request: Request, call_next):
+    if request.url.path.startswith("/shore/") and not shore_enabled():
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await call_next(request)
+
+
+@app.get("/config/features")
+async def get_features(request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin configuration reads are not allowed"}, status_code=403)
+    return JSONResponse({"shore": shore_enabled()}, headers={"Cache-Control": "no-store"})
+
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -713,6 +731,8 @@ def _validate_config_content(content: str) -> dict:
             raise ValueError("agent.shell_timeout must be a positive integer")
 
     realtime_transport(parsed)
+    from .config import shore_enabled as validate_shore_enabled
+    validate_shore_enabled(parsed)
     shore_identity_dir(parsed)
     from .watch_config import load_watch_configuration
     load_watch_configuration(parsed)
@@ -3134,7 +3154,7 @@ def _shore_pair_fragment(offer: dict, code: str) -> str:
     return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
-@app.post("/shore/pairing/begin")
+@app.post("/shore/pairing/begin", include_in_schema=shore_enabled())
 async def shore_pairing_begin(request: Request):
     direct_host = request.client.host if request.client else None
     if not _request_is_loopback(request.headers, direct_host):
@@ -3167,7 +3187,7 @@ async def shore_pairing_begin(request: Request):
     })
 
 
-@app.get("/shore/pairing/status")
+@app.get("/shore/pairing/status", include_in_schema=shore_enabled())
 async def shore_pairing_status(request: Request, ceremony_id: str):
     direct_host = request.client.host if request.client else None
     if not _request_is_loopback(request.headers, direct_host):
@@ -3178,7 +3198,7 @@ async def shore_pairing_status(request: Request, ceremony_id: str):
     return JSONResponse(status)
 
 
-@app.get("/shore/pairing/requests")
+@app.get("/shore/pairing/requests", include_in_schema=shore_enabled())
 async def shore_pairing_requests(request: Request):
     direct_host = request.client.host if request.client else None
     if not _request_is_loopback(request.headers, direct_host):
@@ -3188,7 +3208,7 @@ async def shore_pairing_requests(request: Request):
     return JSONResponse({"requests": _shore_connection.list_pairing_requests()})
 
 
-@app.post("/shore/pairing/requests/approve")
+@app.post("/shore/pairing/requests/approve", include_in_schema=shore_enabled())
 async def shore_pairing_request_approve(request: Request, req: ShoreApprovePairingRequest):
     direct_host = request.client.host if request.client else None
     if not _request_is_loopback(request.headers, direct_host):
@@ -3203,7 +3223,7 @@ async def shore_pairing_request_approve(request: Request, req: ShoreApprovePairi
     return JSONResponse({"ok": True})
 
 
-@app.post("/shore/pairing/requests/reject")
+@app.post("/shore/pairing/requests/reject", include_in_schema=shore_enabled())
 async def shore_pairing_request_reject(request: Request, req: ShoreRejectPairingRequest):
     direct_host = request.client.host if request.client else None
     if not _request_is_loopback(request.headers, direct_host):
@@ -3213,7 +3233,7 @@ async def shore_pairing_request_reject(request: Request, req: ShoreRejectPairing
     return JSONResponse({"ok": _shore_connection.reject_pairing_request(req.request_id)})
 
 
-@app.get("/shore/devices")
+@app.get("/shore/devices", include_in_schema=shore_enabled())
 async def shore_list_devices(request: Request):
     direct_host = request.client.host if request.client else None
     if not _request_is_loopback(request.headers, direct_host):
@@ -3232,7 +3252,7 @@ async def shore_list_devices(request: Request):
     ]})
 
 
-@app.post("/shore/devices/revoke")
+@app.post("/shore/devices/revoke", include_in_schema=shore_enabled())
 async def shore_revoke_device(request: Request, req: ShoreRevokeDeviceRequest):
     direct_host = request.client.host if request.client else None
     if not _request_is_loopback(request.headers, direct_host):
@@ -5071,17 +5091,19 @@ def _request_http_shutdown(host: str, port: int) -> Optional[int]:
 
 
 def _print_lifecycle_usage() -> None:
+    shore_commands = "|login|pair" if shore_enabled() else ""
     print(
-        "usage: agentsquid [--fg|--reload|start|stop|restart|status|login|pair]\n\n"
+        f"usage: agentsquid [--fg|--reload|start|stop|restart|status{shore_commands}]\n\n"
         "commands:\n"
         "  start     run agentsquid in the background\n"
         "  stop      stop the background agentsquid process\n"
         "  restart   stop then start the background process\n"
         "  status    show whether agentsquid is running\n"
-        "  login     register this machine as your Shore host\n"
-        "  pair      show a QR code to pair a browser (--requests to approve\n"
-        "            pairing requests started from a browser)\n\n"
-        "bare agentsquid runs in the foreground; Ctrl+C stops it."
+        + ("  login     register this machine as your Shore host\n"
+           "  pair      pair a browser (--requests to approve pairing requests)\n"
+           if shore_enabled() else "")
+        + "\n"
+        + "bare agentsquid runs in the foreground; Ctrl+C stops it."
     )
 
 
@@ -5251,6 +5273,9 @@ def main():
     if args and args[0] in {"watch", "tools"}:
         from .watch_cli import main as watch_main
         sys.exit(watch_main(args))
+    if args and args[0] in {"login", "pair"} and not shore_enabled():
+        print(f"Unknown command: {args[0]}", file=sys.stderr)
+        sys.exit(2)
     if args and args[0] == "login":
         from .shore import login
         sys.exit(login(args[1:]))
