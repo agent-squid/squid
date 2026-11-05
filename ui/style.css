@@ -1300,6 +1300,11 @@ body {
   margin: 0.45rem 0.7rem;
   color: var(--text-dim);
 }
+.gitdiff-file-list {
+  max-height: min(28rem, 60vh);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
 .gitdiff-file-row {
   border-top: 1px solid var(--surface-3); display: flex; flex-wrap: wrap; align-items: center;
   margin-left: 0.6rem; width: calc(100% - 0.6rem); box-sizing: border-box;
@@ -5556,18 +5561,19 @@ button {
 
 /* Search bar */
 #search-bar {
+  border-color: var(--border);
   gap: 0.4rem;
+  padding: 0.25rem 0.75rem;
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
   flex-wrap: nowrap;
 }
 #search-bar.active { display: flex; }
-.search-icon { color: #808090; font-size: 1.1em; line-height: 1; }
 #search-bar input {
   min-width: 0;
   color: var(--text);
-  background: transparent;
+  background: var(--surface-2);
   border: 1px solid transparent;
   border-radius: 3px;
   padding: 0.35rem 0.2rem;
@@ -5575,8 +5581,41 @@ button {
   text-overflow: ellipsis;
 }
 #search-bar input:focus { outline: none; border-color: var(--accent); }
-#search-bar-scope { flex: 0 1 30%; max-width: 15rem; }
+#search-scope-picker { position: relative; display: flex; flex: 0 1 30%; min-width: 0; max-width: 15rem; }
+#search-bar-scope { width: 100%; flex: 1; }
+#search-scope-toggle { flex-shrink: 0; border: 0; background: transparent; color: var(--text-muted); padding: 0 0.25rem; cursor: pointer; }
+#search-scope-options {
+  position: absolute;
+  bottom: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 30;
+  min-width: 100%;
+  width: max-content;
+  max-width: min(22rem, 75vw);
+  max-height: 15rem;
+  overflow: auto;
+  padding: 0.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px #0006;
+}
+#search-scope-options button { display: block; width: 100%; padding: 0.5rem; border: 0; background: transparent; color: var(--text); text-align: left; font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+#search-scope-options button:hover, #search-scope-options button:focus { background: var(--border); outline: 1px solid var(--accent); }
 #search-bar-keywords { flex: 1 1 70%; }
+#search-bar-submit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+#search-bar-submit:hover, #search-bar-submit:focus-visible { border-color: var(--accent); color: var(--accent); }
 #search-bar-clear {
   flex-shrink: 0;
   background: none;

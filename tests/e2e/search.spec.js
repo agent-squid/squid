@@ -26,7 +26,7 @@ test('explicit #all search shows editable scope and keywords', async ({ page }) 
   await expect(page.locator('#search-bar-keywords')).toHaveValue('claude login');
 });
 
-test('search and filter tags align and search icon highlights while searching', async ({ page }) => {
+test('search inputs have breathing room and the composer action reflects applied search', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
 
@@ -36,18 +36,26 @@ test('search and filter tags align and search icon highlights while searching', 
   await expect(page.locator('#filter-badge')).toHaveClass(/active/);
   await expect(page.locator('#search-bar')).toHaveClass(/active/);
   await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
-  await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
+  await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-expanded', 'true');
 
-  const heights = await page.evaluate(() => ({
-    filter: document.querySelector('#filter-badge').getBoundingClientRect().height,
-    search: document.querySelector('#search-bar').getBoundingClientRect().height,
-  }));
-  expect(Math.abs(heights.filter - heights.search)).toBeLessThanOrEqual(1);
+  const spacing = await page.evaluate(() => {
+    const bar = document.querySelector('#search-bar').getBoundingClientRect();
+    return [...document.querySelectorAll('#search-bar input')].map(input => {
+      const rect = input.getBoundingClientRect();
+      return { top: rect.top - bar.top, bottom: bar.bottom - rect.bottom };
+    });
+  });
+  for (const { top, bottom } of spacing) {
+    expect(top).toBeGreaterThanOrEqual(4);
+    expect(bottom).toBeGreaterThanOrEqual(4);
+    expect(Math.abs(top - bottom)).toBeLessThanOrEqual(1);
+  }
 
   await page.locator('#chip-search-btn').click();
   await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
   await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
-  await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('#input')).not.toHaveValue(/\/s #all claude login/);
 });
 
@@ -609,7 +617,7 @@ test('search scope validates separately from keywords and supports routes and al
   await page.locator('#chip-search-btn').click();
   await page.locator('#search-bar-keywords').press('Escape');
   await expect(page.locator('#search-bar')).not.toBeVisible();
-  await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-expanded', 'false');
 });
 
 for (const clearAll of [false, true]) {
@@ -621,6 +629,10 @@ for (const clearAll of [false, true]) {
       return route.fulfill({ json: { items: [] } });
     });
     await page.goto('/');
+    if (clearAll) {
+      await page.fill('#input', '/f #squid@claude');
+      await page.locator('#input').press('Enter');
+    }
     await page.fill('#input', '/s #squid@claude needle');
     await page.locator('#input').press('Enter');
     await page.fill('#search-bar-keywords', 'updated keywords');
@@ -689,7 +701,7 @@ test('blank scope inherits the active filter and a filter change closes an unsub
   await page.fill('#input', '/f #other');
   await page.locator('#input').press('Enter');
   await expect(page.locator('#search-bar')).not.toBeVisible();
-  await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-expanded', 'false');
   await page.locator('#chip-search-btn').click();
   await expect(page.locator('#search-bar-scope')).toHaveValue('#other');
 });
@@ -703,6 +715,330 @@ for (const selector of ['#chip-filter-btn', '.filter-scope-agent .filter-scope-r
     await page.locator('#chip-search-btn').click();
     await page.locator(selector).click();
     await expect(page.locator('#search-bar')).not.toBeVisible();
-    await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-expanded', 'false');
+  });
+}
+
+test('scope dropdown always offers Search all and only expands matches when typing', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/topics', r => r.fulfill({ json: [{ name: 'squid' }, { name: 'other' }] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [{ name: 'claude', backend: 'claude' }] }));
+  const urls = [];
+  await page.route('**/search**', route => {
+    urls.push(new URL(route.request().url()));
+    return route.fulfill({ json: { items: [] } });
+  });
+  await page.goto('/');
+  await page.fill('#input', '/f #squid');
+  await page.locator('#input').press('Enter');
+  await page.locator('#chip-search-btn').click();
+  await page.locator('#search-scope-toggle').click();
+  await expect(page.locator('#search-scope-options')).toBeVisible();
+  await expect(page.locator('#search-scope-options [role="option"]')).toHaveText(['Search all', 'This topic · #squid']);
+  await page.fill('#search-bar-scope', '#oth');
+  await expect(page.locator('#search-scope-options [role="option"]')).toHaveText(['Search all', '#other']);
+  await page.locator('#search-scope-options').getByRole('option', { name: 'Search all', exact: true }).click();
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+  await expect(page.locator('#search-scope-options')).not.toBeVisible();
+  await page.fill('#search-bar-keywords', 'needle');
+  await page.locator('#search-bar-keywords').press('Enter');
+  await expect.poll(() => urls.length).toBe(1);
+  expect(urls[0].searchParams.has('topic')).toBe(false);
+  expect(urls[0].searchParams.get('q')).toBe('needle');
+});
+
+test('mobile scope dropdown supports keyboard selection and dismissal', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await mockBackend(page);
+  await page.goto('/');
+  await page.locator('#chip-search-btn').click();
+  await page.locator('#search-bar-scope').click();
+  await expect(page.getByRole('option', { name: 'Search all', exact: true })).toBeVisible();
+  await page.locator('#search-bar-scope').press('ArrowDown');
+  await expect(page.getByRole('option', { name: 'Search all', exact: true })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+  await expect(page.locator('#search-bar-keywords')).toBeFocused();
+  await page.locator('#search-scope-toggle').click();
+  await page.locator('#search-scope-toggle').press('Escape');
+  await expect(page.locator('#search-scope-options')).not.toBeVisible();
+  await expect(page.locator('#search-bar')).toBeVisible();
+});
+
+for (const keywords of ['#other needle', '@claude needle']) {
+  test(`blank scope preserves literal keywords: ${keywords}`, async ({ page }) => {
+    await mockBackend(page);
+    const urls = [];
+    await page.route('**/search**', route => { urls.push(new URL(route.request().url())); return route.fulfill({ json: { items: [] } }); });
+    await page.goto('/');
+    await page.fill('#input', '/f #squid');
+    await page.locator('#input').press('Enter');
+    await page.locator('#chip-search-btn').click();
+    await page.fill('#search-bar-scope', '');
+    await page.fill('#search-bar-keywords', keywords);
+    await page.locator('#search-bar-keywords').press('Enter');
+    await expect.poll(() => urls.at(-1)?.searchParams.get('q')).toBe(keywords);
+    expect(urls.at(-1).searchParams.get('topic')).toBe('squid');
+    expect(urls.at(-1).searchParams.has('agent')).toBe(false);
+  });
+}
+
+test('related scopes cover parent topics and agent lanes without duplicates', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.fill('#input', '/f #squid.ux@claude!');
+  await page.locator('#input').press('Enter');
+  await page.locator('#chip-search-btn').click();
+  await page.locator('#search-scope-toggle').click();
+  const options = page.locator('#search-scope-options [role="option"]');
+  const values = await options.evaluateAll(nodes => nodes.map(n => n.dataset.scope));
+  expect(values).toEqual(['#all', '#squid.ux@claude', '#squid.ux@claude!', '#squid.ux', '#squid*', '@claude', '@claude!', '@claude*']);
+  expect(new Set(values).size).toBe(values.length);
+  await page.getByRole('option', { name: 'Route ad hoc · #squid.ux@claude!', exact: true }).click();
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#squid.ux@claude!');
+});
+
+test('flow route suggestions retain the flow without agent permutations', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.fill('#input', '/f #squid@codex>@revu');
+  await page.locator('#input').press('Enter');
+  await page.locator('#chip-search-btn').click();
+  await page.locator('#search-scope-toggle').click();
+  await expect(page.locator('#search-scope-options [role="option"]')).toHaveText(['Search all', 'Route · #squid@codex>@revu', 'This topic · #squid']);
+});
+
+test('delayed suggestions keep the highlighted option focused', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.locator('#chip-search-btn').click();
+  await page.evaluate(() => {
+    _acTopics = () => new Promise(resolve => { window.finishSearchTopics = resolve; });
+    _acAgents = async () => [];
+  });
+  await page.fill('#search-bar-scope', '#oth');
+  await page.locator('#search-bar-scope').press('ArrowDown');
+  const all = page.getByRole('option', { name: 'Search all', exact: true });
+  await expect(all).toBeFocused();
+  await page.evaluate(() => window.finishSearchTopics([{ name: 'other' }]));
+  await expect(page.getByRole('option', { name: '#other', exact: true })).toBeVisible();
+  await expect(all).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+  await expect(page.locator('#search-bar-keywords')).toBeFocused();
+});
+
+test('a later command search uses its own route for related options', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.fill('#input', '/f #first@claude');
+  await page.locator('#input').press('Enter');
+  await page.locator('#chip-search-btn').click();
+  await page.locator('#search-bar-clear').click();
+  await page.fill('#input', '/s #second@codex! needle');
+  await page.locator('#input').press('Enter');
+  await page.locator('#search-scope-toggle').click();
+  await expect(page.getByRole('option', { name: 'Route ad hoc · #second@codex!', exact: true })).toBeVisible();
+  await expect(page.locator('#search-scope-options')).not.toContainText('#first');
+});
+
+test('Search all keeps the original route choices available for narrowing again', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.fill('#input', '/f #squid@claude');
+  await page.locator('#input').press('Enter');
+  await page.locator('#chip-search-btn').click();
+  await page.locator('#search-scope-toggle').click();
+  await page.getByRole('option', { name: 'Search all', exact: true }).click();
+  await page.fill('#search-bar-keywords', 'needle');
+  await page.locator('#search-bar-keywords').press('Enter');
+  await page.locator('#search-scope-toggle').click();
+  await expect(page.getByRole('option', { name: 'Route · #squid@claude', exact: true })).toBeVisible();
+});
+
+for (const width of [1280, 375]) {
+  test(`search button matches the composer icon and submits at width ${width}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 812 });
+    await mockBackend(page);
+    const urls = [];
+    await page.route('**/search**', route => { urls.push(new URL(route.request().url())); return route.fulfill({ json: { items: [] } }); });
+    await page.goto('/');
+    await page.fill('#input', 'unfinished draft');
+    await page.locator('#chip-search-btn').click();
+    const button = page.getByRole('button', { name: 'Run search', exact: true });
+    await expect(button).toBeVisible();
+    expect(await button.locator('svg').getAttribute('viewBox')).toBe(await page.locator('#chip-search-btn svg').getAttribute('viewBox'));
+    expect(await button.locator('path').getAttribute('d')).toBe(await page.locator('#chip-search-btn path').getAttribute('d'));
+    await page.fill('#search-bar-scope', '#all');
+    await page.fill('#search-bar-keywords', 'needle');
+    await button.click();
+    await expect.poll(() => urls.at(-1)?.searchParams.get('q')).toBe('needle');
+    await expect(page.locator('#input')).toHaveValue('unfinished draft');
+    const layout = await page.evaluate(() => {
+      const scope = document.getElementById('search-bar-scope').getBoundingClientRect();
+      const button = document.getElementById('search-bar-submit').getBoundingClientRect();
+      return { aligned: Math.abs((scope.top + scope.bottom) / 2 - (button.top + button.bottom) / 2) < 1, fits: document.documentElement.scrollWidth <= innerWidth };
+    });
+    expect(layout).toEqual({ aligned: true, fits: true });
+    await page.fill('#search-bar-scope', 'invalid');
+    await button.click();
+    await expect(page.locator('#search-bar-scope')).toHaveAttribute('aria-invalid', 'true');
+    expect(urls).toHaveLength(1);
+  });
+}
+
+test('opening search keeps the action neutral until submission while the bar stays neutral', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.fill('#input', '/f #squid');
+  await page.locator('#input').press('Enter');
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
+  await expect(page.locator('#search-bar')).toBeVisible();
+  await expect(page.locator('#search-bar')).not.toHaveClass(/search-filtered/);
+  const border = () => page.locator('#search-bar').evaluate(el => getComputedStyle(el).borderColor);
+  const neutralBorder = await border();
+  await page.fill('#search-bar-keywords', 'needle');
+  await page.locator('#search-bar-submit').click();
+  await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
+  await expect.poll(border).toBe(neutralBorder);
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  await page.locator('#search-bar-clear').click();
+  await expect(page.locator('#search-bar')).not.toHaveClass(/search-filtered/);
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#search-bar')).not.toHaveClass(/search-filtered/);
+  await page.fill('#input', '/f #other');
+  await page.locator('#input').press('Enter');
+  await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
+  await expect(page.locator('#search-bar')).not.toHaveClass(/search-filtered/);
+});
+
+for (const width of [1280, 375]) {
+  test(`action-pack search highlights only once filtered at width ${width}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 812 });
+    await mockBackend(page);
+    await page.goto('/');
+    const button = page.locator('#chip-search-btn');
+    const appearance = () => button.evaluate(el => {
+      const style = getComputedStyle(el);
+      return { color: style.color, opacity: style.opacity, background: style.backgroundColor };
+    });
+    await page.mouse.move(0, 0);
+    const neutral = await appearance();
+    await button.click();
+    await page.mouse.move(0, 0);
+    await expect(button).toHaveAttribute('aria-expanded', 'true');
+    await expect(button).not.toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(appearance).toEqual(neutral);
+    await page.fill('#search-bar-keywords', 'needle');
+    await page.locator('#search-bar-submit').click();
+    await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
+    await expect(button).toHaveClass(/active/);
+    await expect.poll(appearance).not.toEqual(neutral);
+    await page.locator('#search-bar-clear').click();
+    await expect(button).toHaveAttribute('aria-expanded', 'false');
+    await expect.poll(appearance).toEqual(neutral);
+  });
+}
+
+for (const suffix of ['', '!', '*']) {
+  test(`route choices always offer session and ad hoc for original suffix '${suffix}'`, async ({ page }) => {
+    await mockBackend(page);
+    await page.goto('/');
+    await page.fill('#input', `/f #squid.ux@claude${suffix}`);
+    await page.locator('#input').press('Enter');
+    await page.locator('#chip-search-btn').click();
+    await page.locator('#search-scope-toggle').click();
+    const options = page.locator('#search-scope-options [role="option"]');
+    await expect(options).toHaveText([
+      'Search all', 'Route · #squid.ux@claude', 'Route ad hoc · #squid.ux@claude!',
+      'This topic · #squid.ux', 'Parent + subtopics · #squid*',
+      'Agent · session · @claude', 'Agent · ad hoc · @claude!', 'Agent · both · @claude*',
+    ]);
+    await page.getByRole('option', { name: 'Parent + subtopics · #squid*', exact: true }).click();
+    await expect(page.locator('#search-bar-scope')).toHaveValue('#squid*');
+  });
+}
+
+test('search scope does not activate the history filter button', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  const filter = page.locator('#chip-filter-btn');
+  await page.fill('#input', '/s #squid@claude needle');
+  await page.locator('#input').press('Enter');
+  await expect(filter).not.toHaveClass(/active/);
+  await expect(filter).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#search-bar')).toBeVisible();
+  // A neutral filter action applies the composer filter rather than clearing search scope.
+  await filter.click();
+  await expect(filter).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#search-bar')).not.toBeVisible();
+});
+
+test('searching inside a history filter preserves its independent indicator and scope', async ({ page }) => {
+  await mockBackend(page);
+  const urls = [];
+  await page.route('**/search**', route => { urls.push(new URL(route.request().url())); return route.fulfill({ json: { items: [] } }); });
+  await page.goto('/');
+  const filter = page.locator('#chip-filter-btn');
+  await page.fill('#input', '/f #squid@claude!');
+  await page.locator('#input').press('Enter');
+  await page.locator('#chip-search-btn').click();
+  await page.fill('#search-bar-keywords', 'needle');
+  await page.locator('#search-bar-submit').click();
+  await expect.poll(() => urls.at(-1)?.searchParams.get('topic')).toBe('squid');
+  expect(urls.at(-1).searchParams.get('agent')).toBe('claude');
+  expect(urls.at(-1).searchParams.get('adhoc')).toBe('true');
+  await expect(filter).toHaveClass(/active/);
+  await page.fill('#search-bar-scope', '#all');
+  await page.locator('#search-bar-submit').click();
+  await expect(filter).toHaveAttribute('aria-pressed', 'true');
+  await page.locator('#search-bar-clear').click();
+  await expect(filter).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#filter-badge-label')).toHaveText('#squid@claude!');
+});
+
+for (const width of [1280, 375]) {
+  test(`search submit stays neutral after searching and keywords avoid a native clear control at width ${width}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 812 });
+    await mockBackend(page);
+    await page.goto('/');
+    await page.locator('#chip-search-btn').click();
+    const keywords = page.locator('#search-bar-keywords');
+    await expect(keywords).toHaveAttribute('type', 'text');
+    await expect(keywords).toHaveAttribute('enterkeyhint', 'search');
+    await page.mouse.move(0, 0);
+    const submit = page.locator('#search-bar-submit');
+    const color = () => submit.evaluate(el => getComputedStyle(el).color);
+    const neutral = await color();
+    const accent = await page.evaluate(() => {
+      const el = document.createElement('span');
+      el.style.color = 'var(--accent)';
+      document.getElementById('search-bar').append(el);
+      const value = getComputedStyle(el).color;
+      el.remove();
+      return value;
+    });
+    expect(neutral).not.toBe(accent);
+    await keywords.fill('needle');
+    await keywords.press('Enter');
+    await page.mouse.move(0, 0);
+    await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
+    await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+    await expect.poll(color).toBe(neutral);
+    await submit.hover();
+    await expect.poll(color).toBe(accent);
+    await page.mouse.move(0, 0);
+    await keywords.focus();
+    await keywords.press('Tab');
+    await expect(submit).toBeFocused();
+    await expect.poll(color).toBe(accent);
+    await keywords.focus();
+    await expect.poll(color).toBe(neutral);
+    await expect(page.locator('#chip-search-btn')).not.toHaveAttribute('aria-pressed', 'true');
+    await page.locator('#search-bar-clear').click();
+    await page.locator('#chip-search-btn').click();
+    await page.mouse.move(0, 0);
+    await expect.poll(color).toBe(neutral);
   });
 }

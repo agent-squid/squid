@@ -1820,7 +1820,7 @@ async function updateComposerActionTitles() {
 
 chipFilterBtn.addEventListener('click', async e => {
   e.stopPropagation();
-  const active = (searchActive && searchState) ? searchState : historyFilter;
+  const active = historyFilter;
   if (active?.flow_route || active?.topic || active?.agent || active?.explicitAll) {
     clearFilter();
     return;
@@ -1840,26 +1840,15 @@ chipSearchBtn.addEventListener('click', async e => {
   }
   let scope = activeHistoryFilterScope();
   if (!scope) scope = routeScopeText(await resolveEffectiveComposerRoute());
+  searchScopeContext = parseScopeInput(scope, { allowAll: true });
   searchPanelOpen = true;
+  closeSearchScopes();
   document.getElementById('search-bar-scope').value = scope || '#all';
   const draft = input.value.trim();
   document.getElementById('search-bar-keywords').value = draft.startsWith('/') ? '' : (draft.startsWith('#') ? parseInput(draft).message.trim() : draft);
   document.getElementById('search-bar').classList.add('active');
   updateSearchButton();
   document.getElementById('search-bar-keywords').focus();
-  try {
-    const [topics, agents] = await Promise.all([_acTopics(), _acAgents()]);
-    const values = new Set(['#all', scope]);
-    for (const topic of topics) values.add(`#${topic.name}`);
-    for (const agent of agents) {
-      for (const suffix of ['', '!', '*']) values.add(`@${agent.name}${suffix}`);
-    }
-    document.getElementById('search-scope-options').replaceChildren(...[...values].filter(Boolean).map(value => {
-      const option = document.createElement('option');
-      option.value = value;
-      return option;
-    }));
-  } catch { /* Typed scopes remain available when suggestions cannot load. */ }
 });
 
 chipClearBtn.addEventListener('click', e => {
@@ -2123,15 +2112,16 @@ function updatePromptOnlyButton() {
 }
 
 function updateFilterButton() {
-  const active = (searchActive && searchState) ? searchState : historyFilter;
-  const isFiltered = !!(active?.flow_route || active?.topic || active?.agent || active?.explicitAll);
+  const isFiltered = hasHistoryFilterScope();
   chipFilterBtn?.classList.toggle('active', isFiltered);
   chipFilterBtn?.setAttribute('aria-pressed', isFiltered ? 'true' : 'false');
 }
 
 function updateSearchButton() {
-  chipSearchBtn?.classList.toggle('active', searchActive || searchPanelOpen);
-  chipSearchBtn?.setAttribute('aria-pressed', (searchActive || searchPanelOpen) ? 'true' : 'false');
+  chipSearchBtn?.classList.toggle('active', searchActive);
+  document.getElementById('search-bar').classList.toggle('search-filtered', searchActive);
+  chipSearchBtn?.removeAttribute('aria-pressed');
+  chipSearchBtn?.setAttribute('aria-expanded', (searchActive || searchPanelOpen) ? 'true' : 'false');
 }
 
 function hasHistoryFilterScope() {
@@ -2543,6 +2533,7 @@ function reconcilePendingBubble(msgId, preferredBubble) {
 }
 
 // ── search state ──────────────────────────────────────────────────────────────
+let searchScopeContext = null;
 let searchPanelOpen = false;
 let searchActive = false;
 let searchState = null;  // { topic, agent, adhoc, explicitAll, keywords }
@@ -3204,8 +3195,8 @@ function highlightTextNodes(root, keywords) {
   }
 }
 
-function startSearch(rawArgs) {
-  const parsed = parseSearchInput(rawArgs);
+function startSearch(rawArgs, parsedInput = null) {
+  const parsed = parsedInput || parseSearchInput(rawArgs);
 
   if (!parsed.keywords) {
     showCmdFeedback('Usage: /s [#topic[*][@agent[!|*]] | #topic@agent>@agent | @agent[!|*] | #all] keywords…');
@@ -3238,6 +3229,7 @@ function startSearch(rawArgs) {
   }
 
   searchState = { flow_route, topic, topicSubtree, agent, adhoc, explicitAll, keywords: parsed.keywords };
+  if (!parsedInput) searchScopeContext = { ...searchState };
   searchActive = true;
   searchLoading = false;
 
@@ -3261,6 +3253,7 @@ function startSearch(rawArgs) {
 }
 
 function clearSearch() {
+  closeSearchScopes();
   const hadSearch = searchActive;
   searchPanelOpen = false;
   searchActive = false;
@@ -7839,6 +7832,9 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
       }
     }
 
+    const fileList = document.createElement('div');
+    fileList.className = 'gitdiff-file-list';
+    body.appendChild(fileList);
     const fileDiffs = splitUnifiedDiff(tool.diff || '');
     const omittedPaths = new Set(tool.omitted_paths || []);
     const files = tool.files || [];
@@ -7955,11 +7951,10 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
 
       if (fileBody) row.appendChild(fileBody);
 
-      body.appendChild(row);
+      fileList.appendChild(row);
     }
 
-
-    block.classList.add('tool-expanded');
+    if (count <= 10) block.classList.add('tool-expanded');
   }
 
   toggle.addEventListener('click', () => block.classList.toggle('tool-expanded'));
@@ -17558,26 +17553,154 @@ function editActiveFilter() {
   stashComposerAndEdit(formatFilterCommand(active));
 }
 
+function closeSearchScopes() {
+  document.getElementById('search-scope-options').hidden = true;
+  for (const id of ['search-bar-scope', 'search-scope-toggle']) {
+    document.getElementById(id).setAttribute('aria-expanded', 'false');
+  }
+}
+
+function routeSearchScopes() {
+  const context = searchScopeContext || searchState || {};
+  const values = new Map([['#all', 'Search all']]);
+  const add = (value, label) => { if (value && !values.has(value)) values.set(value, `${label} · ${value}`); };
+  // Flow routes stay exact; do not generate combinations for each participant.
+  if (context.flow_route) add(context.flow_route, 'Route');
+  else if (context.agent) {
+    const route = `${context.topic ? '#' + context.topic : ''}@${context.agent}`;
+    add(route, 'Route');
+    add(`${route}!`, 'Route ad hoc');
+  }
+  const topic = context.topic || context.flow_route?.match(/^#([^@>,]+)/)?.[1];
+  if (topic) {
+    add(`#${topic}`, 'This topic');
+    if (topic.includes('.')) {
+      const parent = topic.slice(0, topic.lastIndexOf('.'));
+      add(`#${parent}*`, 'Parent + subtopics');
+    }
+  }
+  if (context.agent && !context.flow_route) {
+    for (const [suffix, lane] of [['', 'session'], ['!', 'ad hoc'], ['*', 'both']]) {
+      add(`@${context.agent}${suffix}`, `Agent · ${lane}`);
+    }
+  }
+  return values;
+}
+
+let searchScopeSuggestionSeq = 0;
+async function showSearchScopes(query = '') {
+  const seq = ++searchScopeSuggestionSeq;
+  const list = document.getElementById('search-scope-options');
+  const render = values => {
+    const existing = new Map([...list.children].map(option => [option.dataset.scope, option]));
+    const wanted = new Set(values.keys());
+    // Keep existing nodes in place so a delayed response cannot remove keyboard focus.
+    for (const [value, label] of values) {
+      let option = existing.get(value);
+      if (!option) {
+        option = document.createElement('button');
+        option.type = 'button';
+        option.dataset.scope = value;
+        option.setAttribute('role', 'option');
+        option.addEventListener('mousedown', e => e.preventDefault());
+        option.addEventListener('click', () => {
+          const scopeInput = document.getElementById('search-bar-scope');
+          scopeInput.value = value;
+          scopeInput.removeAttribute('aria-invalid');
+          closeSearchScopes();
+          document.getElementById('search-bar-keywords').focus();
+        });
+        list.appendChild(option);
+      }
+      option.textContent = label;
+      option.setAttribute('aria-selected', String(document.getElementById('search-bar-scope').value === value));
+    }
+    for (const [value, option] of existing) {
+      if (!wanted.has(value)) {
+        if (document.activeElement === option) list.firstElementChild?.focus();
+        option.remove();
+      }
+    }
+  };
+  const related = routeSearchScopes();
+  const needle = query.trim().toLowerCase();
+  const initial = new Map([...related].filter(([value, label]) => value === '#all' || !needle || `${value} ${label}`.toLowerCase().includes(needle)));
+  render(initial);
+  list.hidden = false;
+  for (const id of ['search-bar-scope', 'search-scope-toggle']) {
+    document.getElementById(id).setAttribute('aria-expanded', 'true');
+  }
+  if (!needle) return;
+  const [topics, agents] = await Promise.all([_acTopics(), _acAgents()]);
+  if (seq !== searchScopeSuggestionSeq || list.hidden) return;
+  const values = new Set();
+  for (const topic of (Array.isArray(topics) ? topics : [])) values.add(`#${topic.name}`);
+  for (const agent of (Array.isArray(agents) ? agents : [])) {
+    for (const suffix of ['', '!', '*']) values.add(`@${agent.name}${suffix}`);
+  }
+  for (const value of [...values].filter(value => value.toLowerCase().includes(needle)).slice(0, 12)) {
+    if (!initial.has(value)) initial.set(value, value);
+  }
+  render(initial);
+}
+
+document.getElementById('search-scope-toggle').addEventListener('click', () => {
+  if (document.getElementById('search-scope-options').hidden) showSearchScopes();
+  else closeSearchScopes();
+});
+document.getElementById('search-bar-scope').addEventListener('focus', () => showSearchScopes());
+document.getElementById('search-bar-scope').addEventListener('click', () => showSearchScopes());
+document.getElementById('search-bar-scope').addEventListener('input', e => {
+  e.target.removeAttribute('aria-invalid');
+  showSearchScopes(e.target.value);
+});
+document.getElementById('search-scope-picker').addEventListener('keydown', e => {
+  const list = document.getElementById('search-scope-options');
+  if (e.key === 'Escape' && !list.hidden) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeSearchScopes();
+    document.getElementById('search-bar-keywords').focus();
+  } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (list.hidden) showSearchScopes();
+    const options = [...list.querySelectorAll('[role="option"]')];
+    const index = options.indexOf(document.activeElement);
+    const next = index < 0 ? (e.key === 'ArrowDown' ? 0 : options.length - 1) : (index + (e.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+    options[next]?.focus();
+  }
+});
+document.addEventListener('click', e => {
+  if (!document.getElementById('search-scope-picker').contains(e.target)) closeSearchScopes();
+});
+document.getElementById('search-scope-picker').addEventListener('focusout', e => {
+  if (!e.currentTarget.contains(e.relatedTarget)) closeSearchScopes();
+});
+
+function submitSearchPanel() {
+  const scopeInput = document.getElementById('search-bar-scope');
+  const parsedScope = parseScopeInput(scopeInput.value.trim(), { allowAll: true });
+  if (parsedScope === null) {
+    scopeInput.setAttribute('aria-invalid', 'true');
+    showCmdFeedback('Search scope: use #topic, @agent, @agent! (ad hoc), @agent* (both), a route, or #all.');
+    scopeInput.focus();
+    return;
+  }
+  scopeInput.removeAttribute('aria-invalid');
+  const keywords = document.getElementById('search-bar-keywords');
+  if (!keywords.value.trim()) { keywords.focus(); return; }
+  closeSearchScopes();
+  startSearch('', { ...parsedScope, explicitScope: !!parsedScope, keywords: keywords.value.trim() });
+}
+
+document.getElementById('search-bar-submit').addEventListener('click', submitSearchPanel);
 for (const id of ['search-bar-scope', 'search-bar-keywords']) {
   document.getElementById(id).addEventListener('keydown', e => {
     if (e.key !== 'Enter' || e.isComposing) return;
     e.preventDefault();
-    const scopeInput = document.getElementById('search-bar-scope');
-    const scope = scopeInput.value.trim();
-    const parsedScope = parseScopeInput(scope, { allowAll: true });
-    if (parsedScope === null) {
-      scopeInput.setAttribute('aria-invalid', 'true');
-      showCmdFeedback('Search scope: use #topic, @agent, @agent! (ad hoc), @agent* (both), a route, or #all.');
-      scopeInput.focus();
-      return;
-    }
-    scopeInput.removeAttribute('aria-invalid');
-    const keywords = document.getElementById('search-bar-keywords');
-    if (!keywords.value.trim()) { keywords.focus(); return; }
-    startSearch(`${parsedScope ? searchScopeText(parsedScope) + ' ' : ''}${keywords.value.trim()}`);
+    submitSearchPanel();
   });
 }
-document.getElementById('search-bar-scope').addEventListener('input', e => e.target.removeAttribute('aria-invalid'));
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && closeEscSurfaces()) {
     e.preventDefault();

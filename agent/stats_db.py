@@ -2,6 +2,7 @@
 stats_db.py — SQLite for stats, chat history, agents, and topics.
 """
 import logging
+from contextlib import contextmanager
 import sqlite3
 import json
 import os
@@ -297,17 +298,44 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def database_lifetime():
+    """Keep WAL open between operations without holding a read transaction.
+
+    SQLite checkpoints and removes the WAL when its last connection closes.
+    The server owns this idle connection; operation connections still close
+    promptly, and normal checkpointing remains enabled.
+    """
+    conn = _connect()
+    try:
+        # Attach to the database now, rather than on the first later query.
+        conn.execute("PRAGMA schema_version").fetchone()
+        yield
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _connection():
+    """Commit or roll back a short-lived connection, then always close it."""
+    conn = _connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def get_usage_stats() -> dict:
     """Return total prompts and first-seen date from chat history."""
     try:
-        db = _connect()
-        total = db.execute(
-            "SELECT COUNT(*) FROM chat_messages WHERE role = 'user'"
-        ).fetchone()[0]
-        first = db.execute(
-            "SELECT MIN(created_at) FROM chat_messages"
-        ).fetchone()[0]
-        db.close()
+        with _connection() as db:
+            total = db.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE role = 'user'"
+            ).fetchone()[0]
+            first = db.execute(
+                "SELECT MIN(created_at) FROM chat_messages"
+            ).fetchone()[0]
         return {"total_prompts": total, "first_seen": first}
     except Exception:
         return {"total_prompts": 0, "first_seen": None}
@@ -593,13 +621,13 @@ def create_flow_run(flow_run_id: str, route: str, original_prompt_msg_id: Option
 
 
 def get_flow_run(flow_run_id: str) -> Optional[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute("SELECT * FROM flow_runs WHERE flow_run_id=?", (flow_run_id,)).fetchone()
     return dict(row) if row else None
 
 
 def get_flow_steps(flow_run_id: str) -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             "SELECT * FROM flow_steps WHERE flow_run_id=? ORDER BY branch_index, repeat_index, step_id",
             (flow_run_id,),
@@ -609,7 +637,7 @@ def get_flow_steps(flow_run_id: str) -> list[dict]:
 
 def get_flow_step_for_message(msg_id: int) -> Optional[dict]:
     """Return the durable step linked to either side of a prepared chat turn."""
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             """SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
                WHERE (s.user_msg_id=? OR s.assistant_msg_id=?)
@@ -621,7 +649,7 @@ def get_flow_step_for_message(msg_id: int) -> Optional[dict]:
 
 def get_prepared_flow_step_messages(flow_run_id: str, step_id: str) -> Optional[dict]:
     """Find a prepared turn tagged before its flow-step linkage committed."""
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             """SELECT u.id AS user_msg_id, a.id AS assistant_msg_id
                  FROM chat_messages a
@@ -952,7 +980,7 @@ def get_due_flow_steps(now: str, flow_run_id: Optional[str] = None) -> list[dict
     params = (*_FLOW_CLAIMABLE_STEP_STATUSES, now)
     if flow_run_id is not None:
         params += (flow_run_id,)
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"""SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
                WHERE s.status IN ({_FLOW_CLAIMABLE_STATUS_SQL})
@@ -970,7 +998,7 @@ def get_due_flow_steps(now: str, flow_run_id: Optional[str] = None) -> list[dict
 
 def get_stale_flow_claims(before: str) -> list[dict]:
     before = _flow_timestamp(before, "before")
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             """SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
                WHERE s.status='claimed' AND s.claimed_at<?
@@ -984,7 +1012,7 @@ def get_stale_flow_claims(before: str) -> list[dict]:
 
 def get_running_flow_steps() -> list[dict]:
     """Running durable steps requiring reconciliation after process restart."""
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             """SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
                WHERE s.status='running' AND r.execution_mode='durable'
@@ -995,7 +1023,7 @@ def get_running_flow_steps() -> list[dict]:
 
 
 def get_active_durable_flow_run_ids() -> list[str]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             """SELECT flow_run_id FROM flow_runs
                WHERE execution_mode='durable'
@@ -1008,6 +1036,9 @@ def get_active_durable_flow_run_ids() -> list[str]:
 def init_db() -> None:
     conn = _connect()
     try:
+        # Persist this once at startup, outside a transaction. Replay/snapshot
+        # readers must not block streaming writers on other connections.
+        conn.execute("PRAGMA journal_mode=WAL")
         from .watches import SCHEMA as watch_schema
         from .watch_runs import SCHEMA as watch_run_schema
         for ddl in (*_TABLES, *watch_schema, *watch_run_schema):
@@ -1192,7 +1223,7 @@ def init_db() -> None:
 # ── agents ────────────────────────────────────────────────────────────────────
 
 def list_agents() -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = [dict(r) for r in conn.execute("SELECT * FROM agents ORDER BY name").fetchall()]
     for row in rows:
         if not row.get("harness"):
@@ -1203,7 +1234,7 @@ def list_agents() -> list[dict]:
 
 def get_default_agent() -> Optional[dict]:
     """Return the first available agent in fallback order: claude → codex → cursor."""
-    with _connect() as conn:
+    with _connection() as conn:
         rows = {r["name"]: dict(r) for r in conn.execute("SELECT * FROM agents").fetchall()}
     for name in ("claude", "codex", "cursor", "opencode", "pi", "claudecode"):
         if name in rows:
@@ -1222,7 +1253,7 @@ def get_default_agent() -> Optional[dict]:
 
 
 def get_agent(name: str) -> Optional[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute("SELECT * FROM agents WHERE name = ?", (name,)).fetchone()
     if not row:
         return None
@@ -1236,7 +1267,7 @@ def get_agent(name: str) -> Optional[dict]:
 def upsert_agent(name: str, harness: str, provider: Optional[str], model: Optional[str],
                  cwd: Optional[str] = None) -> bool:
     """Upsert agent config. Returns True if key attributes changed."""
-    with _connect() as conn:
+    with _connection() as conn:
         existing = conn.execute("SELECT harness, provider, model, cwd FROM agents WHERE name = ?", (name,)).fetchone()
         key_changed = existing and (
             existing["harness"] != harness or
@@ -1271,7 +1302,7 @@ def upsert_agent(name: str, harness: str, provider: Optional[str], model: Option
 
 def get_agent_home_mode(name: str) -> str:
     """'user_home' (default, full inheritance) or 'blank_home' -- see ADR-0036."""
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute("SELECT home_mode FROM agents WHERE name = ?", (name,)).fetchone()
     return row["home_mode"] if row and row["home_mode"] else "user_home"
 
@@ -1279,13 +1310,13 @@ def get_agent_home_mode(name: str) -> str:
 def set_agent_home_mode(name: str, home_mode: str) -> None:
     if home_mode not in ("user_home", "blank_home"):
         raise ValueError(f"invalid home_mode: {home_mode!r}")
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute("UPDATE agents SET home_mode = ? WHERE name = ?", (home_mode, name))
 
 
 def get_agent_sessions(name: str) -> list[dict]:
     """Return all active topic_sessions for a named agent."""
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             "SELECT topic, session_id, cwd FROM topic_sessions WHERE agent = ?", (name,)
         ).fetchall()
@@ -1294,7 +1325,7 @@ def get_agent_sessions(name: str) -> list[dict]:
 
 def clear_agent_sessions(name: str) -> list[str]:
     """Clear all topic_sessions for an agent. Returns list of affected topic names."""
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             "SELECT topic FROM topic_sessions WHERE agent = ?", (name,)
         ).fetchall()
@@ -1305,7 +1336,7 @@ def clear_agent_sessions(name: str) -> list[str]:
 
 
 def delete_agent(name: str) -> bool:
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute("DELETE FROM agents WHERE name = ?", (name,))
         if cur.rowcount:
             conn.execute("DELETE FROM topic_sessions WHERE agent = ?", (name,))
@@ -1316,7 +1347,7 @@ def delete_agent(name: str) -> bool:
 
 def get_topics_summary() -> list[dict]:
     last_backend_expr = _runtime_ref_expr("last_harness", "last_provider")
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"""SELECT topic AS name, sticky_agent AS agent, sticky_adhoc,
                       last_model, last_harness, last_provider,
@@ -1331,7 +1362,7 @@ def get_topics_summary() -> list[dict]:
 def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:
     where_hidden = "" if include_hidden else "AND hidden = 0"
     last_backend_expr = _runtime_ref_expr("last_harness", "last_provider")
-    with _connect() as conn:
+    with _connection() as conn:
         topic_rows = conn.execute(
             f"""SELECT topic AS name, sticky_agent AS agent, sticky_adhoc,
                        last_model, last_harness, last_provider,
@@ -1435,14 +1466,14 @@ def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:
 
 
 def list_topics() -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         return [dict(r) for r in conn.execute(
             "SELECT topic AS name, sticky_agent AS agent FROM topics WHERE agent = '' ORDER BY topic"
         ).fetchall()]
 
 
 def get_topic(name: str) -> Optional[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             "SELECT topic AS name, sticky_agent AS agent, hidden FROM topics WHERE topic = ? AND agent = ''",
             (name,),
@@ -1461,7 +1492,7 @@ def upsert_topic(
 ) -> None:
     now = __import__('time').strftime("%Y-%m-%dT%H:%M:%SZ", __import__('time').gmtime())
     at = now if last_prompt else None
-    with _connect() as conn:
+    with _connection() as conn:
         # Topic-level row
         conn.execute(
             """INSERT INTO topics (topic, agent, sticky_agent, sticky_adhoc, last_prompt, last_at, last_model, last_harness, last_provider)
@@ -1500,7 +1531,7 @@ def upsert_topic(
 
 
 def set_topic_hidden(name: str, hidden: bool) -> bool:
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute(
             "UPDATE topics SET hidden = ? WHERE topic = ? AND agent = ''",
             (1 if hidden else 0, name),
@@ -1545,7 +1576,7 @@ def _stop_watch_flows_for_history_delete(conn, clause, parameters):
                     dict(id=message['id'],role='assistant',status='cancelled',watch_run_id=row['id']))
 
 def delete_topic(name: str) -> bool:
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute('BEGIN IMMEDIATE')
         flow_ids = [r[0] for r in conn.execute("""SELECT f.flow_run_id FROM flow_runs f
             WHERE (f.watch_owned=1 AND EXISTS
@@ -1570,7 +1601,7 @@ def delete_topic(name: str) -> bool:
 
 
 def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> None:
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute('BEGIN IMMEDIATE')
         # Keep durable run history while detaching only messages being removed.
         clause = "topic=? AND agent=?"
@@ -1652,7 +1683,7 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
 
 def get_topic_agent_history(topic: str) -> list[dict]:
     """Return agents used in a topic with mode-specific last prompts."""
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             """SELECT agent, last_prompt, last_adhoc_prompt
                FROM topics
@@ -1788,7 +1819,7 @@ def insert_user_message(
         context_json = json.dumps(context)
     else:
         context_json = None
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute(
             """INSERT INTO chat_messages
                (topic, agent, role, source, content, status, context, lookback, flow_run_id, flow_route, flow_step_id)
@@ -1809,7 +1840,7 @@ def insert_assistant_message(
     source: str = "human",
     flow_step_id: Optional[str] = None,
 ) -> int:
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute(
             """INSERT INTO chat_messages
                (topic, agent, role, source, reply_to, status, adhoc, flow_run_id, flow_route, flow_step_id)
@@ -1856,7 +1887,7 @@ def _ensure_session_turn_index(conn: sqlite3.Connection, msg_id: int, session_id
 
 
 def ensure_session_turn_index(msg_id: int, session_id: Optional[str]) -> Optional[int]:
-    with _connect() as conn:
+    with _connection() as conn:
         return _ensure_session_turn_index(conn, msg_id, session_id)
 
 
@@ -1867,7 +1898,7 @@ def get_session_turn_boundaries(session_id: str) -> list[dict]:
     on its own. `created_at` is when the turn's prompt was sent, i.e. the
     start of everything that turn's log entries belong to."""
     from datetime import datetime, timezone
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             """SELECT id AS msg_id, session_turn_index, created_at
                FROM chat_messages
@@ -1892,7 +1923,7 @@ def get_session_turn_boundaries(session_id: str) -> list[dict]:
 def attach_assistant_session(msg_id: int, session_id: Optional[str]) -> bool:
     if not session_id:
         return False
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute(
             """UPDATE chat_messages
                SET session_id = COALESCE(session_id, ?)
@@ -1904,7 +1935,7 @@ def attach_assistant_session(msg_id: int, session_id: Optional[str]) -> bool:
 
 def rebind_pending_assistant_session(msg_id: int, session_id: Optional[str]) -> bool:
     """Replace enqueue-time session metadata before a queued turn starts."""
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute(
             """UPDATE chat_messages SET session_id = ?
                WHERE id = ? AND role = 'assistant' AND status = 'pending'
@@ -1923,7 +1954,7 @@ def update_assistant_message(
     if status == "done":
         status_raw = _sanitize_status_raw(content, status_raw)
     terminal = status in {"done", "error", "cancelled"}
-    with _connect() as conn:
+    with _connection() as conn:
         if only_if_pending:
             cur = conn.execute(
                 "UPDATE chat_messages SET content=?, session_id=COALESCE(session_id, ?), status=?, context=?, status_raw=?,"
@@ -1994,12 +2025,12 @@ def _run_event_snapshot(conn: sqlite3.Connection, msg_id: int) -> dict:
 
 
 def get_run_event_snapshot(msg_id: int) -> dict:
-    with _connect() as conn:
+    with _connection() as conn:
         return _run_event_snapshot(conn, msg_id)
 
 
 def mark_assistant_cancelled(msg_id: int, reason: str = "Cancelled") -> bool:
-    with _connect() as conn:
+    with _connection() as conn:
         now = _utc_now_iso()
         conn.execute("BEGIN IMMEDIATE")
         snapshot = _run_event_cancel_snapshot(conn, msg_id)
@@ -2054,7 +2085,7 @@ def _sanitize_status_raw(content: Optional[str], status_raw: Optional[str]) -> O
 
 def update_message_quota_snapshot(msg_id: int, before: float, after: float) -> None:
     delta = round(after - before, 4)
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute(
             "UPDATE chat_messages SET quota_before=?, quota_after=?, quota_delta=?"
             " WHERE id=? AND role='assistant'",
@@ -2065,7 +2096,7 @@ def update_message_quota_snapshot(msg_id: int, before: float, after: float) -> N
 # ── topic sessions ────────────────────────────────────────────────────────────
 
 def get_topic_agents(topic: str) -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             "SELECT agent, session_id, cwd, created_at FROM topic_sessions WHERE topic=? ORDER BY agent",
             (topic,),
@@ -2074,7 +2105,7 @@ def get_topic_agents(topic: str) -> list[dict]:
 
 
 def get_topic_session(topic: str, agent: str) -> Optional[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             "SELECT session_id, cwd, runtime_fingerprint FROM topic_sessions WHERE topic=? AND agent=?",
             (topic, agent),
@@ -2083,7 +2114,7 @@ def get_topic_session(topic: str, agent: str) -> Optional[dict]:
 
 
 def get_session_turn_count(session_id: str) -> int:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             """SELECT COALESCE(MAX(session_turn_index), 0) AS count
                FROM chat_messages
@@ -2101,7 +2132,7 @@ def set_topic_session(topic: str, agent: str, session_id: str, cwd: Optional[str
     if session_id in _invalidated_session_ids:
         _invalidated_session_ids.discard(session_id)
         return
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute(
             """INSERT INTO topic_sessions (topic, agent, session_id, cwd, runtime_fingerprint) VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(topic, agent) DO UPDATE SET session_id=excluded.session_id,
@@ -2112,7 +2143,7 @@ def set_topic_session(topic: str, agent: str, session_id: str, cwd: Optional[str
 
 
 def clear_topic_session(topic: str, agent: str) -> None:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             "SELECT session_id FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent)
         ).fetchone()
@@ -2123,7 +2154,7 @@ def clear_topic_session(topic: str, agent: str) -> None:
 
 def get_session_injected_context(session_id: str) -> dict:
     """Return context injected by user prompts belonging to this backend session."""
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             """SELECT u.context
                FROM chat_messages AS u
@@ -2176,7 +2207,7 @@ def get_context_history(topic: str, limit: int, agent: Optional[str] = None) -> 
     sel = "SELECT a.id, u.content AS user_content, a.content AS asst_content "
     agent_clause = " AND a.agent = ?" if agent else ""
     params: tuple = (topic, agent, limit) if agent else (topic, limit)
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"{sel}{_join}{agent_clause} ORDER BY a.id DESC LIMIT ?", params,
         ).fetchall()
@@ -2251,7 +2282,7 @@ def get_messages_by_ids(ids: list[int]) -> list[dict]:
     if not ids:
         return []
     placeholders = ",".join("?" * len(ids))
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"""SELECT a.id, a.topic, a.agent, u.content AS user_content, a.content AS asst_content, a.context
                 FROM chat_messages a
@@ -2279,7 +2310,7 @@ def get_message_previews(ids: list[int], max_chars: int = 120) -> list[dict]:
     if not ids:
         return []
     placeholders = ",".join("?" * len(ids))
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"""SELECT m.id,
                        substr(
@@ -2304,7 +2335,7 @@ def get_topic_messages_for_period(
     Pass agent= to scope to a single agent's turns; omit for all agents."""
     clause = "AND a.agent = ?" if agent else ""
     params: list = [topic, since_iso, until_iso] + ([agent] if agent else [])
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"""SELECT u.content AS user_content, a.content AS asst_content
                FROM chat_messages a
@@ -2330,7 +2361,7 @@ def get_topic_messages_for_period(
 def get_flow_run_messages(flow_run_id: str) -> list[dict]:
     """All chat_messages rows for one Squid Flow run, ascending by id — the
     full step sequence used to derive what (if anything) runs next."""
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             """SELECT id, role, topic, agent, source, reply_to, adhoc, content, status, context,
                       flow_step_id, flow_route, created_at
@@ -2343,7 +2374,7 @@ def get_flow_run_messages(flow_run_id: str) -> list[dict]:
 
 
 def get_flow_run_id_for_message(msg_id: int) -> Optional[str]:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             "SELECT flow_run_id FROM chat_messages WHERE id = ?",
             (msg_id,),
@@ -2356,7 +2387,7 @@ def get_flow_run_ids_with_row_counts(counts: tuple[int, ...]) -> list[str]:
     used to cheaply narrow a boot-time sweep to runs that look mid-chain rather
     than complete."""
     placeholders = ",".join("?" * len(counts))
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"""SELECT m.flow_run_id FROM chat_messages m
                 LEFT JOIN flow_runs r ON r.flow_run_id=m.flow_run_id
@@ -2370,7 +2401,7 @@ def get_flow_run_ids_with_row_counts(counts: tuple[int, ...]) -> list[str]:
 
 
 def mark_orphaned_pending(before_created_at: Optional[str] = None) -> int:
-    with _connect() as conn:
+    with _connection() as conn:
         where = "status='pending' AND role='assistant' AND NOT EXISTS (SELECT 1 FROM watch_runs wr WHERE wr.assistant_msg_id=chat_messages.id)"
         params: list[str] = []
         if before_created_at:
@@ -2407,7 +2438,7 @@ def mark_orphaned_pending(before_created_at: Optional[str] = None) -> int:
 
 
 def get_message(msg_id: int) -> Optional[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                       m.content, m.status, m.source, m.adhoc, m.session_id,
@@ -2479,7 +2510,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
         where += f" AND {clause}"
         params.extend(clause_params)
 
-    with _connect() as conn:
+    with _connection() as conn:
         total = conn.execute(
             f"""SELECT COUNT(*) FROM chat_messages m
                 {bookmark_join}
@@ -2603,7 +2634,7 @@ def get_messages_around(msg_id: int, before: int = 20, after: int = 20,
         topic=topic, agent=agent, adhoc=adhoc, flow_route=flow_route,
         bookmarked=bookmarked, marked_bad=marked_bad, topic_subtree=topic_subtree,
     )
-    with _connect() as conn:
+    with _connection() as conn:
         target_rows = _history_rows(
             conn,
             where + " AND m.id = ?",
@@ -2663,7 +2694,7 @@ def get_messages_around_flow(flow_run_id: str, before: int = 20, after: int = 20
         topic=topic, agent=agent, adhoc=adhoc, flow_route=flow_route,
         bookmarked=bookmarked, marked_bad=marked_bad, topic_subtree=topic_subtree,
     )
-    with _connect() as conn:
+    with _connection() as conn:
         anchors = _history_rows(
             conn,
             where + " AND m.flow_run_id = ?",
@@ -2708,7 +2739,7 @@ def get_messages_from_cursor(direction: str, cursor_completed_at: str, cursor_id
         direction = "older"
         cursor_where = where + f" AND ({_turn_end_expr('m')} < ? OR ({_turn_end_expr('m')} = ? AND m.id < ?))"
         order_sql = "ORDER BY completed_at DESC, m.id DESC"
-    with _connect() as conn:
+    with _connection() as conn:
         rows = _history_rows(
             conn,
             cursor_where,
@@ -2735,7 +2766,7 @@ def get_history_items_by_ids(ids: list[int]) -> list[dict]:
     if not ids:
         return []
     placeholders = ",".join("?" * len(ids))
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.source, m.adhoc, m.session_id,
@@ -2808,7 +2839,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
         if marked_bad else ""
     )
 
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.source, m.adhoc, m.session_id,
@@ -2879,7 +2910,7 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
         if marked_bad else ""
     )
 
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.source, m.adhoc, m.session_id,
@@ -2911,7 +2942,7 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
 
 
 def get_recent_prompts(limit: int = 50) -> list:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             """WITH routed_prompts AS (
                    SELECT u.id,
@@ -2989,7 +3020,7 @@ def save_stats(
 ) -> None:
     if not harness and backend:
         harness, provider = split_agent_ref(backend, provider)
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute(
             """INSERT INTO session_stats
                    (session_id, topic, agent, harness, provider, model, cwd,
@@ -3027,7 +3058,7 @@ def save_stats(
 
 
 def save_quota_delta(session_id: str, before: float, after: float) -> None:
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute(
             "UPDATE session_stats SET quota_before=?, quota_after=? WHERE session_id=?",
             (before, after, session_id),
@@ -3036,7 +3067,7 @@ def save_quota_delta(session_id: str, before: float, after: float) -> None:
 
 def get_stats(session_id: str) -> Optional[dict]:
     try:
-        with _connect() as conn:
+        with _connection() as conn:
             row = conn.execute(
                 "SELECT * FROM session_stats WHERE session_id=?", (session_id,)
             ).fetchone()
@@ -3743,7 +3774,7 @@ def get_aggregated_stats(
     ss_where = " AND ".join(ss_clauses)
 
     try:
-        with _connect() as conn:
+        with _connection() as conn:
             event_rows = conn.execute(
                 f"""SELECT {re_bucket} AS period, cm.id AS msg_id,
                           COALESCE(cm.adhoc, 0) AS adhoc, cm.status, cm.quota_delta, re.payload,
@@ -3862,7 +3893,7 @@ def get_stats_by_turn(
     where = " AND ".join(clauses)
 
     try:
-        with _connect() as conn:
+        with _connection() as conn:
             rows = conn.execute(
                 f"""SELECT cm.id AS msg_id, {turn_time_expr} AS period, cm.topic,
                            cm.agent, cm.adhoc, cm.status, cm.quota_delta,
@@ -4146,7 +4177,7 @@ def get_stats_by_breakdown(
     ss_where = " AND ".join(ss_clauses)
 
     try:
-        with _connect() as conn:
+        with _connection() as conn:
             event_rows = conn.execute(
                 f"""SELECT {re_bucket} AS period, cm.id AS msg_id, cm.topic,
                           COALESCE(cm.agent, 'unknown') AS agent,
@@ -4282,7 +4313,7 @@ def _stats_preset_row(row: sqlite3.Row) -> dict:
 
 
 def list_stats_filter_presets() -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             """SELECT id, name, state_json, is_default, created_at, updated_at
                FROM stats_filter_presets
@@ -4292,7 +4323,7 @@ def list_stats_filter_presets() -> list[dict]:
 
 
 def create_stats_filter_preset(name: str, state: dict) -> dict:
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute(
             """INSERT INTO stats_filter_presets(name, state_json, display_order)
                VALUES (?, ?, COALESCE((SELECT MAX(display_order) + 1 FROM stats_filter_presets), 0))""",
@@ -4307,7 +4338,7 @@ def create_stats_filter_preset(name: str, state: dict) -> dict:
 
 
 def update_stats_filter_preset(preset_id: int, name: Optional[str] = None, state: Optional[dict] = None, is_default: Optional[bool] = None) -> Optional[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         if is_default is True:
             conn.execute("UPDATE stats_filter_presets SET is_default=0")
         fields: list[str] = []
@@ -4333,7 +4364,7 @@ def update_stats_filter_preset(preset_id: int, name: Optional[str] = None, state
 
 
 def delete_stats_filter_preset(preset_id: int) -> bool:
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute("DELETE FROM stats_filter_presets WHERE id=?", (preset_id,))
         return cur.rowcount > 0
 
@@ -4378,7 +4409,7 @@ def get_stats_by_agent(
     ss_where = " AND ".join(ss_clauses)
 
     try:
-        with _connect() as conn:
+        with _connection() as conn:
             event_rows = conn.execute(
                 f"""SELECT COALESCE(cm.agent, 'unknown') AS agent,
                           cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status,
@@ -4496,7 +4527,7 @@ def get_stats_by_topic(
     ss_where = " AND ".join(ss_clauses)
 
     try:
-        with _connect() as conn:
+        with _connection() as conn:
             event_rows = conn.execute(
                 f"""SELECT COALESCE(cm.topic, 'unknown') AS topic,
                           cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status,
@@ -4576,7 +4607,7 @@ def get_stats_by_topic(
 
 def get_stats_filter_options() -> dict:
     try:
-        with _connect() as conn:
+        with _connection() as conn:
             agents = [
                 r[0] for r in conn.execute(
                     f"""SELECT DISTINCT agent_value FROM (
@@ -4615,7 +4646,7 @@ def get_stats_filter_options() -> dict:
 # ── git diff reverts ───────────────────────────────────────────────────────────
 
 def record_git_diff_revert(msg_id: int, repo: str, file_paths: list[str]) -> None:
-    with _connect() as conn:
+    with _connection() as conn:
         inserted = []
         for file_path in file_paths:
             cur = conn.execute(
@@ -4644,7 +4675,7 @@ def get_diff_revert_eligibility(msg_id: int, repo: str) -> dict[str, str]:
     using raw id would call the earlier-finishing (but higher-id) turn
     "later" than a turn that actually landed after it.
     """
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             "SELECT topic, context, completed_at FROM chat_messages WHERE id = ? AND role = 'assistant'",
             (msg_id,),
@@ -4730,7 +4761,7 @@ def get_diff_revert_eligibility(msg_id: int, repo: str) -> dict[str, str]:
 
 def get_message_gitdiff(msg_id: int, repo: str) -> Optional[dict]:
     """Return the GitDiff tool event for a given message and repo, or None."""
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             "SELECT context FROM chat_messages WHERE id = ? AND role = 'assistant'",
             (msg_id,),
@@ -4748,7 +4779,7 @@ def get_message_gitdiff(msg_id: int, repo: str) -> Optional[dict]:
 
 
 def save_file_edit(file_path: str, before: str, after: str) -> int:
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute(
             "INSERT INTO file_edit_history (file_path, before, after) VALUES (?, ?, ?)",
             (file_path, before, after),
@@ -4757,7 +4788,7 @@ def save_file_edit(file_path: str, before: str, after: str) -> int:
 
 
 def get_file_edit_history(file_path: str, limit: int = 20) -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             "SELECT id, file_path, before, after, edited_at FROM file_edit_history WHERE file_path = ? ORDER BY id DESC LIMIT ?",
             (file_path, limit),
@@ -4766,7 +4797,7 @@ def get_file_edit_history(file_path: str, limit: int = 20) -> list[dict]:
 
 
 def get_file_edit_by_id(edit_id: int) -> Optional[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             "SELECT id, file_path, before, after, edited_at FROM file_edit_history WHERE id = ?",
             (edit_id,),
@@ -4848,12 +4879,12 @@ def insert_realtime_event(
     event_type: str, topic: Optional[str], agent: Optional[str],
     payload=None, msg_id: Optional[int] = None, run_seq: Optional[int] = None,
 ) -> int:
-    with _connect() as conn:
+    with _connection() as conn:
         return _insert_realtime_event(conn, event_type, topic, agent, msg_id, run_seq, payload)
 
 
 def get_realtime_cursor() -> int:
-    with _connect() as conn:
+    with _connection() as conn:
         return int(conn.execute("SELECT COALESCE(MAX(event_id), 0) FROM realtime_events").fetchone()[0])
 
 
@@ -4878,7 +4909,7 @@ def _realtime_scope_sql(scopes: list[dict]) -> tuple[list[str], list]:
 def get_realtime_replay(after_event_id: int, scopes: list[dict], limit: int = 501) -> tuple[dict, list[dict]]:
     """Read replay metadata and scoped events at one durable watermark."""
     clauses, scope_params = _realtime_scope_sql(scopes)
-    with _connect() as conn:
+    with _connection() as conn:
         # sqlite3 does not start a read transaction for SELECT statements, so
         # begin explicitly to keep pruning/publication from changing the range
         # between the continuity check and scoped event read.
@@ -4916,7 +4947,7 @@ def get_realtime_replay(after_event_id: int, scopes: list[dict], limit: int = 50
 
 
 def prune_realtime_data(event_days: int = 7, max_events: int = 100_000, request_days: int = 7) -> dict:
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute(
             "DELETE FROM realtime_events WHERE datetime(created_at) < datetime('now', ?)",
             (f"-{max(1, event_days)} days",),
@@ -4942,7 +4973,7 @@ def get_realtime_events(after_event_id: int, scopes: list[dict], limit: int = 50
     clauses, scope_params = _realtime_scope_sql(scopes)
     if not clauses:
         return []
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             f"""SELECT event_id, event_type, topic, agent, msg_id, run_seq, payload, created_at
                 FROM realtime_events WHERE event_id>? AND ({' OR '.join(clauses)})
@@ -5005,7 +5036,7 @@ def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
     flow_run_ids = set()
     flow_scope_filters = []
     global_flow_scope = False
-    with _connect() as conn:
+    with _connection() as conn:
         # Keep the event watermark and every materialized message read on one
         # SQLite snapshot. Domain mutations publish their realtime row in the
         # same transaction, so anything absent here must have event_id > cursor
@@ -5118,7 +5149,7 @@ def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
 
 
 def get_realtime_request(principal: str, request_id: str) -> Optional[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             "SELECT request_type, request_hash, result FROM realtime_requests WHERE principal=? AND request_id=?",
             (principal, request_id),
@@ -5129,7 +5160,7 @@ def get_realtime_request(principal: str, request_id: str) -> Optional[dict]:
 
 
 def save_realtime_request(principal: str, request_id: str, request_type: str, request_hash: str, result: dict) -> dict:
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute(
             """INSERT OR IGNORE INTO realtime_requests
                (principal, request_id, request_type, request_hash, result) VALUES (?, ?, ?, ?, ?)""",
@@ -5140,7 +5171,7 @@ def save_realtime_request(principal: str, request_id: str, request_type: str, re
 
 def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[str], created_at: Optional[str] = None) -> str:
     event_created_at = created_at or _utc_now_iso()
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO run_events (msg_id, seq, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?)",
             (msg_id, seq, event_type, payload, event_created_at),
@@ -5194,18 +5225,18 @@ def _completed_run_text(conn: sqlite3.Connection, msg_id: int) -> Optional[str]:
 
 
 def get_completed_run_text(msg_id: int) -> Optional[str]:
-    with _connect() as conn:
+    with _connection() as conn:
         return _completed_run_text(conn, msg_id)
 
 
 def get_completed_run_status_raw(msg_id: int) -> Optional[str]:
-    with _connect() as conn:
+    with _connection() as conn:
         snapshot = _completed_run_snapshot(conn, msg_id)
         return snapshot[1] if snapshot else None
 
 
 def get_run_events(msg_id: int, after_seq: int = -1) -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             "SELECT seq, event_type, payload FROM run_events WHERE msg_id=? AND seq>? ORDER BY seq",
             (msg_id, after_seq),
@@ -5216,7 +5247,7 @@ def get_run_events(msg_id: int, after_seq: int = -1) -> list[dict]:
 # ── bookmarks ─────────────────────────────────────────────────────────────────
 
 def get_bookmarks() -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             """SELECT ma.msg_id AS id, m.topic, m.agent, ma.created_at AS saved_at
                FROM message_annotations ma
@@ -5238,7 +5269,7 @@ def remove_bookmark(msg_id: int) -> None:
 # ── message annotations ────────────────────────────────────────────────────────
 
 def get_message_annotations(kind: Optional[str] = None) -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         if kind:
             rows = conn.execute(
                 """SELECT msg_id, kind, payload, created_at, updated_at
@@ -5257,7 +5288,7 @@ def get_message_annotations(kind: Optional[str] = None) -> list[dict]:
 
 
 def get_message_annotation(msg_id: int, kind: str) -> Optional[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             """SELECT msg_id, kind, payload, created_at, updated_at
                FROM message_annotations
@@ -5273,7 +5304,7 @@ def set_message_annotation(
     payload: Optional[dict] = None,
 ) -> None:
     payload_text = json.dumps(payload or {}, sort_keys=True)
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute(
             """INSERT INTO message_annotations (msg_id, kind, payload)
                VALUES (?, ?, ?)
@@ -5285,7 +5316,7 @@ def set_message_annotation(
 
 
 def remove_message_annotation(msg_id: int, kind: str) -> None:
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute(
             "DELETE FROM message_annotations WHERE msg_id=? AND kind=?",
             (msg_id, kind),
@@ -5311,7 +5342,7 @@ def save_worktree(
     integration_worktree_path: Optional[str] = None,
     status: str = "pending",
 ) -> None:
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute(
             """INSERT INTO worktrees
                  (topic, agent, repo_root, worktree_path, branch_name, base_commit, integration_worktree_path, status)
@@ -5328,7 +5359,7 @@ def mark_worktree_synced(topic: str, agent: str, repo_root: str) -> None:
     """Record that a turn's changes were promoted, without deleting the worktree
     yet — actual removal is a later best-effort sweep (see worktree.cleanup_worktrees),
     so a background process the turn spawned isn't left without its working directory."""
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute(
             """UPDATE worktrees SET status='synced',
                  last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
@@ -5340,7 +5371,7 @@ def mark_worktree_synced(topic: str, agent: str, repo_root: str) -> None:
 
 
 def mark_worktree_status(topic: str, agent: str, repo_root: str, status: str) -> None:
-    with _connect() as conn:
+    with _connection() as conn:
         cur = conn.execute(
             """UPDATE worktrees SET status=?,
                  last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
@@ -5352,7 +5383,7 @@ def mark_worktree_status(topic: str, agent: str, repo_root: str, status: str) ->
 
 
 def get_worktrees(topic: str, agent: str) -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             "SELECT * FROM worktrees WHERE topic=? AND agent=?", (topic, agent)
         ).fetchall()
@@ -5360,7 +5391,7 @@ def get_worktrees(topic: str, agent: str) -> list[dict]:
 
 
 def delete_worktree(topic: str, agent: str, repo_root: str) -> None:
-    with _connect() as conn:
+    with _connection() as conn:
         row = conn.execute(
             "SELECT 1 FROM worktrees WHERE topic=? AND agent=? AND repo_root=?",
             (topic, agent, repo_root),
@@ -5398,12 +5429,12 @@ def _insert_worktree_changed_event(
 def delete_all_worktrees(topic: str, agent: str) -> None:
     # Bulk deletion accompanies removal/reset of the owning UI scope, so there
     # is no surviving transcript to converge with per-turn worktree events.
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute("DELETE FROM worktrees WHERE topic=? AND agent=?", (topic, agent))
 
 
 def get_all_worktrees_for_topic(topic: str) -> list[dict]:
-    with _connect() as conn:
+    with _connection() as conn:
         rows = conn.execute(
             "SELECT * FROM worktrees WHERE topic=?", (topic,)
         ).fetchall()
@@ -5412,5 +5443,5 @@ def get_all_worktrees_for_topic(topic: str) -> list[dict]:
 
 def delete_all_topic_worktrees(topic: str) -> None:
     # See delete_all_worktrees: topic deletion removes the subscribed scope.
-    with _connect() as conn:
+    with _connection() as conn:
         conn.execute("DELETE FROM worktrees WHERE topic=?", (topic,))

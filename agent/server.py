@@ -80,7 +80,7 @@ from .memory import (
     write_topic_memory,
 )
 from .stats_db import (
-    init_db, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
+    init_db, database_lifetime, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
     get_stats_by_agent_breakdown, get_stats_by_breakdown, get_stats_by_turn, get_stats_filter_options,
     list_stats_filter_presets, create_stats_filter_preset, update_stats_filter_preset,
     delete_stats_filter_preset,
@@ -378,6 +378,15 @@ async def _resume_stalled_flows_on_startup():
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    # Enclose startup as well as shutdown so startup failures also release the
+    # idle WAL connection. It is opened and closed on the event loop thread.
+    with database_lifetime():
+        async with _server_lifespan(_app):
+            yield
+
+
+@asynccontextmanager
+async def _server_lifespan(_app: FastAPI):
     from .context import runtime_templates
     runtime_templates()
     from .watch_config import load_watch_configuration

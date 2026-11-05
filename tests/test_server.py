@@ -2743,3 +2743,45 @@ def test_shore_devices_list_and_revoke(monkeypatch, shore_enabled_for_test):
 
     assert client.post("/shore/devices/revoke", json={"device_id": device.device_id}).json() == {"ok": True}
     assert client.post("/shore/devices/revoke", json={"device_id": "unknown"}).json() == {"ok": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "startup", "serving"])
+async def test_lifespan_releases_idle_database_connection(tmp_path, monkeypatch, failure):
+    from contextlib import asynccontextmanager
+
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    opened = []
+    original_connect = stats_db._connect
+
+    def track_connect():
+        conn = original_connect()
+        opened.append(conn)
+        return conn
+
+    @asynccontextmanager
+    async def fake_server_lifespan(app):
+        assert len(opened) == 1
+        assert not opened[0].in_transaction
+        if failure == "startup":
+            raise RuntimeError("startup")
+        yield
+
+    monkeypatch.setattr(stats_db, "_connect", track_connect)
+    monkeypatch.setattr(server, "_server_lifespan", fake_server_lifespan)
+
+    async def run():
+        async with server._lifespan(server.app):
+            assert opened[0].execute("SELECT 1").fetchone()[0] == 1
+            if failure == "serving":
+                raise RuntimeError("serving")
+
+    if failure:
+        with pytest.raises(RuntimeError, match=failure):
+            await run()
+    else:
+        await run()
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")

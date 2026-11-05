@@ -1,7 +1,7 @@
 ---
 status: accepted (branchless isolation implemented; prior worktree/branch mechanism superseded)
 date: 2026-07-09
-updated: 2026-11-03
+updated: 2026-11-04
 ---
 # ADR-0025: Per-Turn Git Worktree Isolation for Agent Changes
 
@@ -95,6 +95,39 @@ backing-checkout changes predictably, coordinate promotion per repo, avoid
 promotion during an active merge or rebase, and preserve isolated edits with
 a clear retry or manual recovery path. These are criteria for future work,
 not guarantees added by this change.
+
+### 2026-11-04: Reconsider the default — shared-checkout change-list spillover
+
+**Known flaw with `worktree.enabled: false`.** Turns sharing a checkout can
+see and modify one another's unfinished edits. With overlapping turns, a
+pre/post-turn repository diff can include changes made by another turn or by
+the user, so the displayed change list cannot reliably attribute edits to the
+turn that displays it. Later turns also inherit earlier uncommitted edits;
+that shared state is expected for a checkout, but does not establish who made
+each change. This is a correctness limitation, not just a coordination or
+presentation inconvenience. A turn's change list must not be presented as an
+exclusive record of its own edits when isolation is off.
+
+**Decision under reconsideration.** The November 3 default change traded
+promotion/recovery failures for shared-checkout interference and unreliable
+change attribution. It should not be described as resolving parallel editing
+or providing trustworthy per-turn change lists. Record both failure modes
+when evaluating the default; this note does not change the runtime default
+or claim that the isolation/recovery issues have been fixed.
+
+**Interim guidance.** Use separate, persistent Git worktrees for independent
+parallel tasks, with each topic's code root pointing at its own checkout.
+Integrate explicitly when the task is ready. Agents sharing one checkout
+still need coordination. Sequential turns in a shared checkout inherit its
+existing edits; without isolation, repository diffs alone are not proof of
+per-turn ownership. Automatic per-turn isolation remains an opt-in with the
+promotion/recovery limitations documented above.
+
+**Public guidance.** Review any blog post or documentation recommending the
+disabled default for parallel work or implying isolated change attribution.
+Correct those claims and explain the limitation. Whether a post needs a
+correction, temporary withdrawal, or retraction depends on its actual claims;
+this note does not assert that a particular post has been reviewed.
 
 ### Configuring the shipped implementation
 

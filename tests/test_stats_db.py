@@ -2823,3 +2823,73 @@ def test_topic_subtree_filter_escapes_like_wildcards(tmp_path, monkeypatch):
 
     payload = stats_db.get_messages_flat(topic="t1_cat", topic_subtree=True)
     assert {item["topic"] for item in payload["items"]} == {"t1_cat", "t1_cat.sub"}
+
+
+def test_connection_context_closes_after_commit_and_rollback(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    with stats_db._connection() as conn:
+        conn.execute("CREATE TABLE example (value INTEGER)")
+        conn.execute("INSERT INTO example VALUES (1)")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
+    with pytest.raises(ValueError):
+        with stats_db._connection() as failed:
+            failed.execute("INSERT INTO example VALUES (2)")
+            raise ValueError("abort")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        failed.execute("SELECT 1")
+    with stats_db._connection() as check:
+        assert [tuple(row) for row in check.execute("SELECT * FROM example")] == [(1,)]
+
+
+def test_replay_reader_does_not_block_streaming_writer(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    # Hold the same explicit read snapshot used by realtime replay while a
+    # separate connection publishes. A rollback-journal DB fails this commit.
+    with stats_db._connection() as reader:
+        assert reader.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        reader.execute("BEGIN")
+        before = reader.execute("SELECT COUNT(*) FROM realtime_events").fetchone()[0]
+        with stats_db._connection() as writer:
+            writer.execute("PRAGMA busy_timeout=50")
+            writer.execute("INSERT INTO realtime_events(event_type) VALUES ('test')")
+        assert reader.execute("SELECT COUNT(*) FROM realtime_events").fetchone()[0] == before
+    with stats_db._connection() as check:
+        assert check.execute("SELECT COUNT(*) FROM realtime_events").fetchone()[0] == before + 1
+
+
+def test_concurrent_publications_with_active_reader(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    def publish(topic):
+        return [stats_db.insert_realtime_event("test", topic, None) for _ in range(25)]
+
+    with stats_db._connection() as reader:
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM realtime_events").fetchone()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            ids = [event_id for batch in pool.map(publish, ["a", "b", "c", "d"]) for event_id in batch]
+    assert len(set(ids)) == 100
+    assert stats_db.get_realtime_cursor() == max(ids)
+
+
+def test_database_lifetime_keeps_wal_between_writes_without_pinning_snapshot(tmp_path, monkeypatch):
+    db_path = tmp_path / "squid.db"
+    monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
+    stats_db.init_db()
+    wal = tmp_path / "squid.db-wal"
+    with stats_db.database_lifetime():
+        stats_db.insert_realtime_event("test", "a", None)
+        first_size = wal.stat().st_size
+        stats_db.insert_realtime_event("test", "b", None)
+        assert wal.stat().st_size > first_size > 0
+        # The idle connection must not pin a snapshot or prevent checkpointing.
+        with stats_db._connection() as conn:
+            busy, frames, checkpointed = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            assert (busy, frames, checkpointed) == (0, 0, 0)
+    with stats_db._connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM realtime_events").fetchone()[0] == 2
