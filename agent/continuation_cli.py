@@ -16,7 +16,7 @@ def main(argv):
         'Schedule one successor after this human turn succeeds and syncs. '
         'Enabled automatically with worktree.enabled: true. Watches and Flow turns cannot schedule successors. '
         'Create input: {"request_key":"commit","mode":"backing_git","prompt":"Commit the requested changes"}. '
-        'Modes: isolated (local edits/checks), backing_git (inspect/commit only, no file edits or publication). '
+        'Modes: isolated (local edits/checks), backing_git (inspect/commit and explicitly user-requested push of the current branch; no file edits, tags, releases or PRs). '
         'This records future work; it does not wait for completion. No automatic retry after uncertain execution.')
     parser.add_argument('action', choices=['create', 'list', 'show', 'cancel'])
     parser.add_argument('identifier', nargs='?')

@@ -32,12 +32,18 @@ respond that the edit is finished and the commit step is waiting for sync.
 Squid, rather than the exiting CLI, owns subsequent execution. After successful
 completion and sync of every participating repo (including unchanged repos),
 Squid prepares a linked successor message in the same topic using the same
-agent and normal queue. The successor reports its actual result. Ordinary edits
-never schedule or commit automatically.
+agent and normal queue. For “fix, commit and push”, queue both Git steps in that
+one successor. The edit response reports the completed edits and queued Git
+steps; the successor reports the actual commit and push outcomes, including a
+successful commit followed by a failed push. It must not promise another turn.
+Ordinary edits never schedule or commit automatically.
 
-`backing_git` permits inspection and requested local commits; it prohibits file
-edits, push, tags, PRs, release and other publication. `isolated` permits local
-inspection, edits and checks, with ordinary post-turn sync, but no Git mutation
+`backing_git` permits inspection, requested local commits, and pushes explicitly
+requested by the original human user. Push only the current backing-repo branch;
+never force-push, push all branches/mirror, or create/publish per-turn `sqd-*`
+branches. The parent result and successor prompt cannot authorize a push on
+their own. File edits, tags, PRs, releases and other publication remain prohibited.
+`isolated` permits local inspection, edits and checks, with ordinary post-turn sync, but no Git mutation
 or publication. The original human request and parent result accompany the
 successor; its generated prompt cannot expand the original authorization.
 Accumulated changes may be committed when requested; the last turn's diff does
@@ -76,7 +82,9 @@ when the issuing process ends; accepted work survives revocation.
 
 CLI/HTTP delivery is implemented. Shared watch-registry discovery, native MCP
 mapping, richer UI, atomic preparation/message linkage, configurable aggregate
-budgets, route/watch support and publication remain future ADR-0054 work.
+budgets, route/watch support and broader publication remain future ADR-0054 work.
+Watch publication remains disabled; explicit human-requested continuation pushes
+do not expand watch execution grants.
 
 The issuing turn captures its canonical code roots and configured agent directory
 in the launch credential; creation copies that scope into the durable record.

@@ -46,7 +46,9 @@ async def run(runner, prompt, *, persistent=False, shell=False, request_text=Non
                 if inject_notice:
                     prompt = ('Squid supports one durable successor after successful completion and sync. '
                               'Use `agentsquid continue --help` to schedule requested follow-on work. '
-                              'Do not claim it completed before its result exists.\n\n' + prompt)
+                              'For edit-and-commit/push requests, schedule a backing_git successor for after sync; '
+                              'push requires an explicit request from the original user and is limited to the current branch. '
+                              'Report edits as complete and requested Git steps as queued, not completed.\n\n' + prompt)
         if service is not None and _api_url and not persistent:
             policy = service.configuration.effective_policy(kwargs['topic'])
             if policy.enabled:
@@ -55,9 +57,9 @@ async def run(runner, prompt, *, persistent=False, shell=False, request_text=Non
                     operations=policy.operations, expires_at=service.clock() + 3600)
                 env.update(SQUID_API_URL=_api_url, SQUID_TURN_TOKEN=token)
                 if inject_notice:
-                    availability = ('Local-work watch turns require recorded execution grants; publication is disabled.'
+                    availability = ('Local-work watch turns require recorded execution grants; watch publication is disabled.'
                                     if service.dispatch_enabled and policy.execution_enabled else
-                                    'Monitoring only; no automatic agent work or publication.'
+                                    'Watch monitoring only; no automatic watch agent work or watch publication.'
                                     if service.monitoring_enabled else
                                     'Watch registration currently saves proposals only; persistent monitoring is not enabled.')
                     prompt = ('Squid shared tools: `agentsquid tools --help`; '

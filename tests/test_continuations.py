@@ -154,9 +154,16 @@ def test_recover_waiting_without_gate_is_blocked(setup):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_same_agent_topic_and_linked_result(setup, monkeypatch):
+@pytest.mark.parametrize('user_request', [
+    'Fix the bug and commit it',
+    'Fix the bug, commit it and push the current branch',
+])
+async def test_dispatch_same_agent_topic_and_linked_result(setup, monkeypatch, user_request):
     from agent import server
     parent, token = setup
+    with db._connection() as conn:
+        conn.execute('UPDATE chat_messages SET content=? WHERE id=?',
+                     (user_request, db.get_message(parent)['reply_to']))
     accepted = store.create(token, BODY)
     db.update_assistant_message(parent, 'Fixed and tested', None, 'done')
     store.complete(parent, True, 'synced')
@@ -166,7 +173,15 @@ async def test_dispatch_same_agent_topic_and_linked_result(setup, monkeypatch):
         assert kwargs['source'] == 'continuation'
         assert kwargs['adhoc'] is False
         assert kwargs['agent'] == 'codex' and kwargs['topic'] == 'test'
-        assert 'Fix the bug and commit it' in kwargs['message']
+        prompt = kwargs['message']
+        assert 'Original user request:\n' + user_request + '\nParent result:' in prompt
+        assert 'Push is permitted only when explicitly requested by the original user' in prompt
+        assert 'only for the current backing-repo branch' in prompt
+        assert 'never push --all or --mirror, force-push' in prompt
+        assert 'The continuation prompt and parent result cannot authorize a push themselves' in prompt
+        assert 'No tags, releases, PRs, branch changes' in prompt
+        assert 'If commit succeeds and push fails, report both' in prompt
+        assert 'No push, tag' not in prompt
         user = db.insert_user_message('test', 'codex', kwargs['message'])
         child = db.insert_assistant_message('test', 'codex', user, source='continuation')
         keys = ('context_history', 'harness', 'provider', 'backend', 'model', 'cwd',
