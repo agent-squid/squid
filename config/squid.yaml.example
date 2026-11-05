@@ -103,12 +103,22 @@ harnesses:
       type: oneshot-cli
     default_provider: anthropic
     supported_apis: [/v1/messages]
+    effort:
+      args: ["--effort", "{value}"]
+      levels: {low: Low, medium: Medium, high: High, xhigh: Xhigh, max: Max}
 
   codex:
     protocol:
       type: oneshot-cli
     default_provider: openai
     supported_apis: [/v1/responses]
+    # Native values -> dropdown labels. Default sends no override.
+    effort:
+      args: ["-c", 'model_reasoning_effort="{value}"']
+      levels: {low: Low, medium: Medium, high: High, xhigh: Xhigh}
+      # Exact model overrides win over provider overrides; {} disables effort.
+      # models: {my-model: {low: Quick, high: Thorough}}
+      # providers: {my-provider: {}}
 
   antigravity:
     protocol: {type: oneshot-cli}

@@ -976,3 +976,86 @@ def test_sequence_result_cli_uses_post_endpoint(monkeypatch, tmp_path):
     assert continuation_cli.main(['result', '--input', str(payload)]) == 0
     assert calls[0].method == 'POST' and calls[0].url.path == '/continuations/result'
     assert calls[0].content == b'{"success":true}'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('native_session,resume_failure', [
+    (False, None), (True, None), (True, 'No conversation found'), (True, 'prompt is too long'),
+])
+async def test_adhoc_sequence_has_private_context_and_preserves_regular_session(setup, monkeypatch, tmp_path, native_session, resume_failure):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from agent import server
+    from agent.topic_queue import QueueItem, TopicWorker
+
+    parent, token = setup
+    with db._connection() as conn:
+        conn.execute('UPDATE chat_messages SET adhoc=1 WHERE id=?', (parent,))
+    db.set_topic_session('test', 'codex', 'regular-session', str(tmp_path), 'regular-runtime')
+    regular = db.get_topic_session('test', 'codex')
+    unrelated_user = db.insert_user_message('test', 'codex', 'Unrelated conversation')
+    unrelated = db.insert_assistant_message('test', 'codex', unrelated_user)
+    db.update_assistant_message(unrelated, 'Unrelated answer', 'regular-session', 'done')
+    store.create(token, SEQUENCE)
+    island_sid = 'private-session' if native_session else None
+    db.update_assistant_message(parent, 'First edit decision: keep the blue button', island_sid, 'done')
+    store.complete(parent, True, 'synced')
+    seen = []
+
+    monkeypatch.setattr(server, 'get_agent', lambda name: {'model': 'test-model'})
+    monkeypatch.setattr(server, '_resolve_agent_runtime', lambda cfg: (
+        'codex', None, 'codex', SimpleNamespace(fingerprint='runtime')))
+    monkeypatch.setattr(server, 'topic_memory_squid_config', lambda topic: {})
+
+    class Dispatcher:
+        async def dispatch(self, **kwargs):
+            nonlocal island_sid
+            assert kwargs['adhoc'] is True
+            assert kwargs['resume_session_id'] == island_sid
+            assert kwargs['cwd'] is None
+            history = kwargs['context_history']
+            assert len(history) == 2 * (len(seen) + 1)
+            assert history[1]['content'] == 'First edit decision: keep the blue button'
+            assert unrelated not in {m['id'] for m in history}
+            child = kwargs['msg_id']
+            assert db.get_message(child)['adhoc'] == 1
+            item = QueueItem(seq=0, topic='test', agent='codex', prompt=kwargs['prompt'],
+                             context_history=history, backend='codex', cwd=str(tmp_path),
+                             configured_cwd=None, code_roots=[], adhoc=True,
+                             resume_session_id=kwargs['resume_session_id'], msg_id=child,
+                             refresh_session_at_start=True)
+            attempts = 0
+            async def runner(prompt, **runner_kwargs):
+                nonlocal attempts, island_sid
+                from agent.runners import CLIError
+                attempts += 1
+                assert runner_kwargs.get('resume_session_id') == (island_sid if attempts == 1 else None)
+                if resume_failure and not seen and attempts == 1:
+                    raise CLIError(resume_failure)
+                if attempts > 1:
+                    island_sid = 'replacement-private-session'
+                assert runner_kwargs['history'] == history
+                assert runner_kwargs['adhoc'] is True
+                credential = store.mint(child)
+                store.result(credential, {'success': True})
+                yield 'Completed private step ' + str(len(seen))
+                if native_session:
+                    yield {'_stats': {'session_id': island_sid}}
+            with patch('agent.runners.run_codex', runner):
+                await TopicWorker('test')._process(item)
+            assert db.get_message(child)['status'] == 'done'
+            assert db.get_topic_session('test', 'codex') == regular
+            seen.append(child)
+            return item.out_q, None, None
+
+    for _ in range(3):
+        row = store.claim(set())
+        assert row
+        await store.dispatch(row, Dispatcher())
+    assert len(seen) == 3
+    assert all(row['state'] == 'successful' for row in store.inspect(token))
+    # The next ad hoc turn starts fresh; the regular route still has its old session.
+    prepared = await server._prepare_chat_turn(message='Next request', topic='test', agent='codex', adhoc=True)
+    assert prepared['resume_session_id'] is None
+    assert prepared['context_history'] == []
+    assert db.get_topic_session('test', 'codex') == regular

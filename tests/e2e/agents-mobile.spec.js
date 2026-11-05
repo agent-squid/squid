@@ -5,7 +5,7 @@ async function mockApp(page) {
     status: 'ok',
     backends: {},
     harnesses: [
-      { id: 'claude', label: 'Claude Code', installed: true, protocol: 'stdio', default_provider: 'anthropic', compatible_providers: ['anthropic'] },
+      { id: 'claude', label: 'Claude Code', installed: true, protocol: 'stdio', default_provider: 'anthropic', compatible_providers: ['anthropic'], effort: { levels: { low: 'Quick', high: 'Thorough' }, models: { 'no-thinking': {} } } },
       { id: 'opencode', label: 'OpenCode', installed: true, protocol: 'stdio', default_provider: 'openai', compatible_providers: ['openai'] },
     ],
     providers: {
@@ -149,4 +149,54 @@ test.describe('agents view — mobile', () => {
     expect(headerTexts.fullText).toBe('Runtime');
     expect(headerTexts.shortText).toBe('Run');
   });
+});
+
+
+test('configured effort resets on model changes and fits mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockApp(page);
+  await page.goto('/');
+  await navigateToAgentsMobile(page);
+  await page.locator('#af-harness').selectOption('claude');
+  const effort = page.locator('#af-effort');
+  await expect(effort).toBeEnabled();
+  await expect(effort.locator('option')).toHaveText(['Default', 'Quick', 'Thorough']);
+  await effort.selectOption('high');
+  await page.locator('#af-model').fill('no-thinking');
+  await expect(effort).toBeDisabled();
+  await expect(effort).toHaveValue('');
+  await page.locator('#af-model').fill('claude-sonnet-4-6');
+  await expect(effort).toBeEnabled();
+  await expect(effort).toHaveValue('');
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    const model = await page.locator('#af-model').boundingBox();
+    const box = await effort.boundingBox();
+    expect(Math.abs(model.y - box.y)).toBeLessThan(2);
+    expect(model.width).toBeGreaterThan(box.width * 1.5);
+    expect(box.x + box.width).toBeLessThanOrEqual(width);
+  }
+  let saved;
+  await page.route('**/config/agents', async r => {
+    if (r.request().method() === 'POST') {
+      saved = r.request().postDataJSON();
+      await r.fulfill({ json: { ok: true, sessions_cleared: [] } });
+    } else await r.fulfill({ json: [] });
+  });
+  await page.locator('#af-name').fill('new-agent');
+  await effort.selectOption('high');
+  await page.locator('.agent-save-btn').click();
+  await expect.poll(() => saved?.effort).toBe('high');
+});
+
+
+test('agent list shows effort with runtime default model', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockApp(page);
+  await page.route('**/config/agents', r => r.fulfill({ json: [
+    { name: 'default-model', harness: 'claude', provider: 'anthropic', model: null, effort: 'high' },
+  ] }));
+  await page.goto('/');
+  await navigateToAgentsMobile(page);
+  await expect(page.locator('#agents-list .agent-model')).toHaveText('Default · Thorough');
 });

@@ -1300,10 +1300,21 @@ body {
   margin: 0.45rem 0.7rem;
   color: var(--text-dim);
 }
-.gitdiff-file-list {
-  max-height: min(28rem, 60vh);
-  overflow-y: auto;
-  overscroll-behavior-y: contain;
+.gitdiff-file-list .diff-scroll {
+  max-height: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.gitdiff-file-list--collapsed .gitdiff-file-row:nth-child(n + 16) { display: none; }
+.gitdiff-show-all {
+  margin: 0.4rem 0.7rem;
+  background: none;
+  border: 1px solid var(--surface-3);
+  border-radius: 3px;
+  color: var(--text-mid);
+  font: inherit;
+  cursor: pointer;
+  padding: 0.25em 0.6em;
 }
 .gitdiff-file-row {
   border-top: 1px solid var(--surface-3); display: flex; flex-wrap: wrap; align-items: center;
@@ -5212,7 +5223,10 @@ button {
 #af-name    { width: 80px; }
 #af-harness { width: 96px; }
 #af-provider { width: 96px; }
-#af-model   { width: 130px; }
+.agent-model-effort { display: flex; gap: 0.3rem; min-width: 0; width: 200px; }
+.agent-model-effort #af-model, .agent-model-effort #acp-model { flex: 2 1 0; min-width: 0; width: 0; }
+.agent-model-effort #af-effort, .agent-model-effort #acp-effort { flex: 1 1 0; min-width: 0; width: 0; }
+.acp-row .agent-model-effort { flex: 1; min-width: 160px; }
 .model-picker { width: 28px; padding: 0.25rem 0.15rem; text-align: center; }
 .model-picker[hidden] { display: none; }
 #af-cwd     { width: 130px; }
@@ -5912,7 +5926,7 @@ mark.search-kw-highlight {
   #af-name    { grid-area: name; }
   #af-harness { grid-area: harness; }
   #af-provider { grid-area: provider; }
-  #af-model   { grid-area: model; }
+  .agent-form-row .agent-model-effort { grid-area: model; width: 100%; }
   #af-model-picker { grid-area: picker; }
   .agent-form-row .home-mode-field { grid-area: home; justify-self: center; }
   #af-cwd     { grid-area: cwd; }

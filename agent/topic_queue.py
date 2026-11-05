@@ -177,6 +177,7 @@ class QueueItem:
     harness: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    effort: Optional[str] = None
     backend: Optional[str] = None
     cwd: Optional[str] = None
     source_cwd: Optional[str] = None
@@ -480,6 +481,10 @@ class TopicWorker:
         try:
             harness, provider = split_agent_ref(item.harness or item.backend, item.provider)
             resolved = resolve_agent(harness, provider)
+            from .effort import effort_args
+            selected_effort_args = () if item.native_shell else effort_args(
+                harness, resolved.provider.id, item.model, item.effort
+            )
         except ValueError as exc:
             await item.out_q.put({"_error": str(exc)})
             await item.out_q.put(None)
@@ -630,7 +635,7 @@ class TopicWorker:
             adhoc=item.adhoc, msg_id=item.msg_id,
             prompt_preview=item.display_prompt,
             backend_id=resolved.harness, backend_env=backend_env,
-            backend_settings=resolved.harness_settings(), backend_args=resolved.args,
+            backend_settings=resolved.harness_settings(), backend_args=resolved.args + selected_effort_args,
         )
         if item.native_shell:
             kwargs = dict(
@@ -782,7 +787,7 @@ class TopicWorker:
                     kwargs.pop("resume_session_id", None)
                     await _stream(effective_prompt, **kwargs)
                 elif item.resume_session_id and "prompt is too long" in exc_str.lower():
-                    if item.agent:
+                    if item.agent and not item.adhoc:
                         clear_topic_session(item.topic, item.agent)
                     status = (
                         f"Session context window exceeded — starting fresh\n"
@@ -1046,6 +1051,7 @@ class TopicDispatcher:
         provider: Optional[str] = None,
         backend: Optional[str] = None,
         model: Optional[str] = None,
+        effort: Optional[str] = None,
         agent: Optional[str] = None,
         cwd: Optional[str] = None,
         source_cwd: Optional[str] = None,
@@ -1114,7 +1120,7 @@ class TopicDispatcher:
             seq=0, topic=topic, agent=agent,
             prompt=prompt, display_prompt=display_prompt, context_history=context_history,
             harness=resolved_harness, provider=resolved_provider, backend=backend,
-            model=model, cwd=cwd, source_cwd=source_cwd,
+            model=model, effort=effort, cwd=cwd, source_cwd=source_cwd,
             configured_cwd=configured_cwd,
             code_roots=code_roots, timeout=response_timeout,
             resume_session_id=resume_session_id,

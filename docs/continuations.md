@@ -13,6 +13,13 @@ is ignored. With worktree isolation disabled, continuations are disabled and
 ordinary turns can edit and commit directly. Existing pending work remains
 subject to its recorded mode during cleanup and recovery.
 
+Sequences started from an ad hoc turn keep a private session across their steps.
+Each step resumes the preceding step's native session when available, with only
+that sequence's user/assistant history supplied as a fallback for stateless
+runners or failed resumes. They never read or update the route's regular
+session. A later independent ad hoc prompt starts fresh. Sequences started from
+a regular session retain the normal route session behavior.
+
 A human one-shot CLI turn receives a separate, short-lived
 `SQUID_CONTINUE_TOKEN` and continuation tool guidance. Watch enablement is not
 required. Watch, Flow, shell and persistent-harness turns cannot schedule work.

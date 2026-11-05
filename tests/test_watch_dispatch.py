@@ -866,3 +866,28 @@ async def test_upgrade_cancels_legacy_orphaned_watch_flow(setup):
     assert watch_flows.owned(flow_id)
     assert stats_db.get_flow_run(flow_id)['status'] == 'cancelled'
     assert await flow._dispatch_ready_durable_steps(flow_id) == 0
+
+
+@pytest.mark.parametrize('change', ['level', 'template', 'removed'])
+def test_effort_change_invalidates_watch_execution_grant(setup, monkeypatch, change):
+    from agent import harnesses
+    service, _, _, watch, _, _ = setup
+    config = stats_db.get_agent('watch-agent')
+    stats_db.upsert_agent('watch-agent', 'codex', 'openai', None, cwd=config['cwd'], effort='high')
+    with stats_db._connect() as conn:
+        conn.execute('UPDATE watch_execution_grants SET revoked_at=99')
+    watch_runs.execution_grant(service, topic='squid', watch_id=watch['id'], agent='watch-agent',
+        instructions='Inspect and fix local files', max_runs=3, max_attempts=2,
+        request_key='effort-execution', user_action='operator:effort')
+    run_id, _ = queued(setup)
+    if change == 'level':
+        stats_db.upsert_agent('watch-agent', 'codex', 'openai', None, cwd=config['cwd'], effort='low')
+    elif change == 'removed':
+        monkeypatch.setitem(harnesses._HARNESS_CONFIG['codex'], 'effort', {})
+    else:
+        monkeypatch.setitem(harnesses._HARNESS_CONFIG['codex'], 'effort', {
+            'args': ['--different-effort', '{value}'], 'levels': {'high': 'High'},
+        })
+    assert not watch_runs.begin(service, run_id)
+    assert rows('watch_runs')[0]['started_at'] is None
+    assert rows('watch_events')[0]['disposition'] == 'pending'

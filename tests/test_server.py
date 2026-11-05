@@ -1954,6 +1954,7 @@ def test_agent_save_supports_legacy_backend_not_null_schema(tmp_path, monkeypatc
             )
         """)
 
+    stats_db.init_db()
     changed = stats_db.upsert_agent(
         "oc",
         "opencode",

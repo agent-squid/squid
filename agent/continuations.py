@@ -297,6 +297,28 @@ def fail(identifier, reason):
         conn.execute("UPDATE continuations SET state='blocked',reason=? WHERE id=? AND state IN ('claimed','running')", (reason, identifier))
 
 
+def _sequence_history(row):
+    """Only this sequence's ancestors, for stateless runners or failed resumes."""
+    turns = []
+    parent_id = row['parent_id']
+    origin_id = row['origin_parent_id'] or parent_id
+    with db._connection() as conn:
+        for _ in range(MAX_STEPS + 1):
+            assistant = db.get_message(parent_id)
+            user = db.get_message(assistant['reply_to']) if assistant else None
+            if not assistant or not user:
+                raise ValueError('sequence_context_unavailable')
+            turns.append([user, assistant])
+            if parent_id == origin_id:
+                return [message for turn in reversed(turns) for message in turn]
+            previous = conn.execute('SELECT parent_id FROM continuations WHERE child_id=?',
+                                    (parent_id,)).fetchone()
+            if not previous:
+                break
+            parent_id = previous['parent_id']
+    raise ValueError('sequence_context_unavailable')
+
+
 async def dispatch(row, dispatcher):
     from .server import _prepare_chat_turn
     from fastapi.responses import JSONResponse
@@ -335,14 +357,21 @@ async def dispatch(row, dispatcher):
               + '\nReport actual completed steps and any remaining failure or limitation concisely. '
                 'A scheduled step is not a completed step. If commit succeeds and push fails, report both; '
                 'do not imply rollback or promise another automatic turn.')
+    island = bool(origin['adhoc'])
+    history = await asyncio.to_thread(_sequence_history, row) if island else None
     prepared = await _prepare_chat_turn(message=prompt, topic=row['topic'], agent=row['agent'],
-                                       adhoc=False, source='continuation')
+                                       adhoc=island, source='continuation')
     if isinstance(prepared, JSONResponse):
         await asyncio.to_thread(fail, row['id'], 'preparation_blocked')
         return
     # Claim is durable before preparation. A crash in this gap is ambiguous,
     # rather than permission to prepare/execute a second child.
     await asyncio.to_thread(link, row['id'], prepared['asst_msg_id'])
+    if island:
+        # Ad hoc dispatch skips both regular-session lookup and publication.
+        # Resume only the immediately preceding turn in this sequence.
+        prepared['resume_session_id'] = parent.get('session_id')
+        prepared['context_history'] = history
     actual = capture_scope(prepared['code_roots'], prepared['configured_cwd'])
     if not await asyncio.to_thread(scope_matches, row, actual):
         await asyncio.to_thread(fail, row['id'], 'repository_scope_changed')
@@ -352,6 +381,7 @@ async def dispatch(row, dispatcher):
             'cwd', 'source_cwd', 'configured_cwd', 'response_timeout', 'resume_session_id',
             'adhoc', 'lookback', 'code_roots', 'display_prompt', 'worktree_setup_elapsed_ms', 'worktree_isolated')
     kwargs = {key: prepared[key] for key in keys}
+    kwargs['effort'] = prepared.get('effort')
     kwargs['response_timeout'] = min(kwargs['response_timeout'], 600)
     out, _, _ = await dispatcher.dispatch(prompt=prepared['effective_message'], msg_id=prepared['asst_msg_id'], **kwargs)
     while await out.get() is not None:

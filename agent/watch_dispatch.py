@@ -80,6 +80,7 @@ class WatchDispatch:
                     'adhoc', 'lookback', 'code_roots', 'display_prompt', 'worktree_setup_elapsed_ms',
                     'worktree_isolated')
             kwargs = {key: prepared[key] for key in keys}
+            kwargs['effort'] = prepared.get('effort')
             out, _, _ = await self.dispatcher.dispatch(prompt=prepared['effective_message'],
                 msg_id=prepared['asst_msg_id'], watch_run_id=run_id, **kwargs)
             queue_error = False

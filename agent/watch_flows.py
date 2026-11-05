@@ -127,7 +127,7 @@ async def dispatch(runtime, run_id):
                     'cwd', 'source_cwd', 'configured_cwd', 'response_timeout', 'resume_session_id',
                     'adhoc', 'lookback', 'code_roots', 'display_prompt', 'worktree_setup_elapsed_ms', 'worktree_isolated')
             out, _, _ = await runtime.dispatcher.dispatch(prompt=prepared['effective_message'],
-                msg_id=prepared['asst_msg_id'], watch_run_id=run_id, **{k: prepared[k] for k in keys})
+                msg_id=prepared['asst_msg_id'], watch_run_id=run_id, effort=prepared.get('effort'), **{k: prepared[k] for k in keys})
             queue_error = False
             while True:
                 chunk = await out.get()

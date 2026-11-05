@@ -52,6 +52,11 @@ def agent_revision(agent, topic):
         raise ValueError('unknown execution agent')
     resolved = resolve_agent(configuration.get('harness'), configuration.get('provider'))
     scope = {key: configuration.get(key) for key in ('harness', 'provider', 'model', 'cwd')}
+    if configuration.get('effort'):
+        from .effort import effort_args
+        scope['effort'] = configuration['effort']
+        scope['effort_args'] = effort_args(resolved.harness, resolved.provider.id,
+                                           configuration.get('model'), configuration['effort'])
     scope['runtime'] = resolved.fingerprint
     scope['code_roots'] = topic_memory_squid_config(topic).get('code_roots') or []
     return hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()

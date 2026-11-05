@@ -561,6 +561,7 @@ class AgentRequest(BaseModel):
     harness: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
+    effort: Optional[str] = None
     cwd: Optional[str] = None
     home_mode: Optional[Literal["user_home", "blank_home"]] = None
 
@@ -1260,6 +1261,7 @@ async def _prepare_chat_turn(
         "agent": resolved_agent,
         "backend": backend,
         "model": model,
+        "effort": agent_config.get("effort"),
         "cwd": cwd,
         "context_history": context_history,
         "user_msg_id": user_msg_id,
@@ -1380,6 +1382,7 @@ async def stream_response(
     shell_pinned_contents: Optional[list[str]] = None,
     shell_attached_paths: Optional[list[str]] = None,
     shell_topic_memory: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     meta_payload = {
         "agent": agent,
@@ -1388,6 +1391,7 @@ async def stream_response(
         "model": model,
         "msg_id": asst_msg_id,
         "adhoc": adhoc,
+        "effort": effort,
         "kind": "shell_result" if native_shell else "assistant",
         **({"shell_timeout": NATIVE_SHELL_TIMEOUT} if native_shell else {}),
     }
@@ -1405,7 +1409,7 @@ async def stream_response(
     out_q, seq, worker = await dispatcher.dispatch(
         topic=topic, prompt=message, context_history=context_history,
         harness=dispatch_harness, provider=dispatch_provider,
-        model=model, agent=agent, cwd=effective_cwd,
+        model=model, effort=effort, agent=agent, cwd=effective_cwd,
         source_cwd=source_cwd,
         configured_cwd=configured_cwd,
         response_timeout=response_timeout,
@@ -1575,7 +1579,7 @@ async def chat(req: ChatRequest):
         stream_response(
             prepared["effective_message"], prepared["topic"], prepared["agent"], prepared["backend"], prepared["model"], prepared["cwd"],
             prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
-            resume_session_id=prepared["resume_session_id"],
+            effort=prepared.get("effort"), resume_session_id=prepared["resume_session_id"],
             adhoc=prepared["adhoc"],
             lookback=prepared["lookback"],
             code_roots=prepared["code_roots"],
@@ -2465,13 +2469,15 @@ async def create_agent(req: AgentRequest):
     harness, provider = req.harness, req.provider
     try:
         resolved = resolve_agent(harness, provider)
+        from .effort import effort_args
+        effort_args(harness, resolved.provider.id, req.model, req.effort)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     # Existing agent's home_mode, if any -- read before upsert_agent() so a
     # brand-new agent (no prior row) never counts as a "change" that would
     # try to clear sessions that can't exist yet.
     prior = get_agent(req.name)
-    key_changed = upsert_agent(req.name, harness, provider, req.model, req.cwd)
+    key_changed = upsert_agent(req.name, harness, provider, req.model, req.cwd, req.effort)
     home_mode_changed = False
     if req.home_mode is not None:
         if prior is not None and prior.get("home_mode", "user_home") != req.home_mode:
@@ -2863,7 +2869,7 @@ async def auto_resolve_worktree_conflict(msg_id: int, req: WorktreeDiscardReques
         async for event in stream_response(
             prepared["effective_message"], prepared["topic"], prepared["agent"], prepared["backend"], prepared["model"], prepared["cwd"],
             prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
-            resume_session_id=prepared["resume_session_id"],
+            effort=prepared.get("effort"), resume_session_id=prepared["resume_session_id"],
             adhoc=prepared["adhoc"],
             lookback=prepared["lookback"],
             code_roots=prepared["code_roots"],
@@ -4367,7 +4373,7 @@ async def _run_realtime_chat(prepared: dict) -> None:
         prepared["effective_message"], prepared["topic"], prepared["agent"],
         prepared["backend"], prepared["model"], prepared["cwd"],
         prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
-        resume_session_id=prepared["resume_session_id"], adhoc=prepared["adhoc"],
+        effort=prepared.get("effort"), resume_session_id=prepared["resume_session_id"], adhoc=prepared["adhoc"],
         lookback=prepared["lookback"], code_roots=prepared["code_roots"],
         display_prompt=prepared["display_prompt"], source_cwd=prepared["source_cwd"],
         configured_cwd=prepared["configured_cwd"],

@@ -85,6 +85,7 @@ _TABLES = [
         harness    TEXT,
         provider   TEXT,
         model      TEXT,
+        effort     TEXT,
         cwd        TEXT,
         timeout    INTEGER,
         home_mode  TEXT NOT NULL DEFAULT 'user_home',
@@ -1135,6 +1136,8 @@ def init_db() -> None:
         agent_columns = _table_columns(conn, "agents")
         if "home_mode" not in agent_columns:
             conn.execute("ALTER TABLE agents ADD COLUMN home_mode TEXT NOT NULL DEFAULT 'user_home'")
+        if "effort" not in agent_columns:
+            conn.execute("ALTER TABLE agents ADD COLUMN effort TEXT")
         has_legacy_backend = "backend" in agent_columns
         conn.execute(
             """UPDATE agents
@@ -1267,15 +1270,15 @@ def get_agent(name: str) -> Optional[dict]:
 
 
 def upsert_agent(name: str, harness: str, provider: Optional[str], model: Optional[str],
-                 cwd: Optional[str] = None) -> bool:
+                 cwd: Optional[str] = None, effort: Optional[str] = None) -> bool:
     """Upsert agent config. Returns True if key attributes changed."""
     with _connection() as conn:
-        existing = conn.execute("SELECT harness, provider, model, cwd FROM agents WHERE name = ?", (name,)).fetchone()
+        existing = conn.execute("SELECT harness, provider, model, cwd, effort FROM agents WHERE name = ?", (name,)).fetchone()
         key_changed = existing and (
             existing["harness"] != harness or
             existing["provider"] != provider or
             existing["model"] != model or
-            existing["cwd"] != cwd
+            existing["cwd"] != cwd or existing["effort"] != effort
         )
         if "backend" in _table_columns(conn, "agents"):
             cur = conn.execute(
@@ -1299,6 +1302,7 @@ def upsert_agent(name: str, harness: str, provider: Optional[str], model: Option
                      cwd     = excluded.cwd""",
                 (name, harness, provider, model, cwd),
             )
+        conn.execute("UPDATE agents SET effort = ? WHERE name = ?", (effort, name))
     return bool(key_changed)
 
 

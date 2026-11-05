@@ -182,12 +182,15 @@ def _validate_harness(harness_id: str, raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"Harness {harness_id!r} must be a mapping")
 
-    allowed = {"label", "protocol", "interactive", "default_provider", "supported_apis", "compatible_providers"}
+    allowed = {"label", "protocol", "interactive", "default_provider", "supported_apis", "compatible_providers", "effort"}
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ValueError(f"Harness {harness_id!r} has unsupported field(s): {', '.join(unknown)}")
 
     result: dict[str, Any] = {}
+    if "effort" in raw:
+        from .effort import validate_effort_config
+        result["effort"] = validate_effort_config(raw["effort"])
     if "label" in raw:
         label = raw["label"]
         if not isinstance(label, str) or not label.strip():
@@ -354,6 +357,12 @@ def list_harnesses() -> list[dict[str, Any]]:
             "default_provider": HARNESS_DEFAULT_PROVIDER[harness_id],
             "supported_apis": sorted(HARNESS_SUPPORTED_APIS[harness_id]),
             "compatible_providers": _compatible_providers_for(harness_id),
+            "effort": effort_config_for(harness_id),
         }
         for harness_id in sorted(SUPPORTED_HARNESSES)
     ]
+
+
+def effort_config_for(harness_id: str) -> dict:
+    from .effort import DEFAULT_EFFORT
+    return _HARNESS_CONFIG[harness_id].get("effort", DEFAULT_EFFORT.get(harness_id, {}))

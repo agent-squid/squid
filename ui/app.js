@@ -4127,7 +4127,7 @@ function confirmAgentSessionClear(agentName, topics) {
     const copy = document.getElementById('agent-session-modal-copy');
     const topicList = document.getElementById('agent-session-modal-topics');
     title.textContent = `Save changes to "${agentName}"?`;
-    copy.textContent = 'Changing runtime, model, cwd, or sandboxed HOME will clear active sessions for this agent.';
+    copy.textContent = 'Changing runtime, model, effort, cwd, or sandboxed HOME will clear active sessions for this agent.';
     topicList.textContent = (topics || []).map(topic => `#${topic}`).join(', ');
     const close = (ok) => {
       modal.classList.remove('open');
@@ -7954,6 +7954,19 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
       if (fileBody) row.appendChild(fileBody);
 
       fileList.appendChild(row);
+    }
+
+    if (files.length > 15) {
+      fileList.classList.add('gitdiff-file-list--collapsed');
+      const showAll = document.createElement('button');
+      showAll.type = 'button';
+      showAll.className = 'gitdiff-show-all';
+      showAll.textContent = `Show all ${files.length} files`;
+      showAll.addEventListener('click', () => {
+        fileList.classList.remove('gitdiff-file-list--collapsed');
+        showAll.remove();
+      });
+      body.appendChild(showAll);
     }
 
     if (count <= 10) block.classList.add('tool-expanded');
@@ -13703,11 +13716,27 @@ function setProviderOptions(harness, selectedProvider = null, selectId = 'af-pro
   return providerSelect.value || '';
 }
 
+function syncEffortControl(prefix = 'af', selected) {
+  const select = document.getElementById(`${prefix}-effort`);
+  if (!select) return;
+  const harness = document.getElementById(`${prefix}-harness`)?.value;
+  const provider = document.getElementById(`${prefix}-provider`)?.value;
+  const model = document.getElementById(`${prefix}-model`)?.value.trim();
+  const config = _harnessMetadata[harness]?.effort || {};
+  const levels = config.models?.[model] ?? config.providers?.[provider] ?? config.levels ?? {};
+  const previous = selected === undefined ? select.value : selected;
+  select.disabled = !Object.keys(levels).length;
+  select.innerHTML = `<option value="">${select.disabled ? 'N/A' : 'Default'}</option>` +
+    Object.entries(levels).map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('');
+  select.value = Object.hasOwn(levels, previous) ? previous : '';
+}
+
 function syncAgentModelControls(harness, provider, selectPrefix = 'af') {
   const modelInput = document.getElementById(`${selectPrefix}-model`);
   const backend = runtimeRef(harness, provider || null);
   if (modelInput) modelInput.placeholder = backendModelHint(backend);
   populateModelPicker(`${selectPrefix}-model-picker`, `${selectPrefix}-model`, backend);
+  syncEffortControl(selectPrefix);
 }
 
 function selectedRuntime(selectPrefix = 'af') {
@@ -14077,8 +14106,11 @@ function renderAgentTable(agents) {
     : agentRows;
   const rows = visibleRows.map(({ a, ref, runtime, runtimeText }) => {
     const model = a.model || '';
-    const modelHtml = model
-      ? `<span class="agent-model" title="${escapeHtml(model)}">${escapeHtml(model)}</span>`
+    const effortConfig = _harnessMetadata[runtime.harness]?.effort || {};
+    const effortLevels = effortConfig.models?.[model] ?? effortConfig.providers?.[runtime.provider] ?? effortConfig.levels ?? {};
+    const effortLabel = a.effort ? (effortLevels[a.effort] || a.effort) : '';
+    const modelHtml = model || effortLabel
+      ? `<span class="agent-model" title="${escapeHtml(model || 'Runtime default')}">${escapeHtml(model || 'Default')}${effortLabel ? ` · ${escapeHtml(effortLabel)}` : ''}</span>`
       : '<span class="col-default">—</span>';
     const cwdHtml = a.cwd
       ? `<span class="agent-cwd agent-cwd-link" data-cwd="${escapeHtml(a.cwd)}" title="Open ${escapeHtml(a.cwd)} in file viewer">${escapeHtml(a.cwd)}</span>`
@@ -14109,7 +14141,7 @@ function renderAgentTable(agents) {
       <td class="col-home">${homeHtml}</td>
       <td class="col-cwd"><span class="agent-cwd-cell">${cwdHtml}${homeLinkHtml}</span></td>
       <td>
-        <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-harness="${escapeHtml(runtime.harness)}" data-provider="${escapeHtml(runtime.provider || '')}" data-backend="${escapeHtml(ref || '')}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" data-home-mode="${escapeHtml(homeMode)}" title="Edit agent">✎</button>
+        <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-harness="${escapeHtml(runtime.harness)}" data-provider="${escapeHtml(runtime.provider || '')}" data-backend="${escapeHtml(ref || '')}" data-effort="${escapeHtml(a.effort || '')}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" data-home-mode="${escapeHtml(homeMode)}" title="Edit agent">✎</button>
         <button class="del-btn" data-name="${escapeHtml(a.name)}" title="Delete agent (does not affect existing messages)">✕</button>
       </td>
     </tr>`;
@@ -14204,6 +14236,7 @@ function renderAgentTable(agents) {
       const provider = setProviderOptions(btn.dataset.harness, btn.dataset.provider || null);
       syncAgentModelControls(btn.dataset.harness, provider);
       document.getElementById('af-model').value   = btn.dataset.model;
+      syncEffortControl('af', btn.dataset.effort || '');
       document.getElementById('af-cwd').value     = btn.dataset.cwd;
       const afHomeMode = document.getElementById('af-home-mode');
       afHomeMode.value = btn.dataset.homeMode === 'blank_home' ? 'blank_home' : 'user_home';
@@ -14233,6 +14266,7 @@ function initAliases() {
   afProvider.addEventListener('change', () => {
     syncAgentModelControls(afHarness.value, afProvider.value || null);
   });
+  document.getElementById('af-model').addEventListener('input', () => syncEffortControl('af'));
   const afHomeMode = document.getElementById('af-home-mode');
   afHomeMode.addEventListener('change', () => _updateHomeModeIcon(afHomeMode));
   document.getElementById('config-editor-reload').addEventListener('click', loadConfigYaml);
@@ -14244,6 +14278,7 @@ function initAliases() {
       name:      document.getElementById('af-name').value.trim(),
       ...selectedRuntime(),
       model:     document.getElementById('af-model').value.trim() || null,
+      effort:    document.getElementById('af-effort').value || null,
       cwd:       document.getElementById('af-cwd').value.trim()   || null,
       home_mode: document.getElementById('af-home-mode').value,
     };
@@ -14255,6 +14290,7 @@ function initAliases() {
       const keyChanged = (existing.harness || '') !== body.harness ||
                          (existing.provider || null) !== body.provider ||
                          (existing.model || null) !== body.model ||
+                         (existing.effort || null) !== body.effort ||
                          (existing.cwd || null) !== body.cwd ||
                          (existing.home_mode || 'user_home') !== body.home_mode;
       if (keyChanged) {
@@ -14279,6 +14315,7 @@ function initAliases() {
         statusEl.textContent = cleared.length ? `saved ✓ (cleared sessions: ${cleared.join(', ')})` : 'saved ✓';
         document.getElementById('af-name').value  = '';
         document.getElementById('af-model').value = '';
+        syncEffortControl('af', '');
         document.getElementById('af-cwd').value   = '';
         const afHomeModeReset = document.getElementById('af-home-mode');
         afHomeModeReset.value = 'user_home';
@@ -14381,7 +14418,10 @@ function showAgentCreatePrompt(agentName, onSaved) {
         ${harnessOptions.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(_harnessMetadata[id]?.label || id)}</option>`).join('')}
       </select>
       <select id="acp-provider"></select>
+      <span class="agent-model-effort">
       <input id="acp-model" placeholder="${backendModelHint(runtimeRef(firstHarness, firstProvider))}" />
+      <select id="acp-effort" aria-label="Reasoning effort" title="Reasoning effort"><option value="">Default</option></select>
+      </span>
       <select id="acp-model-picker" class="model-picker" title="Pick a known model" aria-label="Pick a known model" hidden></select>
       <input id="acp-cwd" placeholder="cwd (default: ${_squidHome})" />
     </div>
@@ -14394,18 +14434,23 @@ function showAgentCreatePrompt(agentName, onSaved) {
   messages.scrollTop = messages.scrollHeight;
 
   const modelInput = prompt.querySelector('#acp-model');
+  modelInput.addEventListener('input', () => syncEffortControl('acp'));
+  syncEffortControl('acp');
   const harnessSelect = prompt.querySelector('#acp-harness');
   const providerSelect = prompt.querySelector('#acp-provider');
   setProviderOptions(firstHarness, firstProvider, 'acp-provider');
   populateModelPicker('acp-model-picker', 'acp-model', runtimeRef(firstHarness, providerSelect.value || firstProvider));
+  syncEffortControl('acp');
   harnessSelect.addEventListener('change', e => {
     setProviderOptions(e.target.value, null, 'acp-provider');
     modelInput.placeholder = backendModelHint(runtimeRef(e.target.value, providerSelect.value || null));
     populateModelPicker('acp-model-picker', 'acp-model', runtimeRef(e.target.value, providerSelect.value || null));
+    syncEffortControl('acp');
   });
   providerSelect.addEventListener('change', e => {
     modelInput.placeholder = backendModelHint(runtimeRef(harnessSelect.value, e.target.value || null));
     populateModelPicker('acp-model-picker', 'acp-model', runtimeRef(harnessSelect.value, e.target.value || null));
+    syncEffortControl('acp');
   });
 
   prompt.querySelector('#acp-cancel').addEventListener('click', () => prompt.remove());
@@ -14417,7 +14462,7 @@ function showAgentCreatePrompt(agentName, onSaved) {
     const res = await fetch('/config/agents', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: agentName, harness, provider, model, cwd }),
+      body: JSON.stringify({ name: agentName, harness, provider, model, effort: prompt.querySelector('#acp-effort').value || null, cwd }),
     });
     if (res.ok) {
       _agentsCache = null;  // invalidate autocomplete cache

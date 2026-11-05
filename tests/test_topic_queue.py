@@ -229,7 +229,10 @@ def test_worker_defers_worktree_setup_until_queued_item_runs(tmp_path, monkeypat
 
 
 def test_worker_persists_stats_with_item_lookback():
+    captured = {}
+
     async def fake_runner(*args, **kwargs):
+        captured.update(kwargs)
         yield {"_stats": {"session_id": "thread-1", "input_tokens": 10, "output_tokens": 5}}
 
     async def run():
@@ -242,6 +245,7 @@ def test_worker_persists_stats_with_item_lookback():
             context_history=[],
             backend="codex",
             model=None,
+            effort="high",
             adhoc=True,
             lookback=4,
             msg_id=123,
@@ -257,6 +261,8 @@ def test_worker_persists_stats_with_item_lookback():
     call_args = asyncio.run(run())
     assert call_args.kwargs["lookback"] == 4
     assert call_args.args[1]["lookback"] == 4
+
+    assert captured["backend_args"][-2:] == ("-c", 'model_reasoning_effort="high"')
 
 
 def test_worker_keeps_status_out_of_persisted_response():
@@ -456,6 +462,7 @@ def test_native_shell_never_receives_llm_prompt_prefixes(tmp_path):
             code_roots=[str(tmp_path)],
             msg_id=11146,
             native_shell=True,
+            effort="removed-level",
         )
         with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
              patch("agent.runners.run_native_shell", fake_shell), \
