@@ -14110,7 +14110,7 @@ function renderAgentTable(agents) {
     const effortLevels = effortConfig.models?.[model] ?? effortConfig.providers?.[runtime.provider] ?? effortConfig.levels ?? {};
     const effortLabel = a.effort ? (effortLevels[a.effort] || a.effort) : '';
     const modelHtml = model || effortLabel
-      ? `<span class="agent-model" title="${escapeHtml(model || 'Runtime default')}">${escapeHtml(model || 'Default')}${effortLabel ? ` · ${escapeHtml(effortLabel)}` : ''}</span>`
+      ? `<span class="agent-model" title="${escapeHtml(model || 'Runtime default')}">${escapeHtml(model || 'Default')}${effortLabel ? ` / ${escapeHtml(effortLabel)}` : ''}</span>`
       : '<span class="col-default">—</span>';
     const cwdHtml = a.cwd
       ? `<span class="agent-cwd agent-cwd-link" data-cwd="${escapeHtml(a.cwd)}" title="Open ${escapeHtml(a.cwd)} in file viewer">${escapeHtml(a.cwd)}</span>`
@@ -14420,9 +14420,9 @@ function showAgentCreatePrompt(agentName, onSaved) {
       <select id="acp-provider"></select>
       <span class="agent-model-effort">
       <input id="acp-model" placeholder="${backendModelHint(runtimeRef(firstHarness, firstProvider))}" />
+      <select id="acp-model-picker" class="model-picker" title="Pick a known model" aria-label="Pick a known model" hidden></select>
       <select id="acp-effort" aria-label="Reasoning effort" title="Reasoning effort"><option value="">Default</option></select>
       </span>
-      <select id="acp-model-picker" class="model-picker" title="Pick a known model" aria-label="Pick a known model" hidden></select>
       <input id="acp-cwd" placeholder="cwd (default: ${_squidHome})" />
     </div>
     <div class="acp-actions">

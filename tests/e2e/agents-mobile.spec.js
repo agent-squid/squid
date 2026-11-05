@@ -198,5 +198,5 @@ test('agent list shows effort with runtime default model', async ({ page }) => {
   ] }));
   await page.goto('/');
   await navigateToAgentsMobile(page);
-  await expect(page.locator('#agents-list .agent-model')).toHaveText('Default · Thorough');
+  await expect(page.locator('#agents-list .agent-model')).toHaveText('Default / Thorough');
 });

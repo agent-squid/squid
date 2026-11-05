@@ -5223,12 +5223,13 @@ button {
 #af-name    { width: 80px; }
 #af-harness { width: 96px; }
 #af-provider { width: 96px; }
-.agent-model-effort { display: flex; gap: 0.3rem; min-width: 0; width: 200px; }
+.agent-model-effort { display: flex; gap: 0.3rem; min-width: 0; width: 232px; }
 .agent-model-effort #af-model, .agent-model-effort #acp-model { flex: 2 1 0; min-width: 0; width: 0; }
 .agent-model-effort #af-effort, .agent-model-effort #acp-effort { flex: 1 1 0; min-width: 0; width: 0; }
 .acp-row .agent-model-effort { flex: 1; min-width: 160px; }
 .model-picker { width: 28px; padding: 0.25rem 0.15rem; text-align: center; }
 .model-picker[hidden] { display: none; }
+.agent-model-effort .model-picker { flex: 0 0 28px; }
 #af-cwd     { width: 130px; }
 .agent-form-row button[type=submit] { background: var(--raised); font-size: 12px; padding: 0.25rem 0.7rem; }
 .agent-form-row button[type=submit]:hover { color: var(--accent); border-color: var(--accent); }
@@ -5926,8 +5927,7 @@ mark.search-kw-highlight {
   #af-name    { grid-area: name; }
   #af-harness { grid-area: harness; }
   #af-provider { grid-area: provider; }
-  .agent-form-row .agent-model-effort { grid-area: model; width: 100%; }
-  #af-model-picker { grid-area: picker; }
+  .agent-form-row .agent-model-effort { grid-area: model; grid-column-end: picker-end; width: 100%; }
   .agent-form-row .home-mode-field { grid-area: home; justify-self: center; }
   #af-cwd     { grid-area: cwd; }
   .agent-form-row button[type=submit] { grid-area: save; }
