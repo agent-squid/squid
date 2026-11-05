@@ -12,7 +12,7 @@ resolution-markers = [
 
 [[package]]
 name = "agentsquid"
-version = "0.1.6rc27"
+version = "0.1.6rc28"
 source = { editable = "." }
 dependencies = [
     { name = "browser-cookie3" },
