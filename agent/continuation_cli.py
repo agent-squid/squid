@@ -13,12 +13,14 @@ from .watch_urls import valid_api_url
 
 def main(argv):
     parser = argparse.ArgumentParser(prog='agentsquid continue', description=
-        'Schedule one successor after this human turn succeeds and syncs. '
+        'Schedule one bounded sequence (up to 8 steps) after this human turn succeeds and syncs. '
         'Enabled automatically with worktree.enabled: true. Watches and Flow turns cannot schedule successors. '
         'Create input: {"request_key":"commit","mode":"backing_git","prompt":"Commit the requested changes"}. '
+        'For multiple steps: {"request_key":"task","steps":[{"mode":"backing_git","prompt":"Commit"},{"mode":"isolated","prompt":"Next edit"}]}. '
+        'Sequence steps must record their outcome with result --input using {"success":true} or {"success":false}. '
         'Modes: isolated (local edits/checks), backing_git (inspect/commit and explicitly user-requested push of the current branch; no file edits, tags, releases or PRs). '
         'This records future work; it does not wait for completion. No automatic retry after uncertain execution.')
-    parser.add_argument('action', choices=['create', 'list', 'show', 'cancel'])
+    parser.add_argument('action', choices=['create', 'list', 'show', 'cancel', 'result'])
     parser.add_argument('identifier', nargs='?')
     parser.add_argument('--input', help='JSON file, or - for stdin')
     parser.add_argument('--api-url')
@@ -36,12 +38,14 @@ def main(argv):
         if args.action == 'cancel':
             path += '/cancel'
         body = None
-        if args.action == 'create':
+        if args.action == 'result':
+            path += '/result'
+        if args.action in {'create', 'result'}:
             if not args.input:
                 raise ValueError()
             body = json.loads(sys.stdin.read() if args.input == '-' else Path(args.input).read_text())
         with httpx.Client(timeout=30, follow_redirects=False, trust_env=False) as client:
-            response = client.request('POST' if args.action in {'create', 'cancel'} else 'GET',
+            response = client.request('POST' if args.action in {'create', 'cancel', 'result'} else 'GET',
                 url.rstrip('/') + path, headers={'Authorization': 'Bearer ' + token}, json=body)
         if response.status_code >= 300:
             print(json.dumps({'error': 'continuation_request_failed', 'status': response.status_code}), file=sys.stderr)

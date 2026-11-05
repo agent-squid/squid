@@ -26,7 +26,7 @@ test('explicit #all search shows editable scope and keywords', async ({ page }) 
   await expect(page.locator('#search-bar-keywords')).toHaveValue('claude login');
 });
 
-test('search inputs have breathing room and the composer action reflects applied search', async ({ page }) => {
+test('search inputs have breathing room and the composer action stays neutral', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
 
@@ -35,7 +35,7 @@ test('search inputs have breathing room and the composer action reflects applied
 
   await expect(page.locator('#filter-badge')).toHaveClass(/active/);
   await expect(page.locator('#search-bar')).toHaveClass(/active/);
-  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
   await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
   await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-expanded', 'true');
 
@@ -177,20 +177,23 @@ test('agent search suffix selects session, adhoc, or both for the exact agent', 
   await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
 });
 
-test('clearing the #all scope removes its explicit marker', async ({ page }) => {
+test('the visible scope editor replaces an all-history search scope', async ({ page }) => {
   await mockBackend(page);
+  const urls = [];
+  await page.route('**/search**', route => {
+    urls.push(new URL(route.request().url()));
+    return route.fulfill({ json: { items: [] } });
+  });
   await page.goto('/');
-
   await page.fill('#input', '/s #all claude login');
   await page.keyboard.press('Enter');
-  await expect(page.locator('#filter-badge-label')).toHaveText('#all');
-
-  await page.locator('.filter-scope-topic .filter-scope-remove').click();
-  await expect(page.locator('#filter-badge')).not.toHaveClass(/active/);
-
-  await page.locator('#search-bar-keywords').click();
-  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+  await expect(page.locator('#filter-badge')).not.toBeVisible();
+  await page.fill('#search-bar-scope', '#squid');
+  await page.locator('#search-bar-keywords').press('Enter');
+  await expect.poll(() => urls.at(-1)?.searchParams.get('topic')).toBe('squid');
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#squid');
   await expect(page.locator('#search-bar-keywords')).toHaveValue('claude login');
+  await expect(page.locator('#filter-badge')).not.toBeVisible();
 });
 
 test('search keywords are highlighted in result content only', async ({ page }) => {
@@ -621,7 +624,7 @@ test('search scope validates separately from keywords and supports routes and al
 });
 
 for (const clearAll of [false, true]) {
-  test(`scope editor stays synchronized after ${clearAll ? 'clearing the filter' : 'removing an agent badge'}`, async ({ page }) => {
+  test(`scope editor stays synchronized after ${clearAll ? 'clearing the filter' : 'editing out the agent scope'}`, async ({ page }) => {
     await mockBackend(page);
     const urls = [];
     await page.route('**/search**', route => {
@@ -636,7 +639,8 @@ for (const clearAll of [false, true]) {
     await page.fill('#input', '/s #squid@claude needle');
     await page.locator('#input').press('Enter');
     await page.fill('#search-bar-keywords', 'updated keywords');
-    await page.locator(clearAll ? '#chip-filter-btn' : '.filter-scope-agent .filter-scope-remove').click();
+    if (clearAll) await page.locator('#chip-filter-btn').click();
+    else await page.fill('#search-bar-scope', '#squid');
     await expect(page.locator('#search-bar-scope')).toHaveValue(clearAll ? '#all' : '#squid');
     await expect(page.locator('#search-bar-keywords')).toHaveValue('updated keywords');
     await page.locator('#search-bar-keywords').press('Enter');
@@ -669,6 +673,7 @@ test('spaced route scope is normalized without becoming search keywords', async 
 test('opening search prefills keywords from a routed draft without modifying it', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
+  await page.evaluate(() => clearTopicChip());
   await page.fill('#input', '#squid@claude draft keywords');
   // The composer moves the typed route into its sticky chip before search opens.
   await expect(page.locator('#input')).toHaveValue('draft keywords');
@@ -706,8 +711,8 @@ test('blank scope inherits the active filter and a filter change closes an unsub
   await expect(page.locator('#search-bar-scope')).toHaveValue('#other');
 });
 
-for (const selector of ['#chip-filter-btn', '.filter-scope-agent .filter-scope-remove']) {
-  test(`unsubmitted search closes when scope changes through ${selector}`, async ({ page }) => {
+for (const selector of ['#chip-filter-btn', '#search-bar-clear']) {
+  test(`unsubmitted search closes through ${selector}`, async ({ page }) => {
     await mockBackend(page);
     await page.goto('/');
     await page.fill('#input', '/f #squid@claude');
@@ -887,7 +892,7 @@ for (const width of [1280, 375]) {
   });
 }
 
-test('opening search keeps the action neutral until submission while the bar stays neutral', async ({ page }) => {
+test('opening and submitting search keeps the composer action and bar neutral', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
   await page.fill('#input', '/f #squid');
@@ -902,7 +907,7 @@ test('opening search keeps the action neutral until submission while the bar sta
   await page.locator('#search-bar-submit').click();
   await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
   await expect.poll(border).toBe(neutralBorder);
-  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
   await page.locator('#search-bar-clear').click();
   await expect(page.locator('#search-bar')).not.toHaveClass(/search-filtered/);
   await page.locator('#chip-search-btn').click();
@@ -914,29 +919,35 @@ test('opening search keeps the action neutral until submission while the bar sta
 });
 
 for (const width of [1280, 375]) {
-  test(`action-pack search highlights only once filtered at width ${width}`, async ({ page }) => {
+  test(`search submit highlights only once filtered at width ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 812 });
     await mockBackend(page);
     await page.goto('/');
-    const button = page.locator('#chip-search-btn');
+    const composer = page.locator('#chip-search-btn');
+    await composer.click();
+    const button = page.locator('#search-bar-submit');
     const appearance = () => button.evaluate(el => {
       const style = getComputedStyle(el);
-      return { color: style.color, opacity: style.opacity, background: style.backgroundColor };
+      return { color: style.color, border: style.borderColor };
     });
     await page.mouse.move(0, 0);
+    await page.locator('#search-bar-keywords').focus();
     const neutral = await appearance();
+    await expect(composer).toHaveAttribute('aria-expanded', 'true');
+    await expect(composer).not.toHaveClass(/active/);
+    await expect(page.locator('#filter-badge')).not.toBeVisible();
+    await page.fill('#search-bar-keywords', 'needle');
     await button.click();
     await page.mouse.move(0, 0);
-    await expect(button).toHaveAttribute('aria-expanded', 'true');
-    await expect(button).not.toHaveAttribute('aria-pressed', 'true');
-    await expect.poll(appearance).toEqual(neutral);
-    await page.fill('#search-bar-keywords', 'needle');
-    await page.locator('#search-bar-submit').click();
+    await page.locator('#search-bar-keywords').focus();
     await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
-    await expect(button).toHaveClass(/active/);
+    await expect(composer).not.toHaveClass(/active/);
     await expect.poll(appearance).not.toEqual(neutral);
     await page.locator('#search-bar-clear').click();
-    await expect(button).toHaveAttribute('aria-expanded', 'false');
+    await expect(composer).toHaveAttribute('aria-expanded', 'false');
+    await composer.click();
+    await page.mouse.move(0, 0);
+    await page.locator('#search-bar-keywords').focus();
     await expect.poll(appearance).toEqual(neutral);
   });
 }
@@ -999,7 +1010,7 @@ test('searching inside a history filter preserves its independent indicator and 
 });
 
 for (const width of [1280, 375]) {
-  test(`search submit stays neutral after searching and keywords avoid a native clear control at width ${width}`, async ({ page }) => {
+  test(`search submit stays highlighted after searching and keywords avoid a native clear control at width ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 812 });
     await mockBackend(page);
     await page.goto('/');
@@ -1024,8 +1035,8 @@ for (const width of [1280, 375]) {
     await keywords.press('Enter');
     await page.mouse.move(0, 0);
     await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
-    await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
-    await expect.poll(color).toBe(neutral);
+    await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
+    await expect.poll(color).toBe(accent);
     await submit.hover();
     await expect.poll(color).toBe(accent);
     await page.mouse.move(0, 0);
@@ -1034,7 +1045,7 @@ for (const width of [1280, 375]) {
     await expect(submit).toBeFocused();
     await expect.poll(color).toBe(accent);
     await keywords.focus();
-    await expect.poll(color).toBe(neutral);
+    await expect.poll(color).toBe(accent);
     await expect(page.locator('#chip-search-btn')).not.toHaveAttribute('aria-pressed', 'true');
     await page.locator('#search-bar-clear').click();
     await page.locator('#chip-search-btn').click();

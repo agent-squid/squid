@@ -679,3 +679,300 @@ async def test_startup_failure_cancels_worker_before_retry(setup, monkeypatch, f
         for task in workers + durable_workers:
             task.cancel()
         await asyncio.gather(*workers, *durable_workers, return_exceptions=True)
+
+
+SEQUENCE = dict(request_key='staged-task', steps=[
+    dict(mode='backing_git', prompt='Commit the first edit'),
+    dict(mode='isolated', prompt='Make the second edit'),
+    dict(mode='backing_git', prompt='Commit and push as requested'),
+])
+
+
+def _start_step(parent, token):
+    db.update_assistant_message(parent, 'Completed', None, 'done')
+    store.complete(parent, True, 'completed_and_synced')
+    row = store.claim(set())
+    assert row is not None
+    user = db.insert_user_message('test', 'codex', 'Step', source='continuation')
+    child = db.insert_assistant_message('test', 'codex', user, source='continuation')
+    store.link(row['id'], child)
+    return row, child, store.mint(child)
+
+
+@pytest.mark.parametrize('body', [
+    SEQUENCE | {'steps': []}, SEQUENCE | {'steps': SEQUENCE['steps'] * 3},
+    SEQUENCE | {'steps': [dict(mode='publish', prompt='bad')]},
+    SEQUENCE | {'steps': [dict(mode='isolated', prompt='')]},
+    SEQUENCE | {'steps': [dict(mode='isolated', prompt='x' * 16001)]},
+    SEQUENCE | {'steps': [dict(mode='isolated', prompt='x' * 16000)] * 4},
+    SEQUENCE | {'steps': [dict(mode='isolated', prompt='ok', extra=True)]},
+    SEQUENCE | {'prompt': 'mixed'}, SEQUENCE | {'request_key': ' ' * 129 + 'x'},
+])
+def test_sequence_validation(setup, body):
+    with pytest.raises(ValueError, match='invalid_continuation_request'):
+        store.create(setup[1], body)
+
+
+@pytest.mark.parametrize('ack,status,synced,reason', [
+    (None, 'done', True, 'step_result_missing'),
+    (False, 'done', True, 'step_failed'),
+    (True, 'error', True, 'message_not_successful'),
+    (True, 'done', False, 'sync_conflict'),
+])
+def test_sequence_does_not_advance_on_incomplete_work(setup, ack, status, synced, reason):
+    parent, token = setup
+    store.create(token, SEQUENCE)
+    row, child, child_token = _start_step(parent, token)
+    assert child_token
+    if ack is not None:
+        store.result(child_token, {'success': ack})
+    db.update_assistant_message(child, 'Result', None, status)
+    store.complete(child, synced, 'completed_and_synced' if synced else reason)
+    # Later callbacks cannot overwrite the first completion evidence.
+    store.complete(child, True, 'completed_and_synced')
+    assert store.claim(set()) is None
+    result = store.inspect(token)[0]
+    assert (result['state'], result['reason']) == ('failed', reason)
+    assert result['id'] == row['id']
+
+
+def test_sequence_idempotency_transition_recovery_and_cancel(setup):
+    parent, token = setup
+    first = store.create(token, SEQUENCE)
+    assert store.create(token, SEQUENCE) == first
+    with pytest.raises(ValueError, match='conflict'):
+        store.create(token, SEQUENCE | {'steps': SEQUENCE['steps'][:-1]})
+    row, child, child_token = _start_step(parent, token)
+    with pytest.raises(ValueError, match='parent_not_running'):
+        store.create(child_token, BODY)
+    assert store.result(child_token, {'success': True})['success'] is True
+    store.result(child_token, {'success': True})
+    with pytest.raises(ValueError, match='conflict'):
+        store.result(child_token, {'success': False})
+    db.update_assistant_message(child, 'Committed', None, 'done')
+    store.complete(child, True, 'completed_and_synced')
+    store.complete(child, True, 'completed_and_synced')
+    records = store.inspect(token)
+    assert len(records) == 2
+    second = next(r for r in records if r['parent_id'] == child)
+    assert second['origin_parent_id'] == parent
+    assert second['mode'] == 'isolated' and second['state'] == 'eligible'
+    assert second['scope_json'] == first['scope_json']
+    store.recover()
+    store.recover()
+    with db._connection() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM continuations').fetchone()[0] == 2
+    # A later human can cancel the entire sequence using its first record.
+    user = db.insert_user_message('test', 'codex', 'Cancel')
+    later = db.insert_assistant_message('test', 'codex', user)
+    records = store.inspect(store.mint(later), row['id'], True)
+    assert next(r for r in records if r['id'] == second['id'])['state'] == 'cancelled'
+    assert store.claim(set()) is None
+
+
+def test_cancel_running_sequence_prevents_advance(setup):
+    parent, token = setup
+    first = store.create(token, SEQUENCE)
+    _, child, child_token = _start_step(parent, token)
+    store.inspect(token, first['id'], True)
+    store.result(child_token, {'success': True})
+    db.update_assistant_message(child, 'Committed', None, 'done')
+    store.complete(child, True, 'completed_and_synced')
+    assert store.claim(set()) is None
+    assert len(store.inspect(token)) == 1
+    assert store.inspect(token)[0]['state'] == 'successful'
+
+
+@pytest.mark.parametrize('started', [False, True])
+def test_sequence_restart_never_replays_uncertain_step(setup, started):
+    parent, token = setup
+    store.create(token, SEQUENCE)
+    _, child, child_token = _start_step(parent, token)
+    if started:
+        store.result(child_token, {'success': True})
+    store.recover()
+    with db._connection() as conn:
+        row = conn.execute('SELECT * FROM continuations').fetchone()
+        assert row['state'] == 'ambiguous'
+    assert store.claim(set()) is None
+
+
+@pytest.mark.asyncio
+async def test_sequence_result_api_is_scoped_to_running_step(setup):
+    parent, token = setup
+    store.create(token, SEQUENCE)
+    _, child, child_token = _start_step(parent, token)
+    app = FastAPI()
+    app.include_router(router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://localhost') as c:
+        path = '/continuations/result'
+        assert (await c.post(path, json={'success': True})).status_code == 403
+        assert (await c.post(path, json={'success': True}, headers={'Authorization': 'Bearer ' + token})).status_code == 409
+        headers = {'Authorization': 'Bearer ' + child_token}
+        assert (await c.post(path, json={'success': 1}, headers=headers)).status_code == 400
+        assert (await c.post(path, json={'success': True}, headers=headers)).status_code == 200
+        assert (await c.post(path, json={'success': False}, headers=headers)).status_code == 409
+        db.update_assistant_message(child, 'done', None, 'done')
+        assert (await c.post(path, json={'success': True}, headers=headers)).status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_real_edit_commit_edit_commit_push_sequence(setup, monkeypatch, tmp_path):
+    """Exercise fresh isolation, real sync, separate commits and a local bare remote."""
+    import subprocess
+    from unittest.mock import patch
+    from agent import worktree, server, config
+    from agent.topic_queue import TopicWorker, QueueItem
+    parent, _ = setup
+    repo, remote = tmp_path / 'repo', tmp_path / 'remote.git'
+    repo.mkdir()
+    def git(*args):
+        return subprocess.run(['git', '-C', str(repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+    git('init', '-b', 'main')
+    git('init', '--bare', str(remote))
+    git('config', 'user.name', 'Test')
+    git('config', 'user.email', 'test@example.invalid')
+    git('remote', 'add', 'origin', str(remote))
+    (repo / 'app.txt').write_text('baseline\n')
+    git('add', '.')
+    git('commit', '-m', 'baseline')
+    user_request = 'Make the first edit, commit, make the second edit, commit and push the current branch'
+    with db._connection() as conn:
+        conn.execute('UPDATE chat_messages SET content=? WHERE id=?', (user_request, db.get_message(parent)['reply_to']))
+    scope = store.capture_scope([str(repo)], str(repo))
+    monkeypatch.setattr(store, 'current_scope', lambda topic, agent: scope)
+    monkeypatch.setattr(worktree, '_WORKTREES_HOME', tmp_path / 'turns')
+    monkeypatch.setattr(config, 'WORKTREE_ISOLATION_ENABLED', False)
+    token = store.mint(parent)
+    paths = []
+    def isolate(msg_id):
+        isolated = worktree.ensure_worktree(repo, 'test', str(msg_id))
+        db.save_worktree('test', str(msg_id), str(repo), str(isolated), '',
+                         worktree.base_commit_for(repo, 'test', str(msg_id)))
+        paths.append(isolated)
+        return isolated
+    initial = isolate(parent)
+    async def initial_runner(*args, **kwargs):
+        (initial / 'app.txt').write_text('first\n')
+        store.create(token, SEQUENCE)
+        yield 'First edit complete; sequence queued'
+    async def process(msg_id, isolated, runner):
+        item = QueueItem(seq=0, topic='test', agent='codex', prompt='requested work', context_history=[],
+                         backend='codex', model=None, cwd=str(isolated), code_roots=[str(isolated)],
+                         configured_cwd=str(repo), adhoc=True, msg_id=msg_id, worktree_isolated=True)
+        with patch('agent.runners.run_codex', runner):
+            await TopicWorker('test')._process(item)
+        return item.out_q
+    await process(parent, initial, initial_runner)
+    assert (repo / 'app.txt').read_text() == 'first\n'
+    assert git('rev-list', '--count', 'HEAD') == '1'
+    prepared_paths = {}
+    async def prepare(**kwargs):
+        prompt = kwargs['message']
+        assert 'Original user request:\n' + user_request + '\nParent result:' in prompt
+        assert 'continue result --input -' in prompt
+        user = db.insert_user_message('test', 'codex', prompt, source='continuation')
+        child = db.insert_assistant_message('test', 'codex', user, source='continuation')
+        isolated = isolate(child)
+        prepared_paths[child] = isolated
+        return dict(topic='test', agent='codex', context_history=[], harness='codex', provider=None,
+                    backend='codex', model=None, cwd=str(isolated), source_cwd=str(repo), configured_cwd=str(repo),
+                    response_timeout=600, resume_session_id=None, adhoc=False, lookback=0, code_roots=[str(repo)],
+                    display_prompt=prompt, worktree_setup_elapsed_ms=None, worktree_isolated=True,
+                    asst_msg_id=child, effective_message=prompt)
+    order = []
+    class Dispatcher:
+        async def dispatch(self, **kwargs):
+            child = kwargs['msg_id']
+            isolated = prepared_paths[child]
+            async def runner(*args, **kw):
+                child_token = store.mint(child)
+                if store.git_only(child):
+                    assert (isolated / 'app.txt').read_text() == (repo / 'app.txt').read_text()
+                    git('add', 'app.txt')
+                    git('commit', '-m', 'first edit' if not order else 'second edit')
+                    order.append('commit')
+                    if len(order) == 3:
+                        git('push', 'origin', 'HEAD:refs/heads/main')
+                        order.append('push')
+                else:
+                    assert git('show', 'HEAD:app.txt') == 'first'
+                    assert (isolated / 'app.txt').read_text() == 'first\n'
+                    (isolated / 'app.txt').write_text('second\n')
+                    assert (repo / 'app.txt').read_text() == 'first\n'
+                    order.append('edit')
+                store.result(child_token, {'success': True})
+                assert store.claim(set()) is None
+                yield 'Completed ' + order[-1]
+            out = await process(child, isolated, runner)
+            return out, None, None
+    monkeypatch.setattr(server, '_prepare_chat_turn', prepare)
+    for expected_mode in ('backing_git', 'isolated', 'backing_git'):
+        row = store.claim(set())
+        assert row and row['mode'] == expected_mode
+        assert row['origin_parent_id'] == parent
+        await store.dispatch(row, Dispatcher())
+    assert order == ['commit', 'edit', 'commit', 'push']
+    assert len(set(paths)) == 4
+    assert all(row['state'] == 'successful' for row in store.inspect(token))
+    assert store.claim(set()) is None
+    assert git('rev-list', '--count', 'HEAD') == '3'
+    assert git('show', 'HEAD:app.txt') == 'second'
+    assert git('show', 'HEAD~1:app.txt') == 'first'
+    assert git('status', '--porcelain') == ''
+    assert git('--git-dir', str(remote), 'rev-parse', 'main') == git('rev-parse', 'HEAD')
+
+
+@pytest.mark.asyncio
+async def test_sequence_launch_provides_outcome_credential_only(setup):
+    parent, token = setup
+    store.create(token, SEQUENCE)
+    _, child, _ = _start_step(parent, token)
+    watch_launch.configure(None, 'http://127.0.0.1:1234')
+    observed = []
+    async def runner(prompt, **kwargs):
+        assert prompt == 'Execute predeclared step'
+        credential = kwargs['backend_env']['SQUID_CONTINUE_TOKEN']
+        observed.append(credential)
+        with pytest.raises(ValueError, match='parent_not_running'):
+            store.create(credential, SEQUENCE)
+        store.result(credential, {'success': True})
+        yield 'Completed'
+    assert [x async for x in watch_launch.run(runner, 'Execute predeclared step', topic='test', msg_id=child)] == ['Completed']
+    with pytest.raises(PermissionError):
+        store.result(observed[0], {'success': True})
+
+
+def test_sequence_schema_migration_keeps_legacy_single_step_behavior(setup):
+    parent, token = setup
+    row = store.create(token, BODY)
+    with db._connection() as conn:
+        for column in ('origin_parent_id', 'remaining_json', 'request_json', 'requires_result', 'result_success'):
+            conn.execute(f'ALTER TABLE continuations DROP COLUMN {column}')
+    store.initialize()
+    store.initialize()
+    assert store.create(token, BODY)['id'] == row['id']
+    _, child, credential = _start_step(parent, token)
+    assert credential is None
+    db.update_assistant_message(child, 'Committed', None, 'done')
+    store.complete(child, True, 'completed_and_synced')
+    assert store.inspect(token)[0]['state'] == 'successful'
+    assert store.claim(set()) is None
+
+
+def test_sequence_result_cli_uses_post_endpoint(monkeypatch, tmp_path):
+    from agent import continuation_cli
+    calls = []
+    original_client = httpx.Client
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, json={'success': True})
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: original_client(transport=httpx.MockTransport(handle), **kw))
+    monkeypatch.setenv('SQUID_API_URL', 'http://127.0.0.1:1234')
+    monkeypatch.setenv('SQUID_CONTINUE_TOKEN', 'step-secret')
+    payload = tmp_path / 'result.json'
+    payload.write_text('{"success":true}')
+    assert continuation_cli.main(['result', '--input', str(payload)]) == 0
+    assert calls[0].method == 'POST' and calls[0].url.path == '/continuations/result'
+    assert calls[0].content == b'{"success":true}'

@@ -1,4 +1,4 @@
-# Durable turn continuations (first slice)
+# Durable turn continuations
 
 Continuations are enabled automatically with worktree isolation. In
 `~/.squid/squid.yaml`, set the existing option and restart Squid:
@@ -15,8 +15,9 @@ subject to its recorded mode during cleanup and recovery.
 
 A human one-shot CLI turn receives a separate, short-lived
 `SQUID_CONTINUE_TOKEN` and continuation tool guidance. Watch enablement is not
-required. Watch, Flow, shell, persistent-harness and continuation turns cannot
-schedule a successor. No production setting is changed by shipping this feature.
+required. Watch, Flow, shell and persistent-harness turns cannot schedule work.
+Continuation turns cannot extend or change their predeclared sequence; sequence
+steps receive a credential only to report their outcome and inspect/cancel work. No production setting is changed by shipping this feature.
 
 For a request such as “fix this and commit it”, the editing agent writes and
 checks the fix, then calls:
@@ -50,16 +51,54 @@ Accumulated changes may be committed when requested; the last turn's diff does
 not define mandatory commit scope. The successor must inspect current state
 because other work can land between sync and execution.
 
-One parent can accept one successor. An identical request-key/payload retry
-returns the original record; a different payload conflicts. There are no
-grandchildren, and the successor response deadline is capped at 600 seconds.
-The initial scheduler dispatches one successor at a time globally. Queue wait
-is not charged as execution time. This slice does not offer configurable route,
-depth, cost or cumulative budgets.
+One human turn can accept one request: either the single-successor form above,
+or an ordered sequence of up to eight follow-on steps (48,000 prompt characters
+in total, 16,000 per step). Split work at each Git boundary. For example, after
+the initial edit, “edit, commit, edit, commit and push” schedules:
+
+```json
+{
+  "request_key": "two-commits",
+  "steps": [
+    {"mode": "backing_git", "prompt": "Commit the first requested edit."},
+    {"mode": "isolated", "prompt": "Make and check the second requested edit."},
+    {"mode": "backing_git", "prompt": "Commit the second edit and push the current branch, as explicitly requested by the user."}
+  ]
+}
+```
+
+Each step receives the original human request, the immediately preceding result,
+and the remaining plan. Its mode applies only to that step. Edit steps get fresh
+isolation through normal turn preparation. Git steps inspect the backing repo's
+current state; existing commits on the current branch are included in a push.
+The plan does not freeze the repository or expand the original authorization.
+
+Before its final response, every sequence step must record an explicit outcome:
+
+```sh
+agentsquid continue result --input - <<'JSON'
+{"success":true}
+JSON
+```
+
+Use `false` for failed commands/checks or incomplete work. Reporting success is
+required but insufficient: persisted successful completion and all sync results
+must also succeed. Missing or false results stop the sequence. Outcome retries
+are idempotent; a different outcome conflicts. The single-successor input remains
+compatible and does not require this acknowledgement.
+
+The next step is persisted atomically with its predecessor's completion gate,
+so a restart cannot lose or duplicate an acknowledged transition. An identical
+request-key/payload retry returns the original record; a different payload
+conflicts. No step can append further steps. Each response deadline is capped at
+600 seconds. The scheduler dispatches one step at a time globally. Queue wait is
+not charged as execution time. Configurable route, cost and aggregate budgets
+remain outside this implementation.
 
 Use `agentsquid continue list`, `show <id>` and `cancel <id>` from a human turn
-in the same topic. Cancellation stops waiting/eligible work; it does not stop a
-claimed/running turn (use the existing turn stop control). A later human turn
+in the same topic. Cancelling any step cancels waiting/eligible work in its sequence and clears
+all remaining steps. It does not stop a claimed/running turn (use the existing
+turn stop control), but that turn cannot advance the cancelled sequence. A later human turn
 can inspect earlier records after the parent's credential has been revoked.
 Records include parent and child message IDs, state and reason. The continuation
 message itself names its parent; no custom browser UI is introduced.

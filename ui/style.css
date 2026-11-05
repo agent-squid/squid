@@ -5534,6 +5534,7 @@ button {
   line-height: 1.2;
 }
 #filter-badge.active { display: flex; }
+#tag-bar:has(#search-bar.active) #filter-badge { display: none; }
 #filter-badge-label { display: flex; align-items: center; gap: 0.35rem; }
 .filter-scope-segment {
   display: inline-flex;
@@ -5615,6 +5616,7 @@ button {
   color: var(--text);
   cursor: pointer;
 }
+#search-bar.search-filtered #search-bar-submit,
 #search-bar-submit:hover, #search-bar-submit:focus-visible { border-color: var(--accent); color: var(--accent); }
 #search-bar-clear {
   flex-shrink: 0;

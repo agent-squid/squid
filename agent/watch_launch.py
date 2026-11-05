@@ -43,10 +43,12 @@ async def run(runner, prompt, *, persistent=False, shell=False, request_text=Non
             continuation_token = await call(continuations.mint, kwargs.get('msg_id'), continuation_scope)
             if continuation_token:
                 env.update(SQUID_API_URL=_api_url, SQUID_CONTINUE_TOKEN=continuation_token)
-                if inject_notice:
-                    prompt = ('Squid supports one durable successor after successful completion and sync. '
+                if inject_notice and not await call(continuations.sequence_step, kwargs.get('msg_id')):
+                    prompt = ('Squid supports one durable sequence of up to eight follow-on steps after successful completion and sync. '
                               'Use `agentsquid continue --help` to schedule requested follow-on work. '
-                              'For edit-and-commit/push requests, schedule a backing_git successor for after sync; '
+                              'Split edit/commit/edit requests at Git boundaries using the ordered steps input; '
+                              'each step runs only after successful completion and sync. '
+                              'For edit-and-commit/push requests, schedule a backing_git step for after sync; '
                               'push requires an explicit request from the original user and is limited to the current branch. '
                               'Report edits as complete and requested Git steps as queued, not completed.\n\n' + prompt)
         if service is not None and _api_url and not persistent:

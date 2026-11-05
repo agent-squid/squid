@@ -180,7 +180,8 @@ must not be described as prevention of arbitrary shell side effects. Any
 stronger mode enforcement requires an actual execution boundary.
 
 This ADR remains proposed. An opt-in [first CLI/HTTP slice](../continuations.md)
-implements one successor per human turn, enabled automatically by
+implements one predeclared sequence of up to eight follow-on steps per human turn,
+enabled automatically by
 `worktree.enabled` without a separate continuation option; broader discovery, MCP, route and
 budget requirements remain pending. See the [implementation plan](../plans/adr-0054-agent-capabilities-and-continuations.md).
 

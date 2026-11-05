@@ -2118,7 +2118,7 @@ function updateFilterButton() {
 }
 
 function updateSearchButton() {
-  chipSearchBtn?.classList.toggle('active', searchActive);
+  chipSearchBtn?.classList.remove('active');
   document.getElementById('search-bar').classList.toggle('search-filtered', searchActive);
   chipSearchBtn?.removeAttribute('aria-pressed');
   chipSearchBtn?.setAttribute('aria-expanded', (searchActive || searchPanelOpen) ? 'true' : 'false');
