@@ -90,10 +90,13 @@ whether the FTS row exists, not whether the base row still exists. Orphans are
 therefore invisible to boot correction and would persist forever without
 explicit cleanup on delete.
 
-### 2. AND-expression matching
+### 2. AND/OR-expression matching
 
-Multi-word queries are compiled to FTS5 AND expressions using phrase-quoted
-tokens:
+Multi-word queries default to FTS5 AND expressions using phrase-quoted
+tokens. The search bar offers an AND/OR dropdown after the route field; OR
+matches any keyword. The `/search` endpoint accepts `operator=and|or` for both
+response and prompt search (default: `and`). Scope restrictions apply in either
+mode. For example, the default expression is:
 
 ```
 "term1" AND "term2"

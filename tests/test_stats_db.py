@@ -2893,3 +2893,18 @@ def test_database_lifetime_keeps_wal_between_writes_without_pinning_snapshot(tmp
             assert (busy, frames, checkpointed) == (0, 0, 0)
     with stats_db._connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM realtime_events").fetchone()[0] == 2
+
+
+def test_search_keyword_operators(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    ids = []
+    for content in ("alpha", "beta", "alpha beta", "neither"):
+        user_id = stats_db.insert_user_message("squid", "codex", content)
+        reply_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+        stats_db.update_assistant_message(reply_id, content, "session", "done")
+        ids.append(reply_id)
+    for search in (stats_db.search_messages, stats_db.search_prompts):
+        assert {i["id"] for i in search("alpha beta")["items"]} == {ids[2]}
+        assert {i["id"] for i in search("alpha beta", operator="or")["items"]} == set(ids[:3])
+        assert search('"', operator="or")["items"] == []

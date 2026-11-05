@@ -2118,7 +2118,7 @@ function updateFilterButton() {
 }
 
 function updateSearchButton() {
-  chipSearchBtn?.classList.remove('active');
+  chipSearchBtn?.classList.toggle('active', searchActive);
   document.getElementById('search-bar').classList.toggle('search-filtered', searchActive);
   chipSearchBtn?.removeAttribute('aria-pressed');
   chipSearchBtn?.setAttribute('aria-expanded', (searchActive || searchPanelOpen) ? 'true' : 'false');
@@ -2189,7 +2189,7 @@ function applyHistoryFilter(filter) {
   if (searchActive || searchPanelOpen) {
     searchActive = false;
     searchState = null;
-    searchLoading = false;
+    ++searchLoadGeneration;
     searchPanelOpen = false;
     document.getElementById('search-bar').classList.remove('active');
     updateSearchButton();
@@ -2203,7 +2203,7 @@ function clearFilter() {
     searchState = { ...searchState, flow_route: null, topic: null, topicSubtree: false, agent: null, adhoc: null, explicitAll: false };
     persistSearchFilterScope(searchState);
     _updateSearchScopeInput();
-    searchLoading = false;
+    ++searchLoadGeneration;
     document.querySelectorAll('.search-result-item').forEach(el => el.remove());
     document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
     _updateFilterBadge();
@@ -2453,7 +2453,7 @@ function removeFilterSegment(kind) {
     searchState = next;
     persistSearchFilterScope(searchState);
     _updateSearchScopeInput();
-    searchLoading = false;
+    ++searchLoadGeneration;
     document.querySelectorAll('.search-result-item, #messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
     _updateFilterBadge();
     loadSearchResults();
@@ -2537,7 +2537,7 @@ let searchScopeContext = null;
 let searchPanelOpen = false;
 let searchActive = false;
 let searchState = null;  // { topic, agent, adhoc, explicitAll, keywords }
-let searchLoading = false;
+let searchLoadGeneration = 0;
 
 let promptHistory = [];   // newest first, in-memory, seeded from DB
 let promptHistoryPos = -1; // -1 = editing draft; 0..N = navigating history
@@ -2905,7 +2905,7 @@ async function jumpToStatusMessage(msgId) {
     cleared = true;
     searchActive = false;
     searchState = null;
-    searchLoading = false;
+    ++searchLoadGeneration;
     searchPanelOpen = false;
     document.getElementById('search-bar').classList.remove('active');
     updateSearchButton();
@@ -2950,7 +2950,7 @@ async function jumpToStatusMessage(msgId) {
       if (saved.search) {
         searchState = saved.search;
         searchActive = true;
-        searchLoading = false;
+        ++searchLoadGeneration;
         invalidateHistoryLoad();
         setLiveGroupHidden(true);
         _updateSearchBar();
@@ -3014,7 +3014,7 @@ async function jumpToMessage(msgId, flowRunId = null, clearForJump = null) {
     if (searchActive) {
       searchActive = false;
       searchState = null;
-      searchLoading = false;
+      ++searchLoadGeneration;
       searchPanelOpen = false;
       document.getElementById('search-bar').classList.remove('active');
       updateSearchButton();
@@ -3140,6 +3140,7 @@ function _updateSearchBar() {
 
   searchPanelOpen = true;
   kwEl.value = searchState.keywords;
+  document.getElementById('search-bar-operator').value = searchState.operator || 'and';
   _updateSearchScopeInput();
   bar.classList.add('active');
   updateSearchButton();
@@ -3228,10 +3229,10 @@ function startSearch(rawArgs, parsedInput = null) {
     adhoc = flow_route ? null : (stickyChip?.adhoc ? true : false);
   }
 
-  searchState = { flow_route, topic, topicSubtree, agent, adhoc, explicitAll, keywords: parsed.keywords };
+  searchState = { flow_route, topic, topicSubtree, agent, adhoc, explicitAll, keywords: parsed.keywords, operator: parsed.operator || 'and' };
   if (!parsedInput) searchScopeContext = { ...searchState };
   searchActive = true;
-  searchLoading = false;
+  ++searchLoadGeneration;
 
   // Stop history scroll
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
@@ -3258,7 +3259,7 @@ function clearSearch() {
   searchPanelOpen = false;
   searchActive = false;
   searchState = null;
-  searchLoading = false;
+  ++searchLoadGeneration;
   document.getElementById('search-bar').classList.remove('active');
   updateSearchButton();
   if (!hadSearch) return;
@@ -3684,11 +3685,11 @@ async function initPromptHistory() {
 }
 
 async function loadSearchResults() {
-  if (searchLoading || !searchState) return;
-  searchLoading = true;
+  if (!searchActive || !searchState) return;
+  const generation = ++searchLoadGeneration;
 
   const searchRole = promptOnlyHistory ? 'user' : 'assistant';
-  let url = `/search?limit=100&q=${encodeURIComponent(searchState.keywords)}&role=${searchRole}`;
+  let url = `/search?limit=100&q=${encodeURIComponent(searchState.keywords)}&role=${searchRole}&operator=${searchState.operator || 'and'}`;
   if (bookmarkOnlyHistory) url += '&bookmarked=true';
   if (badOnlyHistory) url += '&marked_bad=true';
   if (searchState.topic) url += `&topic=${encodeURIComponent(searchState.topic)}`;
@@ -3700,15 +3701,17 @@ async function loadSearchResults() {
   let data;
   try {
     const res = await fetch(url);
-    if (!res.ok) { searchLoading = false; return; }
+    if (!res.ok) return;
     data = await res.json();
   } catch {
-    searchLoading = false;
     return;
   }
 
+  // A newer search or an exit invalidates every older response.
+  if (generation !== searchLoadGeneration || !searchActive || !searchState) return;
+
   const { items } = data;
-  if (!Array.isArray(items)) { searchLoading = false; return; }
+  if (!Array.isArray(items)) return;
 
   const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
   const fragment = document.createDocumentFragment();
@@ -3725,7 +3728,6 @@ async function loadSearchResults() {
   }
   [...fragment.children].forEach(el => el.classList.add('search-result-item'));
   messages.appendChild(fragment);
-  searchLoading = false;
   refreshDateDividers();
 
   if (items.length === 0) {
@@ -17690,9 +17692,12 @@ function submitSearchPanel() {
   const keywords = document.getElementById('search-bar-keywords');
   if (!keywords.value.trim()) { keywords.focus(); return; }
   closeSearchScopes();
-  startSearch('', { ...parsedScope, explicitScope: !!parsedScope, keywords: keywords.value.trim() });
+  startSearch('', { ...parsedScope, explicitScope: !!parsedScope, keywords: keywords.value.trim(), operator: document.getElementById('search-bar-operator').value });
 }
 
+document.getElementById('search-bar-operator').addEventListener('change', () => {
+  if (searchActive) submitSearchPanel();
+});
 document.getElementById('search-bar-submit').addEventListener('click', submitSearchPanel);
 for (const id of ['search-bar-scope', 'search-bar-keywords']) {
   document.getElementById(id).addEventListener('keydown', e => {

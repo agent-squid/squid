@@ -2071,7 +2071,9 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
                  agent: Optional[str] = None, adhoc: Optional[bool] = None,
                  role: str = "assistant", bookmarked: bool = False,
                  flow_route: Optional[str] = None, marked_bad: bool = False,
-                 topic_subtree: bool = False):
+                 topic_subtree: bool = False, operator: str = "and"):
+    if operator not in {"and", "or"}:
+        return JSONResponse({"error": "operator must be and or or"}, status_code=400)
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
@@ -2080,8 +2082,8 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
     limit = min(limit, 100)
     flow_route = canonical_flow_route(flow_route)
     if role == "user":
-        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad, topic_subtree=topic_subtree))
-    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad, topic_subtree=topic_subtree))
+        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad, topic_subtree=topic_subtree, operator=operator))
+    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad, topic_subtree=topic_subtree, operator=operator))
 
 
 @app.get("/prompts/recent")

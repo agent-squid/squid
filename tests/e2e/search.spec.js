@@ -26,7 +26,7 @@ test('explicit #all search shows editable scope and keywords', async ({ page }) 
   await expect(page.locator('#search-bar-keywords')).toHaveValue('claude login');
 });
 
-test('search inputs have breathing room and the composer action stays neutral', async ({ page }) => {
+test('search inputs have breathing room and the composer action highlights applied search', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
 
@@ -35,7 +35,7 @@ test('search inputs have breathing room and the composer action stays neutral', 
 
   await expect(page.locator('#filter-badge')).toHaveClass(/active/);
   await expect(page.locator('#search-bar')).toHaveClass(/active/);
-  await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
   await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
   await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-expanded', 'true');
 
@@ -892,7 +892,7 @@ for (const width of [1280, 375]) {
   });
 }
 
-test('opening and submitting search keeps the composer action and bar neutral', async ({ page }) => {
+test('opening search stays neutral and submitting highlights the composer action', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
   await page.fill('#input', '/f #squid');
@@ -907,7 +907,7 @@ test('opening and submitting search keeps the composer action and bar neutral', 
   await page.locator('#search-bar-submit').click();
   await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
   await expect.poll(border).toBe(neutralBorder);
-  await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
   await page.locator('#search-bar-clear').click();
   await expect(page.locator('#search-bar')).not.toHaveClass(/search-filtered/);
   await page.locator('#chip-search-btn').click();
@@ -919,7 +919,7 @@ test('opening and submitting search keeps the composer action and bar neutral', 
 });
 
 for (const width of [1280, 375]) {
-  test(`search submit highlights only once filtered at width ${width}`, async ({ page }) => {
+  test(`composer search highlights only once filtered at width ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 812 });
     await mockBackend(page);
     await page.goto('/');
@@ -941,8 +941,8 @@ for (const width of [1280, 375]) {
     await page.mouse.move(0, 0);
     await page.locator('#search-bar-keywords').focus();
     await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
-    await expect(composer).not.toHaveClass(/active/);
-    await expect.poll(appearance).not.toEqual(neutral);
+    await expect(composer).toHaveClass(/active/);
+    await expect.poll(appearance).toEqual(neutral);
     await page.locator('#search-bar-clear').click();
     await expect(composer).toHaveAttribute('aria-expanded', 'false');
     await composer.click();
@@ -1010,7 +1010,7 @@ test('searching inside a history filter preserves its independent indicator and 
 });
 
 for (const width of [1280, 375]) {
-  test(`search submit stays highlighted after searching and keywords avoid a native clear control at width ${width}`, async ({ page }) => {
+  test(`search submit stays neutral after searching and keywords avoid a native clear control at width ${width}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 812 });
     await mockBackend(page);
     await page.goto('/');
@@ -1035,21 +1035,86 @@ for (const width of [1280, 375]) {
     await keywords.press('Enter');
     await page.mouse.move(0, 0);
     await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
-    await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
-    await expect.poll(color).toBe(accent);
+    await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+    await expect.poll(color).toBe(neutral);
     await submit.hover();
-    await expect.poll(color).toBe(accent);
+    await expect.poll(color).toBe(neutral);
+    await submit.click();
+    await expect.poll(color).toBe(neutral);
+    await expect(submit).toHaveCSS('outline-style', 'none');
     await page.mouse.move(0, 0);
     await keywords.focus();
     await keywords.press('Tab');
     await expect(submit).toBeFocused();
-    await expect.poll(color).toBe(accent);
+    await expect(submit).toHaveCSS('outline-style', 'solid');
+    await expect.poll(color).toBe(neutral);
     await keywords.focus();
-    await expect.poll(color).toBe(accent);
+    await expect.poll(color).toBe(neutral);
     await expect(page.locator('#chip-search-btn')).not.toHaveAttribute('aria-pressed', 'true');
     await page.locator('#search-bar-clear').click();
     await page.locator('#chip-search-btn').click();
     await page.mouse.move(0, 0);
     await expect.poll(color).toBe(neutral);
+  });
+}
+
+test('search operator follows scope and updates applied search', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.fill('#input', '/s #all alpha beta');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#search-bar-operator')).toHaveValue('and');
+  const request = page.waitForRequest(r => new URL(r.url()).pathname === '/search' && new URL(r.url()).searchParams.get('operator') === 'or');
+  await page.selectOption('#search-bar-operator', 'or');
+  await request;
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+  await expect(page.locator('#search-bar-keywords')).toHaveValue('alpha beta');
+  await expect(page.locator('#search-bar-operator')).toHaveValue('or');
+});
+
+for (const action of ['change operator', 'close search', 'close and reopen search']) {
+  test(`delayed search response is ignored after ${action}`, async ({ page }) => {
+    await mockBackend(page);
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    let delayedRoute;
+    await page.route('**/search**', route => {
+      if (!delayedRoute) {
+        delayedRoute = route;
+        return;
+      }
+      return route.fulfill({ json: { items: [{
+        id: 902, topic: 'squid', agent: 'codex', content: 'Current alpha beta result',
+      }] } });
+    });
+    await page.goto('/');
+    await page.fill('#input', '/s #all alpha beta');
+    await page.keyboard.press('Enter');
+    await expect.poll(() => !!delayedRoute).toBe(true);
+
+    if (action === 'change operator') {
+      await page.selectOption('#search-bar-operator', 'or');
+    } else {
+      await page.locator('#search-bar-clear').click();
+      if (action === 'close and reopen search') {
+        await page.fill('#input', '/s #all alpha beta');
+        await page.keyboard.press('Enter');
+      }
+    }
+    if (action !== 'close search') {
+      await expect(page.locator('.search-result-item')).toHaveCount(1);
+      await expect(page.locator('.search-result-item')).toContainText('Current alpha beta result');
+    }
+
+    const responsePromise = page.waitForResponse(r => r.request() === delayedRoute.request());
+    await delayedRoute.fulfill({ json: { items: [{
+      id: 901, topic: 'squid', agent: 'codex', content: 'Stale alpha beta result',
+    }] } });
+    await (await responsePromise).finished();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+    await expect(page.locator('.search-result-item')).toHaveCount(action === 'close search' ? 0 : 1);
+    await expect(page.locator('#messages')).not.toContainText('Stale alpha beta result');
+    expect(errors).toEqual([]);
   });
 }

@@ -2795,19 +2795,19 @@ def get_history_items_by_ids(ids: list[int]) -> list[dict]:
     return items
 
 
-def _build_fts_match(q: str) -> str:
+def _build_fts_match(q: str, operator: str = "and") -> str:
     tokens = [t.replace('"', '') for t in q.strip().split()]
     tokens = [t for t in tokens if t]
     if not tokens:
         return ''
-    return ' AND '.join(f'"{t}"' for t in tokens)
+    return (' OR ' if operator == 'or' else ' AND ').join(f'"{t}"' for t in tokens)
 
 
 def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                     adhoc: Optional[bool] = None, limit: int = 100,
                     bookmarked: bool = False, flow_route: Optional[str] = None,
-                    marked_bad: bool = False, topic_subtree: bool = False) -> dict:
-    terms = _build_fts_match(q)
+                    marked_bad: bool = False, topic_subtree: bool = False, operator: str = "and") -> dict:
+    terms = _build_fts_match(q, operator)
     if not terms:
         return {"items": []}
 
@@ -2875,10 +2875,10 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
 def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                    adhoc: Optional[bool] = None, limit: int = 100,
                    bookmarked: bool = False, flow_route: Optional[str] = None,
-                   marked_bad: bool = False, topic_subtree: bool = False) -> dict:
+                   marked_bad: bool = False, topic_subtree: bool = False, operator: str = "and") -> dict:
     """Search user prompts via prompts_fts. Returns assistant reply items (same shape as
     search_messages) so the frontend can render them with appendPromptOnlyHistoryItem."""
-    terms = _build_fts_match(q)
+    terms = _build_fts_match(q, operator)
     if not terms:
         return {"items": []}
 
