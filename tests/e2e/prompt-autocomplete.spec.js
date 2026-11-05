@@ -686,6 +686,38 @@ test('clear composer action inserts /clear and ArrowUp restores the draft', asyn
   await expect(composer).toHaveValue('draft before clear');
 });
 
+for (const explicitRoute of [false, true]) {
+  test(`clear stashes the ${explicitRoute ? 'explicit' : 'chip'} route with the draft`, async ({ page }) => {
+    await mockBackend(page);
+    await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+      topic: 'squid', agent: 'codex', adhoc: true, lookback: 0,
+    })));
+    await page.goto('/');
+
+    const composer = page.locator('#input');
+    const draft = explicitRoute ? '#squid@claude draft before clear' : 'draft before clear';
+    const route = explicitRoute ? '#squid@claude' : '#squid@codex!';
+    if (explicitRoute) await page.evaluate(() => clearTopicChip());
+    await composer.fill(draft);
+    await page.locator('#chip-clear-btn').click();
+
+    await expect(composer).toHaveValue('/clear');
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('squid_stashed_prompts'))))
+      .toEqual([`${route} draft before clear`]);
+    await composer.press('ArrowUp');
+    await expect(composer).toHaveValue('draft before clear');
+    await expect(page.locator('#topic-chip')).toContainText(route);
+
+    // Persisted recall must restore the route after the original chip is gone.
+    await page.reload();
+    await page.evaluate(() => clearTopicChip());
+    await composer.fill('draft before');
+    await page.locator('#autocomplete .ac-item', { hasText: 'draft before clear' }).locator('.ac-route-btn').click();
+    await expect(composer).toHaveValue('draft before clear');
+    await expect(page.locator('#topic-chip')).toContainText(route);
+  });
+}
+
 test('stash composer action adds the prompt to recall and ArrowUp restores it', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({

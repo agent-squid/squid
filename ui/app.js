@@ -1821,7 +1821,7 @@ async function updateComposerActionTitles() {
 chipFilterBtn.addEventListener('click', async e => {
   e.stopPropagation();
   const active = historyFilter;
-  if (active?.flow_route || active?.topic || active?.agent || active?.explicitAll) {
+  if (active?.flow_route || active?.topic || active?.agent) {
     clearFilter();
     return;
   }
@@ -1831,24 +1831,29 @@ chipFilterBtn.addEventListener('click', async e => {
   else filterByTopic(route.topic);
 });
 
-chipSearchBtn.addEventListener('click', async e => {
-  e.stopPropagation();
-  if (searchActive || searchPanelOpen) {
-    clearSearch();
-    input.focus();
-    return;
-  }
-  let scope = activeHistoryFilterScope();
-  if (!scope) scope = routeScopeText(await resolveEffectiveComposerRoute());
-  searchScopeContext = parseScopeInput(scope, { allowAll: true });
+function openHistoryPanel() {
   searchPanelOpen = true;
+  searchScopeContext = { ...historyFilter };
   closeSearchScopes();
-  document.getElementById('search-bar-scope').value = scope || '#all';
-  const draft = input.value.trim();
-  document.getElementById('search-bar-keywords').value = draft.startsWith('/') ? '' : (draft.startsWith('#') ? parseInput(draft).message.trim() : draft);
+  document.getElementById('search-bar-scope').value = searchScopeText(historyFilter) || '#all';
+  document.getElementById('search-bar-keywords').value = searchActive ? searchState.keywords : '';
+  document.getElementById('search-bar-operator').value = searchState?.operator || 'and';
+  updateHistoryToggleButtons();
   document.getElementById('search-bar').classList.add('active');
   updateSearchButton();
   document.getElementById('search-bar-keywords').focus();
+}
+
+function closeHistoryPanel() {
+  searchPanelOpen = false;
+  closeSearchScopes();
+  document.getElementById('search-bar').classList.remove('active');
+  updateSearchButton();
+}
+
+chipSearchBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  openHistoryPanel();
 });
 
 chipClearBtn.addEventListener('click', e => {
@@ -2121,11 +2126,11 @@ function updateSearchButton() {
   chipSearchBtn?.classList.toggle('active', searchActive);
   document.getElementById('search-bar').classList.toggle('search-filtered', searchActive);
   chipSearchBtn?.removeAttribute('aria-pressed');
-  chipSearchBtn?.setAttribute('aria-expanded', (searchActive || searchPanelOpen) ? 'true' : 'false');
+  chipSearchBtn?.setAttribute('aria-expanded', searchPanelOpen ? 'true' : 'false');
 }
 
 function hasHistoryFilterScope() {
-  return !!(historyFilter.flow_route || historyFilter.topic || historyFilter.agent || historyFilter.explicitAll);
+  return !!(historyFilter.flow_route || historyFilter.topic || historyFilter.agent);
 }
 
 function hasResponseOnlyFilter() {
@@ -2133,7 +2138,6 @@ function hasResponseOnlyFilter() {
 }
 
 function persistSearchFilterScope(state) {
-  if (!hasHistoryFilterScope()) return;
   historyFilter = {
     flow_route: state.flow_route || null,
     topic: state.flow_route ? null : (state.topic || null),
@@ -2211,6 +2215,9 @@ function clearFilter() {
     return;
   }
   reloadHistory({});
+  searchScopeContext = {};
+  document.getElementById('search-bar-scope').value = '#all';
+  document.getElementById('search-bar-scope').removeAttribute('aria-invalid');
 }
 
 // A still-in-flight (queued or streaming) thinking bubble, plus the user bubble/timestamp
@@ -2303,7 +2310,6 @@ function setLiveGroupHidden(hidden) {
 }
 
 function reloadHistory(filter = {}) {
-  if (searchPanelOpen && !searchActive) clearSearch();
   document.getElementById('status-jump-notice')?.remove();
   historyFilter = filter;
   historyOffset = 0;
@@ -2334,76 +2340,15 @@ function reloadHistory(filter = {}) {
 function _updateFilterBadge() {
   const badge = document.getElementById('filter-badge');
   const labelEl = document.getElementById('filter-badge-label');
-  const activeState = (searchActive && searchState) ? searchState : historyFilter;
-  const { topic, agent, adhoc, flow_route, topicSubtree } = activeState;
-  const explicitAll = !!activeState.explicitAll;
-
-  if (!flow_route && !topic && !agent && !explicitAll && !bookmarkOnlyHistory && !badOnlyHistory) {
-    badge.classList.remove('active');
-    updateFilterButton();
-    return;
-  }
-
-  labelEl.innerHTML = '';
-  const addSegment = (kind, content, remove, editable = true) => {
-    const segment = document.createElement('span');
-    segment.className = `filter-scope-segment filter-scope-${kind}`;
-    segment.appendChild(content);
-    const x = document.createElement('button');
-    x.type = 'button';
-    x.className = 'filter-scope-remove';
-    x.setAttribute('aria-label', `Remove ${kind} filter`);
-    x.addEventListener('click', e => { e.stopPropagation(); remove(); });
-    segment.appendChild(x);
-    if (editable) segment.addEventListener('click', editActiveFilter);
-    labelEl.appendChild(segment);
-  };
-
-  if (flow_route) {
-    const route = document.createElement('span');
-    route.className = 'tag-topic';
-    route.textContent = flow_route;
-    addSegment('flow', route, () => removeFilterSegment('flow'));
-  } else if (topic || explicitAll) {
-    const t = document.createElement('span');
-    t.className = 'tag-topic';
-    t.textContent = '#' + (explicitAll ? 'all' : topic) + (topicSubtree ? '*' : '');
-    addSegment('topic', t, () => removeFilterSegment('topic'));
-  }
-  if (agent) {
-    const lane = document.createElement('span');
-    const a = document.createElement('span');
-    a.className = 'tag-agent';
-    a.textContent = '@' + agent;
-    setAgentSlugColor(a, agent);
-    lane.appendChild(a);
-    if (adhoc === true) {
-      const ad = document.createElement('span');
-      ad.className = 'tag-adhoc';
-      ad.textContent = '!';
-      setAgentSlugColor(ad, agent);
-      lane.appendChild(ad);
-    } else if (adhoc === null) {
-      const both = document.createElement('span');
-      both.className = 'tag-adhoc';
-      both.textContent = '*';
-      setAgentSlugColor(both, agent);
-      lane.appendChild(both);
-    }
-    addSegment('agent', lane, () => removeFilterSegment('agent'));
-  }
-  if (bookmarkOnlyHistory) {
-    addSegment('bookmarks', document.createTextNode('bookmarked'), () => removeFilterSegment('bookmarks'), false);
-  }
-  if (badOnlyHistory) {
-    const icon = document.createElement('span');
-    icon.className = 'filter-scope-icon material-symbols-outlined';
-    icon.textContent = 'thumb_down';
-    icon.title = 'Marked bad responses';
-    icon.setAttribute('aria-label', 'Marked bad responses');
-    addSegment('bad', icon, () => removeFilterSegment('bad'), false);
-  }
-  badge.classList.add('active');
+  const scoped = hasHistoryFilterScope();
+  document.getElementById('filter-scope-picker').hidden = !scoped;
+  document.getElementById('filter-bar-clear').hidden = !scoped;
+  document.getElementById('filter-bar-scope').value = searchScopeText(historyFilter);
+  document.getElementById('filter-bar-scope').removeAttribute('aria-invalid');
+  labelEl.replaceChildren();
+  updateHistoryToggleButtons();
+  badge.classList.toggle('active', (searchActive && searchState ? !!searchScopeText(searchState) : scoped) || badOnlyHistory);
+  closeScopeOptions('filter');
   updateFilterButton();
 }
 
@@ -3139,6 +3084,7 @@ function _updateSearchBar() {
   }
 
   searchPanelOpen = true;
+  updateHistoryToggleButtons();
   kwEl.value = searchState.keywords;
   document.getElementById('search-bar-operator').value = searchState.operator || 'and';
   _updateSearchScopeInput();
@@ -3221,15 +3167,13 @@ function startSearch(rawArgs, parsedInput = null) {
     agent = historyFilter.agent || null;
     adhoc = historyFilter.adhoc ?? null;
   } else {
-    // fall back to sticky chip (current chat context)
-    flow_route = stickyChip?.route ? canonicalFlowRoute(stickyChip.route) : null;
-    topic = flow_route ? null : (stickyChip?.topic || null);
+    // Unrestricted searches include every route.
+    flow_route = topic = agent = adhoc = null;
     topicSubtree = false;
-    agent = flow_route ? null : (stickyChip?.agent || null);
-    adhoc = flow_route ? null : (stickyChip?.adhoc ? true : false);
   }
 
   searchState = { flow_route, topic, topicSubtree, agent, adhoc, explicitAll, keywords: parsed.keywords, operator: parsed.operator || 'and' };
+  persistSearchFilterScope(searchState);
   if (!parsedInput) searchScopeContext = { ...searchState };
   searchActive = true;
   ++searchLoadGeneration;
@@ -4662,7 +4606,7 @@ function closeEscSurfaces() {
   // Floating popup
   if (procStatusPopup?.classList.contains('open')) { procStatusPopup.classList.remove('open'); return true; }
   // Search overlay
-  if (searchActive || searchPanelOpen) { clearSearch(); input.focus(); return true; }
+  if (searchPanelOpen) { closeHistoryPanel(); input.focus(); return true; }
   // Inline panels (below search, above composer)
   if (pinPanel.classList.contains('open')) { closePinPanel({ restoreFocus: true }); return true; }
   if (authPanel.classList.contains('open')) { closeAuthPanel(); return true; }
@@ -8005,24 +7949,74 @@ function confirmDiffRevert({ filePath = null, count = 1 } = {}) {
   });
 }
 
-async function fetchRevertEligibility(block) {
-  const msgId = block.dataset.msgId;
-  const repo = block.dataset.repo;
+const _revertChecks = new Map();
+let _revertChecksActive = 0;
+const REVERT_CHECK_CONCURRENCY = 4;
+
+function fetchRevertEligibility(block, { force = false } = {}) {
+  const { msgId, repo, worktreeStatus } = block.dataset;
   if (!msgId || !repo) return;
-  // Marked synchronously (before the fetch even starts) so an overlapping
-  // refreshAllRevertButtons() call in the same tick sees it as claimed and
-  // skips it, instead of firing a duplicate request for the same block.
   block.dataset.revertChecked = '1';
-  const worktreeStatus = block.dataset.worktreeStatus;
   if (worktreeStatus && worktreeStatus !== 'synced' && worktreeStatus !== 'resolved') return;
+  const key = JSON.stringify([msgId, repo]);
+  const existing = _revertChecks.get(key);
+  if (existing) {
+    existing.blocks.add(block);
+    // A revert during an in-flight read needs one fresh read afterward.
+    if (force && existing.running) existing.dirty = true;
+    return;
+  }
+  _revertChecks.set(key, { msgId, repo, blocks: new Set([block]), running: false, dirty: false });
+  _drainRevertChecks();
+}
 
-  let eligibility;
+function _drainRevertChecks() {
+  for (const [key, check] of _revertChecks) {
+    if (_revertChecksActive >= REVERT_CHECK_CONCURRENCY) break;
+    if (check.running) continue;
+    for (const block of check.blocks) {
+      if (!block.isConnected) check.blocks.delete(block);
+    }
+    if (!check.blocks.size) {
+      _revertChecks.delete(key);
+      continue;
+    }
+    check.running = true;
+    _revertChecksActive++;
+    _runRevertCheck(key, check);
+  }
+}
+
+async function _runRevertCheck(key, check) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const res = await fetch(`/chat/${msgId}/diff-revert-status?repo=${encodeURIComponent(repo)}`);
-    if (!res.ok) return;
-    eligibility = await res.json();
-  } catch { return; }
+    const res = await fetch(`/chat/${check.msgId}/diff-revert-status?repo=${encodeURIComponent(check.repo)}`,
+      { signal: controller.signal });
+    if (res.ok) {
+      const eligibility = await res.json();
+      if (!check.dirty) {
+        for (const block of check.blocks) {
+          if (block.isConnected) _renderRevertEligibility(block, eligibility);
+        }
+      }
+    }
+  } catch { /* A later explicit refresh can retry failed checks. */ }
+  finally {
+    clearTimeout(timeout);
+    _revertChecksActive--;
+    _revertChecks.delete(key);
+    if (check.dirty) {
+      check.running = false;
+      check.dirty = false;
+      _revertChecks.set(key, check);
+    }
+    _drainRevertChecks();
+  }
+}
 
+function _renderRevertEligibility(block, eligibility) {
+  const { msgId, repo } = block.dataset;
   // Update per-file rows
   for (const row of block.querySelectorAll('.gitdiff-file-row[data-file]')) {
     const fpath = row.dataset.file;
@@ -8092,7 +8086,7 @@ async function fetchRevertEligibility(block) {
 function refreshAllRevertButtons({ force = false } = {}) {
   for (const block of document.querySelectorAll('.tool-block[data-msg-id][data-repo]')) {
     if (!force && block.dataset.revertChecked === '1') continue;
-    fetchRevertEligibility(block);
+    fetchRevertEligibility(block, { force });
   }
 }
 
@@ -17092,7 +17086,17 @@ async function _apiToggleBookmark(msgId, topic, agent) {
 let bookmarkOnlyHistory = false;
 let badOnlyHistory = false;
 
+function updateHistoryToggleButtons() {
+  for (const [id, active] of [['search-bar-bookmarks', bookmarkOnlyHistory], ['search-bar-bad', badOnlyHistory]]) {
+    const button = document.getElementById(id);
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+}
+
 function updateBookmarkButton() {
+  bookmarkBtn.classList.toggle('active', bookmarkOnlyHistory);
+  updateHistoryToggleButtons();
   bookmarkBtn.setAttribute('aria-pressed', bookmarkOnlyHistory ? 'true' : 'false');
   bookmarkBtn.title = bookmarkOnlyHistory ? 'show full thread: /bm' : 'bookmarks only: /bm';
 }
@@ -17106,7 +17110,8 @@ function toggleBookmarkOnlyHistory() {
   updateBookmarkButton();
   _updateFilterBadge();
   if (searchActive) {
-    document.querySelectorAll('.search-result-item, .date-divider').forEach(el => el.remove());
+    ++searchLoadGeneration;
+    document.querySelectorAll('.search-result-item, .date-divider, #messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
     loadSearchResults();
   } else {
     reloadHistory(historyFilter);
@@ -17121,7 +17126,8 @@ function toggleBadOnlyHistory() {
   }
   _updateFilterBadge();
   if (searchActive) {
-    document.querySelectorAll('.search-result-item, .date-divider').forEach(el => el.remove());
+    ++searchLoadGeneration;
+    document.querySelectorAll('.search-result-item, .date-divider, #messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
     loadSearchResults();
   } else {
     reloadHistory(historyFilter);
@@ -17490,7 +17496,28 @@ initSettings();
 initPin();
 initBookmark();
 _loadBadResponses();
-document.getElementById('search-bar-clear').addEventListener('click', clearSearch);
+const compactHistoryOperator = window.matchMedia('(max-width: 600px)');
+function updateHistoryOperatorLabels() {
+  const options = document.getElementById('search-bar-operator').options;
+  options[0].textContent = compactHistoryOperator.matches ? '&&' : 'AND';
+  options[1].textContent = compactHistoryOperator.matches ? '||' : 'OR';
+  options[0].setAttribute('aria-label', 'AND — all keywords');
+  options[1].setAttribute('aria-label', 'OR — any keyword');
+}
+compactHistoryOperator.addEventListener('change', updateHistoryOperatorLabels);
+updateHistoryOperatorLabels();
+document.getElementById('search-bar-bookmarks').addEventListener('click', toggleBookmarkOnlyHistory);
+document.getElementById('search-bar-bad').addEventListener('click', toggleBadOnlyHistory);
+document.getElementById('search-bar-clear').addEventListener('click', closeHistoryPanel);
+document.getElementById('search-bar-reset').addEventListener('click', () => {
+  bookmarkOnlyHistory = false;
+  badOnlyHistory = false;
+  historyFilter = {};
+  clearSearch();
+  reloadHistory({});
+  updateBookmarkButton();
+  openHistoryPanel();
+});
 document.getElementById('chip-prompts-btn')?.addEventListener('click', togglePromptOnlyHistory);
 updatePromptOnlyButton();
 updateSearchButton();
@@ -17566,11 +17593,14 @@ function restoreStashedInput() {
   resizeComposer();
 }
 
-function stashComposerAndEdit(command) {
+async function stashComposerAndEdit(command) {
   const prev = input.value.trim();
   commandEditRestore = prev && prev !== command ? prev : null;
   if (prev && prev !== command && !prev.startsWith('/')) {
-    recordPrompt(prev);
+    const message = parseInput(prev).message.trim();
+    const route = await resolveEffectiveComposerRoute();
+    const entry = route.route ? `${route.route} ${message}` : formatPromptHistoryEntry(route.topic, route.agent, route.adhoc, route.lookback || 0, message);
+    recordPrompt(entry);
     const hint = document.createElement('span');
     hint.className = 'restore-hint';
     if (isMobileViewport()) {
@@ -17595,21 +17625,17 @@ function stashComposerAndEdit(command) {
   resizeComposer();
 }
 
-function editActiveFilter() {
-  const active = (searchActive && searchState) ? searchState : historyFilter;
-  stashComposerAndEdit(formatFilterCommand(active));
-}
+function closeSearchScopes() { closeScopeOptions('search'); }
 
-function closeSearchScopes() {
-  document.getElementById('search-scope-options').hidden = true;
-  for (const id of ['search-bar-scope', 'search-scope-toggle']) {
+function closeScopeOptions(kind) {
+  document.getElementById(`${kind}-scope-options`).hidden = true;
+  for (const id of [`${kind}-bar-scope`, `${kind}-scope-toggle`]) {
     document.getElementById(id).setAttribute('aria-expanded', 'false');
   }
 }
 
-function routeSearchScopes() {
-  const context = searchScopeContext || searchState || {};
-  const values = new Map([['#all', 'Search all']]);
+function routeSearchScopes(context = searchScopeContext || searchState || {}, kind = 'search') {
+  const values = new Map([['#all', kind === 'filter' ? 'All history' : 'Search all']]);
   const add = (value, label) => { if (value && !values.has(value)) values.set(value, `${label} · ${value}`); };
   // Flow routes stay exact; do not generate combinations for each participant.
   if (context.flow_route) add(context.flow_route, 'Route');
@@ -17617,10 +17643,12 @@ function routeSearchScopes() {
     const route = `${context.topic ? '#' + context.topic : ''}@${context.agent}`;
     add(route, 'Route');
     add(`${route}!`, 'Route ad hoc');
+    add(`${route}*`, 'Route both lanes');
   }
   const topic = context.topic || context.flow_route?.match(/^#([^@>,]+)/)?.[1];
   if (topic) {
     add(`#${topic}`, 'This topic');
+    add(`#${topic}*`, 'This topic + subtopics');
     if (topic.includes('.')) {
       const parent = topic.slice(0, topic.lastIndexOf('.'));
       add(`#${parent}*`, 'Parent + subtopics');
@@ -17634,10 +17662,12 @@ function routeSearchScopes() {
   return values;
 }
 
-let searchScopeSuggestionSeq = 0;
-async function showSearchScopes(query = '') {
-  const seq = ++searchScopeSuggestionSeq;
-  const list = document.getElementById('search-scope-options');
+const scopeSuggestionSeq = { search: 0, filter: 0 };
+function showSearchScopes(query = '') { return showScopeOptions('search', query); }
+async function showScopeOptions(kind, query = '') {
+  closeScopeOptions(kind === 'search' ? 'filter' : 'search');
+  const seq = ++scopeSuggestionSeq[kind];
+  const list = document.getElementById(`${kind}-scope-options`);
   const render = values => {
     const existing = new Map([...list.children].map(option => [option.dataset.scope, option]));
     const wanted = new Set(values.keys());
@@ -17651,16 +17681,20 @@ async function showSearchScopes(query = '') {
         option.setAttribute('role', 'option');
         option.addEventListener('mousedown', e => e.preventDefault());
         option.addEventListener('click', () => {
-          const scopeInput = document.getElementById('search-bar-scope');
+          const scopeInput = document.getElementById(`${kind}-bar-scope`);
           scopeInput.value = value;
           scopeInput.removeAttribute('aria-invalid');
-          closeSearchScopes();
-          document.getElementById('search-bar-keywords').focus();
+          closeScopeOptions(kind);
+          if (kind === 'filter') {
+            submitFilterScope();
+            if (document.getElementById('filter-scope-picker').hidden) input.focus();
+            else { scopeInput.focus(); closeScopeOptions(kind); }
+          } else document.getElementById('search-bar-keywords').focus();
         });
         list.appendChild(option);
       }
       option.textContent = label;
-      option.setAttribute('aria-selected', String(document.getElementById('search-bar-scope').value === value));
+      option.setAttribute('aria-selected', String(document.getElementById(`${kind}-bar-scope`).value === value));
     }
     for (const [value, option] of existing) {
       if (!wanted.has(value)) {
@@ -17669,17 +17703,26 @@ async function showSearchScopes(query = '') {
       }
     }
   };
-  const related = routeSearchScopes();
+  const related = routeSearchScopes(kind === 'filter' ? historyFilter : (searchScopeContext || searchState || {}), kind);
   const needle = query.trim().toLowerCase();
   const initial = new Map([...related].filter(([value, label]) => value === '#all' || !needle || `${value} ${label}`.toLowerCase().includes(needle)));
   render(initial);
   list.hidden = false;
-  for (const id of ['search-bar-scope', 'search-scope-toggle']) {
+  for (const id of [`${kind}-bar-scope`, `${kind}-scope-toggle`]) {
     document.getElementById(id).setAttribute('aria-expanded', 'true');
   }
-  if (!needle) return;
+  if (!needle) {
+    // Suggestions can use the composer without restricting the applied history.
+    if (kind === 'search' && related.size === 1) {
+      const route = await resolveEffectiveComposerRoute();
+      if (seq !== scopeSuggestionSeq[kind] || list.hidden) return;
+      searchScopeContext = parseScopeInput(routeScopeText(route), { allowAll: true }) || {};
+      render(routeSearchScopes(searchScopeContext, kind));
+    }
+    return;
+  }
   const [topics, agents] = await Promise.all([_acTopics(), _acAgents()]);
-  if (seq !== searchScopeSuggestionSeq || list.hidden) return;
+  if (seq !== scopeSuggestionSeq[kind] || list.hidden) return;
   const values = new Set();
   for (const topic of (Array.isArray(topics) ? topics : [])) values.add(`#${topic.name}`);
   for (const agent of (Array.isArray(agents) ? agents : [])) {
@@ -17691,42 +17734,68 @@ async function showSearchScopes(query = '') {
   render(initial);
 }
 
-document.getElementById('search-scope-toggle').addEventListener('click', () => {
-  if (document.getElementById('search-scope-options').hidden) showSearchScopes();
-  else closeSearchScopes();
-});
-document.getElementById('search-bar-scope').addEventListener('focus', () => showSearchScopes());
-document.getElementById('search-bar-scope').addEventListener('click', () => showSearchScopes());
-document.getElementById('search-bar-scope').addEventListener('input', e => {
-  e.target.removeAttribute('aria-invalid');
-  showSearchScopes(e.target.value);
-});
-document.getElementById('search-scope-picker').addEventListener('keydown', e => {
-  const list = document.getElementById('search-scope-options');
-  if (e.key === 'Escape' && !list.hidden) {
-    e.preventDefault();
-    e.stopPropagation();
-    closeSearchScopes();
-    document.getElementById('search-bar-keywords').focus();
-  } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-    e.preventDefault();
-    if (list.hidden) showSearchScopes();
-    const options = [...list.querySelectorAll('[role="option"]')];
-    const index = options.indexOf(document.activeElement);
-    const next = index < 0 ? (e.key === 'ArrowDown' ? 0 : options.length - 1) : (index + (e.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
-    options[next]?.focus();
+for (const kind of ['search', 'filter']) {
+  document.getElementById(`${kind}-scope-toggle`).addEventListener('click', () => {
+    if (document.getElementById(`${kind}-scope-options`).hidden) showScopeOptions(kind);
+    else closeScopeOptions(kind);
+  });
+  document.getElementById(`${kind}-bar-scope`).addEventListener('focus', () => showScopeOptions(kind));
+  document.getElementById(`${kind}-bar-scope`).addEventListener('click', () => showScopeOptions(kind));
+  document.getElementById(`${kind}-bar-scope`).addEventListener('input', e => {
+    e.target.removeAttribute('aria-invalid');
+    showScopeOptions(kind, e.target.value);
+  });
+  document.getElementById(`${kind}-scope-picker`).addEventListener('keydown', e => {
+    const list = document.getElementById(`${kind}-scope-options`);
+    if (e.key === 'Escape' && !list.hidden) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeScopeOptions(kind);
+      document.getElementById(kind === 'search' ? 'search-bar-keywords' : 'filter-bar-scope').focus();
+      closeScopeOptions(kind);
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (list.hidden) showScopeOptions(kind);
+      const options = [...list.querySelectorAll('[role="option"]')];
+      const index = options.indexOf(document.activeElement);
+      const next = index < 0 ? (e.key === 'ArrowDown' ? 0 : options.length - 1) : (index + (e.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+      options[next]?.focus();
+    }
+  });
+  document.addEventListener('click', e => {
+    if (!document.getElementById(`${kind}-scope-picker`).contains(e.target)) closeScopeOptions(kind);
+  });
+  document.getElementById(`${kind}-scope-picker`).addEventListener('focusout', e => {
+    if (!e.currentTarget.contains(e.relatedTarget)) closeScopeOptions(kind);
+  });
+
+}
+
+function submitFilterScope() {
+  const field = document.getElementById('filter-bar-scope');
+  const parsed = parseScopeInput(field.value.trim(), { allowAll: true });
+  if (parsed === null) {
+    field.setAttribute('aria-invalid', 'true');
+    showCmdFeedback('Filter scope: use #topic, @agent, a route, or #all.');
+    return;
   }
+  field.removeAttribute('aria-invalid');
+  closeScopeOptions('filter');
+  applyHistoryFilter(parsed?.explicitAll ? {} : (parsed || {}));
+}
+document.getElementById('filter-bar-scope').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || e.isComposing) return;
+  e.preventDefault();
+  submitFilterScope();
 });
-document.addEventListener('click', e => {
-  if (!document.getElementById('search-scope-picker').contains(e.target)) closeSearchScopes();
-});
-document.getElementById('search-scope-picker').addEventListener('focusout', e => {
-  if (!e.currentTarget.contains(e.relatedTarget)) closeSearchScopes();
+document.getElementById('filter-bar-clear').addEventListener('click', () => {
+  closeScopeOptions('filter');
+  clearFilter();
 });
 
 function submitSearchPanel() {
   const scopeInput = document.getElementById('search-bar-scope');
-  const parsedScope = parseScopeInput(scopeInput.value.trim(), { allowAll: true });
+  const parsedScope = parseScopeInput(scopeInput.value.trim() || '#all', { allowAll: true });
   if (parsedScope === null) {
     scopeInput.setAttribute('aria-invalid', 'true');
     showCmdFeedback('Search scope: use #topic, @agent, @agent! (ad hoc), @agent* (both), a route, or #all.');
@@ -17735,14 +17804,18 @@ function submitSearchPanel() {
   }
   scopeInput.removeAttribute('aria-invalid');
   const keywords = document.getElementById('search-bar-keywords');
-  if (!keywords.value.trim()) { keywords.focus(); return; }
   closeSearchScopes();
+  if (!keywords.value.trim()) {
+    historyFilter = parsedScope || {};
+    clearSearch();
+    reloadHistory(historyFilter);
+    openHistoryPanel();
+    return;
+  }
   startSearch('', { ...parsedScope, explicitScope: !!parsedScope, keywords: keywords.value.trim(), operator: document.getElementById('search-bar-operator').value });
 }
 
-document.getElementById('search-bar-operator').addEventListener('change', () => {
-  if (searchActive) submitSearchPanel();
-});
+
 document.getElementById('search-bar-submit').addEventListener('click', submitSearchPanel);
 for (const id of ['search-bar-scope', 'search-bar-keywords']) {
   document.getElementById(id).addEventListener('keydown', e => {

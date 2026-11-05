@@ -376,11 +376,28 @@ async def _resume_stalled_flows_on_startup():
         log.warning("Resumed %d stalled Squid Flow chain(s) on startup", resumed)
 
 
+def _raise_file_descriptor_limit():
+    """Leave headroom for reconnects without lowering an existing limit."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft != resource.RLIM_INFINITY:
+            target = 10240 if hard == resource.RLIM_INFINITY else min(hard, 10240)
+            if target > soft:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        log.info("File descriptor limit soft=%s hard=%s", *resource.getrlimit(resource.RLIMIT_NOFILE))
+    except (ImportError, OSError, ValueError):
+        log.warning("Could not raise file descriptor limit", exc_info=True)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     # Enclose startup as well as shutdown so startup failures also release the
     # idle WAL connection. It is opened and closed on the event loop thread.
     from . import continuations
+    _raise_file_descriptor_limit()
+    # One shared cap across clients, owned by this server lifespan/event loop.
+    _app.state.diff_revert_semaphore = asyncio.Semaphore(4)
     continuations.configure(False)
     try:
         with database_lifetime():
@@ -2661,17 +2678,18 @@ async def record_msg_quota_delta(msg_id: int, req: MsgQuotaSnapshotRequest):
 
 
 @app.get("/chat/{msg_id}/diff-revert-status")
-async def diff_revert_status(msg_id: int, repo: str):
+async def diff_revert_status(msg_id: int, repo: str, request: Request):
     if _validate_repo_path(repo) is None:
         return JSONResponse({"error": "invalid repo path"}, status_code=400)
-    gitdiff = await asyncio.to_thread(get_message_gitdiff, msg_id, repo)
-    blocked = _worktree_diff_blocked(gitdiff)
-    if blocked:
-        return JSONResponse(blocked)
-    eligibility = await asyncio.to_thread(get_diff_revert_eligibility, msg_id, repo)
-    if not eligibility:
-        return JSONResponse({"error": "diff not found"}, status_code=404)
-    return JSONResponse(eligibility)
+    async with request.app.state.diff_revert_semaphore:
+        gitdiff = await asyncio.to_thread(get_message_gitdiff, msg_id, repo)
+        blocked = _worktree_diff_blocked(gitdiff)
+        if blocked:
+            return JSONResponse(blocked)
+        eligibility = await asyncio.to_thread(get_diff_revert_eligibility, msg_id, repo)
+        if not eligibility:
+            return JSONResponse({"error": "diff not found"}, status_code=404)
+        return JSONResponse(eligibility)
 
 
 async def _worktree_record_or_existing_paths(topic: str, wt_key: str, repo_root: Path) -> tuple[Optional[dict], bool]:

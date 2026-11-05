@@ -144,17 +144,22 @@ When no explicit scope is given, scope resolution follows this priority:
 2. Sticky chip (current chat context)
 3. No scope (search everything)
 
-### 4. Scope and the filter badge are unified
+### 4. Scope uses shared route dropdowns
 
-The filter badge (`#filter-badge`) is the single visual scope indicator during
-search. No separate scope chip exists in the search bar. The badge reads from
-`searchState` when a search is active and from `historyFilter` otherwise.
+Search and history filters use the same editable route dropdown and suggestion
+behavior. Search places it before the keyword operator and query. The filter
+row gives it the available width and adds a clear-scope button. Editing the
+filter field and pressing Enter, or selecting a suggestion, applies that scope
+without replacing the composer draft. Selecting All history clears the route
+filter. Topic/agent/route tags are not repeated beside the field.
 
-Clicking `×` on the filter badge during search clears the search scope (sets
-topic/agent/adhoc to null and re-runs the search) without touching
-`historyFilter`. The filter state is restored when search is cleared.
+The composer filter and bookmark icons indicate their independently active
+modes; bookmarks do not add a redundant scope tag. Marked-bad filtering retains
+a removable indicator because it has no composer mode icon.
 
-The search bar itself shows only the keyword query and a close button.
+While search is open, its route field replaces the visible filter row. Changing
+search scope leaves the history filter independent; closing search restores
+that filter. Choose Search all to widen search, or close the search bar to exit.
 
 ### 5. Search results use the standard history card
 

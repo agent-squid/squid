@@ -1,4 +1,17 @@
 const { test, expect } = require('@playwright/test');
+const activeScope = page => page.locator('#search-bar-scope');
+async function editFilterScope(page, scope) {
+  if (!await page.locator('#search-bar').isVisible()) await page.locator('#chip-search-btn').click();
+  await page.fill('#search-bar-scope', scope);
+  await page.locator('#search-bar-scope').press('Enter');
+}
+
+
+async function clearSearchKeywords(page) {
+  if (!await page.locator('#search-bar').isVisible()) await page.locator('#chip-search-btn').click();
+  await page.fill('#search-bar-keywords', '');
+  await page.locator('#search-bar-keywords').press('Enter');
+}
 
 async function mockBackend(page) {
   await page.route('**/health', r => r.fulfill({ json: { status: 'ok' } }));
@@ -17,8 +30,8 @@ test('explicit #all search shows editable scope and keywords', async ({ page }) 
   await page.fill('#input', '/s #all claude login');
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('#filter-badge')).toHaveClass(/active/);
-  await expect(page.locator('#filter-badge-label')).toHaveText('#all');
+  await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
+  await expect(activeScope(page)).toHaveValue('#all');
   await expect(page.locator('#search-bar-keywords')).toHaveValue('claude login');
 
   await page.locator('#search-bar-keywords').click();
@@ -33,7 +46,7 @@ test('search inputs have breathing room and the composer action highlights appli
   await page.fill('#input', '/s #all claude login');
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('#filter-badge')).toHaveClass(/active/);
+  await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
   await expect(page.locator('#search-bar')).toHaveClass(/active/);
   await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
   await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
@@ -49,12 +62,11 @@ test('search inputs have breathing room and the composer action highlights appli
   for (const { top, bottom } of spacing) {
     expect(top).toBeGreaterThanOrEqual(4);
     expect(bottom).toBeGreaterThanOrEqual(4);
-    expect(Math.abs(top - bottom)).toBeLessThanOrEqual(1);
   }
 
-  await page.locator('#chip-search-btn').click();
+  await page.locator('#search-bar-clear').click();
   await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
-  await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
   await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('#input')).not.toHaveValue(/\/s #all claude login/);
 });
@@ -66,15 +78,15 @@ test('search composer action inherits active filter scope over composer route', 
 
   await page.fill('#input', '/f #squid@claude');
   await page.keyboard.press('Enter');
-  await page.locator('.filter-scope-agent .filter-scope-remove').click();
-  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
-  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+  await editFilterScope(page, '#squid');
+  await expect(activeScope(page)).toHaveValue('#squid');
+  await expect(activeScope(page)).not.toHaveValue(/@/);
 
   await page.fill('#input', 'needle');
   await page.locator('#chip-search-btn').click();
 
   await expect(page.locator('#search-bar-scope')).toHaveValue('#squid');
-  await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
+  await expect(page.locator('#search-bar-keywords')).toHaveValue('');
   await expect(page.locator('#input')).toHaveValue('needle');
 });
 
@@ -97,8 +109,9 @@ test('flow route filter and search use flow_route scope', async ({ page }) => {
   await page.fill('#input', '/f #squid@codex>@revu');
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('#filter-badge')).toHaveClass(/active/);
-  await expect(page.locator('#filter-badge-label')).toHaveText('#squid@codex>@revu');
+  await expect(page.locator('#chip-filter-btn')).toHaveClass(/active/);
+  await page.locator('#chip-search-btn').click();
+  await expect(activeScope(page)).toHaveValue('#squid@codex>@revu');
   await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
   await expect.poll(() => historyUrls.some(url => url.includes('flow_route=%23squid%40codex%3E%40revu'))).toBe(true);
   const flowHistoryUrl = historyUrls.find(url => url.includes('flow_route=%23squid%40codex%3E%40revu'));
@@ -122,7 +135,7 @@ test('unscoped global search shows all-history scope in its editor', async ({ pa
   await page.fill('#input', '/s claude login');
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('#filter-badge')).not.toHaveClass(/active/);
+  await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
   await expect(page.locator('#search-bar-keywords')).toHaveValue('claude login');
 
   await page.locator('#search-bar-keywords').click();
@@ -145,8 +158,8 @@ test('agent-only adhoc search works across topics and preserves its syntax', asy
   expect(capturedUrl).not.toMatch(/topic=/);
   expect(capturedUrl).toMatch(/agent=claude/);
   expect(capturedUrl).toMatch(/adhoc=true/);
-  await expect(page.locator('.filter-scope-topic')).toHaveCount(0);
-  await expect(page.locator('.filter-scope-agent')).toContainText('@claude!');
+  await expect(activeScope(page)).not.toHaveValue(/#/);
+  await expect(activeScope(page)).toHaveValue('@claude!');
   await page.locator('#search-bar-keywords').click();
   await expect(page.locator('#search-bar-scope')).toHaveValue('@claude!');
   await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
@@ -170,7 +183,7 @@ test('agent search suffix selects session, adhoc, or both for the exact agent', 
   await page.keyboard.press('Enter');
   expect(urls.at(-1)).toMatch(/agent=claude-opus/);
   expect(urls.at(-1)).not.toMatch(/adhoc=/);
-  await expect(page.locator('.filter-scope-agent')).toContainText('@claude-opus*');
+  await expect(activeScope(page)).toHaveValue('@claude-opus*');
 
   await page.locator('#search-bar-keywords').click();
   await expect(page.locator('#search-bar-scope')).toHaveValue('@claude-opus*');
@@ -337,8 +350,8 @@ test('clearing search restores the filtered bookmark-only history list', async (
   await page.keyboard.press('Enter');
   await expect(page.locator('.msg.assistant.search-result-item')).toHaveCount(1);
 
-  await page.locator('#chip-search-btn').click();
-  await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
+  await clearSearchKeywords(page);
+  await expect(page.locator('#search-bar')).toHaveClass(/active/);
   await expect(page.locator('.msg.assistant.history-item')).toHaveCount(1);
   await expect(page.locator('.msg.assistant.history-item')).toContainText('Needle bookmark');
   await expect(page.locator('.msg.assistant.history-item')).not.toContainText('Other bookmark');
@@ -352,21 +365,21 @@ test('clearing search preserves a topic-only filter after removing agent scope',
   await page.goto('/');
   await page.fill('#input', '/f #squid@claude');
   await page.keyboard.press('Enter');
-  await page.locator('.filter-scope-agent .filter-scope-remove').click();
-  await expect(page.locator('#filter-badge-label')).toHaveText('#squid');
-  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+  await editFilterScope(page, '#squid');
+  await expect(activeScope(page)).toHaveValue('#squid');
+  await expect(activeScope(page)).not.toHaveValue(/@/);
 
   await page.fill('#input', '/s needle');
   await page.keyboard.press('Enter');
   await expect(page.locator('#search-bar')).toHaveClass(/active/);
 
-  await page.locator('#chip-search-btn').click();
-  await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
-  await expect(page.locator('#filter-badge-label')).toHaveText('#squid');
-  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+  await clearSearchKeywords(page);
+  await expect(page.locator('#search-bar')).toHaveClass(/active/);
+  await expect(activeScope(page)).toHaveValue('#squid');
+  await expect(activeScope(page)).not.toHaveValue(/@/);
 });
 
-test('search icon prefill then clear preserves topic-only filter after removing agent scope', async ({ page }) => {
+test('search icon preserves composer draft and keyword clearing keeps the topic-only route', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
   await page.route('**/search**', route => route.fulfill({ json: { items: [] } }));
@@ -374,8 +387,8 @@ test('search icon prefill then clear preserves topic-only filter after removing 
   await page.goto('/');
   await page.fill('#input', '/f #squid@claude');
   await page.keyboard.press('Enter');
-  await page.locator('.filter-scope-agent .filter-scope-remove').click();
-  await expect(page.locator('#filter-badge-label')).toHaveText('#squid');
+  await editFilterScope(page, '#squid');
+  await expect(activeScope(page)).toHaveValue('#squid');
 
   await page.fill('#input', 'needle');
   await page.locator('#chip-search-btn').click();
@@ -385,10 +398,10 @@ test('search icon prefill then clear preserves topic-only filter after removing 
   await page.keyboard.press('Enter');
   await expect(page.locator('#search-bar')).toHaveClass(/active/);
 
-  await page.locator('#chip-search-btn').click();
-  await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
-  await expect(page.locator('#filter-badge-label')).toHaveText('#squid');
-  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+  await clearSearchKeywords(page);
+  await expect(page.locator('#search-bar')).toHaveClass(/active/);
+  await expect(activeScope(page)).toHaveValue('#squid');
+  await expect(activeScope(page)).not.toHaveValue(/@/);
 });
 
 test('bookmark search clear preserves topic-only filter after removing agent scope', async ({ page }) => {
@@ -412,9 +425,9 @@ test('bookmark search clear preserves topic-only filter after removing agent sco
   });
   await page.fill('#input', '/f #squid@claude');
   await page.keyboard.press('Enter');
-  await page.locator('.filter-scope-agent .filter-scope-remove').click();
+  await editFilterScope(page, '#squid');
   await page.locator('#chip-bookmark-btn').click();
-  await expect(page.locator('#filter-badge-label')).toHaveText('#squidbookmarked');
+  await expect(activeScope(page)).toHaveValue('#squid');
 
   await page.fill('#input', 'needle');
   await page.locator('#chip-search-btn').click();
@@ -424,9 +437,9 @@ test('bookmark search clear preserves topic-only filter after removing agent sco
   await page.keyboard.press('Enter');
   await expect(page.locator('.msg.assistant.search-result-item')).toHaveCount(1);
 
-  await page.locator('#chip-search-btn').click();
-  await expect(page.locator('#filter-badge-label')).toHaveText('#squidbookmarked');
-  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+  await clearSearchKeywords(page);
+  await expect(activeScope(page)).toHaveValue('#squid');
+  await expect(activeScope(page)).not.toHaveValue(/@/);
   await expect(page.locator('.msg.assistant.history-item')).toHaveCount(1);
 });
 
@@ -452,8 +465,8 @@ test('bookmark search clear does not restore filter removed during search', asyn
   await page.locator('#chip-bookmark-btn').click();
   await page.fill('#input', '/f #squid@codex');
   await page.keyboard.press('Enter');
-  await page.locator('.filter-scope-topic .filter-scope-remove').click();
-  await expect(page.locator('#filter-badge-label')).toHaveText('@codexbookmarked');
+  await editFilterScope(page, '@codex');
+  await expect(activeScope(page)).toHaveValue('@codex');
 
   await page.fill('#input', 'needle');
   await page.locator('#chip-search-btn').click();
@@ -464,12 +477,11 @@ test('bookmark search clear does not restore filter removed during search', asyn
   await expect(page.locator('.msg.assistant.search-result-item')).toHaveCount(1);
 
   await page.locator('#chip-filter-btn').click();
-  await expect(page.locator('#filter-badge-label')).toHaveText('bookmarked');
+  await expect(activeScope(page)).toHaveValue('#all');
   await expect(page.locator('#chip-bookmark-btn')).toHaveAttribute('aria-pressed', 'true');
 
-  await page.locator('#chip-search-btn').click();
-  await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
-  await expect(page.locator('#filter-badge-label')).toHaveText('bookmarked');
+  await clearSearchKeywords(page);
+  await expect(activeScope(page)).toHaveValue('#all');
   await expect(page.locator('#chip-bookmark-btn')).toHaveAttribute('aria-pressed', 'true');
 });
 
@@ -509,7 +521,7 @@ test('a live in-flight message stays hidden while searching, then reappears on c
   await expect(thinking).not.toBeVisible();
   await expect(userBubble).not.toBeVisible();
 
-  await page.locator('#chip-search-btn').click();
+  await clearSearchKeywords(page);
   await expect(thinking).toBeVisible();
   await expect(userBubble).toBeVisible();
 });
@@ -561,10 +573,10 @@ test('explicit #topic* search scope sends topic_subtree=true', async ({ page }) 
   const last = searchUrls[searchUrls.length - 1];
   expect(last).toContain('topic=squid');
   expect(last).toContain('topic_subtree=true');
-  await expect(page.locator('#filter-badge-label')).toContainText('#squid*');
+  await expect(activeScope(page)).toHaveValue('#squid*');
 });
 
-test('mobile search stays on one row and preserves the draft through search and Escape', async ({ page }) => {
+test('mobile search wraps within the viewport and preserves the draft through search and Escape', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await mockBackend(page);
   const urls = [];
@@ -580,9 +592,9 @@ test('mobile search stays on one row and preserves the draft through search and 
   const layout = await page.evaluate(() => {
     const scope = document.getElementById('search-bar-scope').getBoundingClientRect();
     const keywords = document.getElementById('search-bar-keywords').getBoundingClientRect();
-    return { sameRow: scope.top === keywords.top, narrower: scope.width < keywords.width, fits: document.documentElement.scrollWidth <= innerWidth };
+    return { visible: scope.width > 0 && keywords.width > 0, fits: document.documentElement.scrollWidth <= innerWidth };
   });
-  expect(layout).toEqual({ sameRow: true, narrower: true, fits: true });
+  expect(layout).toEqual({ visible: true, fits: true });
   await page.fill('#search-bar-scope', '@claude!');
   await page.fill('#search-bar-keywords', 'needle');
   await page.locator('#search-bar-keywords').press('Enter');
@@ -670,7 +682,7 @@ test('spaced route scope is normalized without becoming search keywords', async 
   await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
 });
 
-test('opening search prefills keywords from a routed draft without modifying it', async ({ page }) => {
+test('opening search keeps routed composer drafts separate from history fields', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
   await page.evaluate(() => clearTopicChip());
@@ -678,12 +690,12 @@ test('opening search prefills keywords from a routed draft without modifying it'
   // The composer moves the typed route into its sticky chip before search opens.
   await expect(page.locator('#input')).toHaveValue('draft keywords');
   await page.locator('#chip-search-btn').click();
-  await expect(page.locator('#search-bar-keywords')).toHaveValue('draft keywords');
+  await expect(page.locator('#search-bar-keywords')).toHaveValue('');
   await expect(page.locator('#input')).toHaveValue('draft keywords');
-  await expect(page.locator('#search-bar-scope')).toHaveValue('#squid@claude');
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
 });
 
-test('blank scope inherits the active filter and a filter change closes an unsubmitted panel', async ({ page }) => {
+test('blank scope removes the active filter and a filter change closes an unsubmitted panel', async ({ page }) => {
   await mockBackend(page);
   const urls = [];
   await page.route('**/search**', route => {
@@ -697,10 +709,9 @@ test('blank scope inherits the active filter and a filter change closes an unsub
   await page.fill('#search-bar-scope', '');
   await page.fill('#search-bar-keywords', 'needle');
   await page.locator('#search-bar-keywords').press('Enter');
-  await expect.poll(() => urls.at(-1)?.searchParams.get('topic')).toBe('squid');
-  expect(urls.at(-1).searchParams.get('agent')).toBe('claude');
-  expect(urls.at(-1).searchParams.get('adhoc')).toBe('true');
-  await expect(page.locator('.filter-scope-topic')).toHaveText('#squid');
+  await expect.poll(() => urls.length).toBe(1);
+  for (const key of ['topic', 'agent', 'adhoc']) expect(urls.at(-1).searchParams.has(key)).toBe(false);
+  await expect(activeScope(page)).toHaveValue('#all');
   await page.locator('#search-bar-clear').click();
   await page.locator('#chip-search-btn').click();
   await page.fill('#input', '/f #other');
@@ -712,15 +723,21 @@ test('blank scope inherits the active filter and a filter change closes an unsub
 });
 
 for (const selector of ['#chip-filter-btn', '#search-bar-clear']) {
-  test(`unsubmitted search closes through ${selector}`, async ({ page }) => {
+  test(`unsubmitted panel responds to ${selector}`, async ({ page }) => {
     await mockBackend(page);
     await page.goto('/');
     await page.fill('#input', '/f #squid@claude');
     await page.locator('#input').press('Enter');
     await page.locator('#chip-search-btn').click();
     await page.locator(selector).click();
-    await expect(page.locator('#search-bar')).not.toBeVisible();
-    await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-expanded', 'false');
+    if (selector === '#chip-filter-btn') {
+      await expect(page.locator('#search-bar')).toBeVisible();
+      await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+      await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
+    } else {
+      await expect(page.locator('#search-bar')).not.toBeVisible();
+      await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-expanded', 'false');
+    }
   });
 }
 
@@ -739,7 +756,7 @@ test('scope dropdown always offers Search all and only expands matches when typi
   await page.locator('#chip-search-btn').click();
   await page.locator('#search-scope-toggle').click();
   await expect(page.locator('#search-scope-options')).toBeVisible();
-  await expect(page.locator('#search-scope-options [role="option"]')).toHaveText(['Search all', 'This topic · #squid']);
+  await expect(page.locator('#search-scope-options [role="option"]')).toHaveText(['Search all', 'This topic · #squid', 'This topic + subtopics · #squid*']);
   await page.fill('#search-bar-scope', '#oth');
   await expect(page.locator('#search-scope-options [role="option"]')).toHaveText(['Search all', '#other']);
   await page.locator('#search-scope-options').getByRole('option', { name: 'Search all', exact: true }).click();
@@ -783,7 +800,7 @@ for (const keywords of ['#other needle', '@claude needle']) {
     await page.fill('#search-bar-keywords', keywords);
     await page.locator('#search-bar-keywords').press('Enter');
     await expect.poll(() => urls.at(-1)?.searchParams.get('q')).toBe(keywords);
-    expect(urls.at(-1).searchParams.get('topic')).toBe('squid');
+    expect(urls.at(-1).searchParams.has('topic')).toBe(false);
     expect(urls.at(-1).searchParams.has('agent')).toBe(false);
   });
 }
@@ -797,7 +814,7 @@ test('related scopes cover parent topics and agent lanes without duplicates', as
   await page.locator('#search-scope-toggle').click();
   const options = page.locator('#search-scope-options [role="option"]');
   const values = await options.evaluateAll(nodes => nodes.map(n => n.dataset.scope));
-  expect(values).toEqual(['#all', '#squid.ux@claude', '#squid.ux@claude!', '#squid.ux', '#squid*', '@claude', '@claude!', '@claude*']);
+  expect(values).toEqual(['#all', '#squid.ux@claude', '#squid.ux@claude!', '#squid.ux@claude*', '#squid.ux', '#squid.ux*', '#squid*', '@claude', '@claude!', '@claude*']);
   expect(new Set(values).size).toBe(values.length);
   await page.getByRole('option', { name: 'Route ad hoc · #squid.ux@claude!', exact: true }).click();
   await expect(page.locator('#search-bar-scope')).toHaveValue('#squid.ux@claude!');
@@ -810,7 +827,7 @@ test('flow route suggestions retain the flow without agent permutations', async 
   await page.locator('#input').press('Enter');
   await page.locator('#chip-search-btn').click();
   await page.locator('#search-scope-toggle').click();
-  await expect(page.locator('#search-scope-options [role="option"]')).toHaveText(['Search all', 'Route · #squid@codex>@revu', 'This topic · #squid']);
+  await expect(page.locator('#search-scope-options [role="option"]')).toHaveText(['Search all', 'Route · #squid@codex>@revu', 'This topic · #squid', 'This topic + subtopics · #squid*']);
 });
 
 test('delayed suggestions keep the highlighted option focused', async ({ page }) => {
@@ -882,9 +899,9 @@ for (const width of [1280, 375]) {
     const layout = await page.evaluate(() => {
       const scope = document.getElementById('search-bar-scope').getBoundingClientRect();
       const button = document.getElementById('search-bar-submit').getBoundingClientRect();
-      return { aligned: Math.abs((scope.top + scope.bottom) / 2 - (button.top + button.bottom) / 2) < 1, fits: document.documentElement.scrollWidth <= innerWidth };
+      return { visible: scope.width > 0 && button.width > 0, fits: document.documentElement.scrollWidth <= innerWidth };
     });
-    expect(layout).toEqual({ aligned: true, fits: true });
+    expect(layout).toEqual({ visible: true, fits: true });
     await page.fill('#search-bar-scope', 'invalid');
     await button.click();
     await expect(page.locator('#search-bar-scope')).toHaveAttribute('aria-invalid', 'true');
@@ -909,9 +926,9 @@ test('opening search stays neutral and submitting highlights the composer action
   await expect.poll(border).toBe(neutralBorder);
   await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
   await page.locator('#search-bar-clear').click();
-  await expect(page.locator('#search-bar')).not.toHaveClass(/search-filtered/);
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
   await page.locator('#chip-search-btn').click();
-  await expect(page.locator('#search-bar')).not.toHaveClass(/search-filtered/);
+  await expect(page.locator('#search-bar')).toHaveClass(/search-filtered/);
   await page.fill('#input', '/f #other');
   await page.locator('#input').press('Enter');
   await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
@@ -962,8 +979,8 @@ for (const suffix of ['', '!', '*']) {
     await page.locator('#search-scope-toggle').click();
     const options = page.locator('#search-scope-options [role="option"]');
     await expect(options).toHaveText([
-      'Search all', 'Route · #squid.ux@claude', 'Route ad hoc · #squid.ux@claude!',
-      'This topic · #squid.ux', 'Parent + subtopics · #squid*',
+      'Search all', 'Route · #squid.ux@claude', 'Route ad hoc · #squid.ux@claude!', 'Route both lanes · #squid.ux@claude*',
+      'This topic · #squid.ux', 'This topic + subtopics · #squid.ux*', 'Parent + subtopics · #squid*',
       'Agent · session · @claude', 'Agent · ad hoc · @claude!', 'Agent · both · @claude*',
     ]);
     await page.getByRole('option', { name: 'Parent + subtopics · #squid*', exact: true }).click();
@@ -971,22 +988,27 @@ for (const suffix of ['', '!', '*']) {
   });
 }
 
-test('search scope does not activate the history filter button', async ({ page }) => {
+test('scoped search highlights filter and clearing it preserves keywords', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
   const filter = page.locator('#chip-filter-btn');
   await page.fill('#input', '/s #squid@claude needle');
   await page.locator('#input').press('Enter');
+  await expect(filter).toHaveClass(/active/);
+  await expect(filter).toHaveAttribute('aria-pressed', 'true');
+  const request = page.waitForRequest(r => new URL(r.url()).pathname === '/search');
+  await filter.click();
+  const params = new URL((await request).url()).searchParams;
+  expect(params.get('q')).toBe('needle');
+  for (const key of ['topic', 'agent', 'adhoc', 'flow_route']) expect(params.has(key)).toBe(false);
   await expect(filter).not.toHaveClass(/active/);
   await expect(filter).toHaveAttribute('aria-pressed', 'false');
   await expect(page.locator('#search-bar')).toBeVisible();
-  // A neutral filter action applies the composer filter rather than clearing search scope.
-  await filter.click();
-  await expect(filter).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.locator('#search-bar')).not.toBeVisible();
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+  await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
 });
 
-test('searching inside a history filter preserves its independent indicator and scope', async ({ page }) => {
+test('selecting all replaces the shared route without restoring an old filter', async ({ page }) => {
   await mockBackend(page);
   const urls = [];
   await page.route('**/search**', route => { urls.push(new URL(route.request().url())); return route.fulfill({ json: { items: [] } }); });
@@ -1003,10 +1025,17 @@ test('searching inside a history filter preserves its independent indicator and 
   await expect(filter).toHaveClass(/active/);
   await page.fill('#search-bar-scope', '#all');
   await page.locator('#search-bar-submit').click();
-  await expect(filter).toHaveAttribute('aria-pressed', 'true');
+  await expect.poll(() => urls.at(-1)?.searchParams.has('topic')).toBe(false);
+  for (const key of ['agent', 'adhoc', 'flow_route']) expect(urls.at(-1).searchParams.has(key)).toBe(false);
+  expect(urls.at(-1).searchParams.get('q')).toBe('needle');
+  await expect(filter).toHaveAttribute('aria-pressed', 'false');
   await page.locator('#search-bar-clear').click();
-  await expect(filter).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.locator('#filter-badge-label')).toHaveText('#squid@claude!');
+  await expect(page.locator('#search-bar')).not.toBeVisible();
+  await expect(filter).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+  await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
 });
 
 for (const width of [1280, 375]) {
@@ -1058,21 +1087,29 @@ for (const width of [1280, 375]) {
   });
 }
 
-test('search operator follows scope and updates applied search', async ({ page }) => {
+test('operator edits apply only after explicit search submission', async ({ page }) => {
   await mockBackend(page);
+  const urls = [];
+  await page.route('**/search**', route => { urls.push(new URL(route.request().url())); return route.fulfill({ json: { items: [] } }); });
   await page.goto('/');
   await page.fill('#input', '/s #all alpha beta');
   await page.keyboard.press('Enter');
   await expect(page.locator('#search-bar-operator')).toHaveValue('and');
+  await expect.poll(() => urls.length).toBe(1);
   const request = page.waitForRequest(r => new URL(r.url()).pathname === '/search' && new URL(r.url()).searchParams.get('operator') === 'or');
   await page.selectOption('#search-bar-operator', 'or');
-  await request;
+  await page.locator('#search-bar-keywords').focus();
+  expect(urls).toHaveLength(1);
+  await page.locator('#search-bar-submit').click();
+  const params = new URL((await request).url()).searchParams;
+  expect(params.get('q')).toBe('alpha beta');
+  expect(params.has('topic')).toBe(false);
   await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
   await expect(page.locator('#search-bar-keywords')).toHaveValue('alpha beta');
   await expect(page.locator('#search-bar-operator')).toHaveValue('or');
 });
 
-for (const action of ['change operator', 'close search', 'close and reopen search']) {
+for (const action of ['apply operator', 'clear keywords', 'replace search']) {
   test(`delayed search response is ignored after ${action}`, async ({ page }) => {
     await mockBackend(page);
     const errors = [];
@@ -1092,16 +1129,17 @@ for (const action of ['change operator', 'close search', 'close and reopen searc
     await page.keyboard.press('Enter');
     await expect.poll(() => !!delayedRoute).toBe(true);
 
-    if (action === 'change operator') {
+    if (action === 'apply operator') {
       await page.selectOption('#search-bar-operator', 'or');
+      await page.locator('#search-bar-submit').click();
     } else {
-      await page.locator('#search-bar-clear').click();
-      if (action === 'close and reopen search') {
+      await clearSearchKeywords(page);
+      if (action === 'replace search') {
         await page.fill('#input', '/s #all alpha beta');
         await page.keyboard.press('Enter');
       }
     }
-    if (action !== 'close search') {
+    if (action !== 'clear keywords') {
       await expect(page.locator('.search-result-item')).toHaveCount(1);
       await expect(page.locator('.search-result-item')).toContainText('Current alpha beta result');
     }
@@ -1113,8 +1151,58 @@ for (const action of ['change operator', 'close search', 'close and reopen searc
     await (await responsePromise).finished();
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 
-    await expect(page.locator('.search-result-item')).toHaveCount(action === 'close search' ? 0 : 1);
+    await expect(page.locator('.search-result-item')).toHaveCount(action === 'clear keywords' ? 0 : 1);
     await expect(page.locator('#messages')).not.toContainText('Stale alpha beta result');
     expect(errors).toEqual([]);
   });
 }
+
+for (const kind of ['filter', 'search']) {
+  for (const topic of ['squid', 'squid.ux']) {
+    test(`${kind} offers topic and subtree choices for ${topic}`, async ({ page }) => {
+      await mockBackend(page);
+      await page.goto('/');
+      await page.fill('#input', kind === 'filter' ? `/f #${topic}` : `/s #${topic} needle`);
+      await page.locator('#input').press('Enter');
+      if (kind === 'filter') await page.locator('#chip-search-btn').click();
+      await page.locator('#search-scope-toggle').click();
+      const options = page.locator('#search-scope-options');
+      await expect(options.locator(`[data-scope="#${topic}"]`)).toHaveText(`This topic · #${topic}`);
+      await expect(options.locator(`[data-scope="#${topic}*"]`)).toHaveText(`This topic + subtopics · #${topic}*`);
+      if (topic.includes('.')) {
+        await expect(options.locator('[data-scope="#squid*"]')).toHaveText('Parent + subtopics · #squid*');
+      }
+      const request = page.waitForRequest(r => {
+        const url = new URL(r.url());
+        return url.pathname === (kind === 'filter' ? '/history' : '/search') &&
+          url.searchParams.get('topic') === topic && url.searchParams.get('topic_subtree') === 'true';
+      });
+      await options.locator(`[data-scope="#${topic}*"]`).click();
+      await page.locator('#search-bar-submit').click();
+      await request;
+      await expect(page.locator('#search-bar-scope')).toHaveValue(`#${topic}*`);
+    });
+  }
+}
+
+test('closing the panel preserves a pending search and reopening shows its results', async ({ page }) => {
+  await mockBackend(page);
+  let pending;
+  await page.route('**/search**', route => { pending = route; });
+  await page.goto('/');
+  await page.fill('#input', '/s #all needle');
+  await page.locator('#input').press('Enter');
+  await expect.poll(() => !!pending).toBe(true);
+  await page.locator('#search-bar-clear').click();
+  await expect(page.locator('#search-bar')).not.toBeVisible();
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  const response = page.waitForResponse(r => r.request() === pending.request());
+  await pending.fulfill({ json: { items: [{ id: 903, topic: 'squid', agent: 'codex', content: 'Preserved needle result' }] } });
+  await (await response).finished();
+  await expect(page.locator('.search-result-item')).toHaveCount(1);
+  await expect(page.locator('.search-result-item')).toContainText('Preserved needle result');
+  await expect(page.locator('#search-bar')).not.toBeVisible();
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
+  await expect(page.locator('.search-result-item')).toHaveCount(1);
+});

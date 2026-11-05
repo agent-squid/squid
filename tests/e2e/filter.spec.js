@@ -5,6 +5,11 @@
  */
 const { test, expect } = require('@playwright/test');
 
+async function expectFilterScope(page, scope) {
+  if (!await page.locator('#search-bar').isVisible()) await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#search-bar-scope')).toHaveValue(scope);
+}
+
 async function mockBackend(page, { topic = 'squid', agent = 'claude' } = {}) {
   await page.route('**/health',        r => r.fulfill({ json: { status: 'ok' } }));
   await page.route('**/quota**',       r => r.fulfill({ json: {} }));
@@ -158,17 +163,17 @@ test('/f @agent* filters both modes for one exact agent', async ({ page }) => {
   expect(capturedUrl).not.toMatch(/topic=/);
   expect(capturedUrl).toMatch(/agent=claude/);
   expect(capturedUrl).not.toMatch(/adhoc=/);
-  await expect(page.locator('.filter-scope-agent')).toContainText('@claude*');
+  await expectFilterScope(page, '@claude*');
 
-  await page.locator('.filter-scope-agent').click();
-  await expect(page.locator('#input')).toHaveValue('/f @claude*');
+  await page.locator('#search-bar-scope').click();
+  await expect(page.locator('#search-scope-options')).toBeVisible();
 
   await page.fill('#input', '/f #squid@claude*');
   await page.keyboard.press('Enter');
   expect(capturedUrl).toMatch(/topic=squid/);
   expect(capturedUrl).toMatch(/agent=claude/);
   expect(capturedUrl).not.toMatch(/adhoc=/);
-  await expect(page.locator('#filter-badge-label')).toContainText('#squid@claude*');
+  await expectFilterScope(page, '#squid@claude*');
 });
 
 test('/f #all is treated as a chat prompt; reset is the explicit way to clear filters', async ({ page }) => {
@@ -187,11 +192,12 @@ test('/f #all is treated as a chat prompt; reset is the explicit way to clear fi
 
   await page.fill('#input', '/f #squid');
   await page.keyboard.press('Enter');
+  await expect(page.locator('#chip-filter-btn')).toHaveAttribute('aria-pressed', 'true');
   await page.fill('#input', '/f #all');
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
   await expect.poll(() => chatBody?.message).toBe('/f #all');
+  await expectFilterScope(page, '#squid');
 });
 
 test('/filter with prose is sent as chat instead of becoming a filter command', async ({ page }) => {
@@ -232,8 +238,8 @@ test('/f supports a route-chain flow filter', async ({ page }) => {
   await page.fill('#input', '/f #squid@codex>@revuqwen');
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('#filter-badge')).toHaveClass(/active/);
-  await expect(page.locator('#filter-badge-label')).toContainText('#squid@codex>@revuqwen');
+  await expect(page.locator('#chip-filter-btn')).toHaveClass(/active/);
+  await expectFilterScope(page, '#squid@codex>@revuqwen');
   await expect(page.locator('#topic-chip')).toContainText('#squid@codex>@revuqwen');
   await expect.poll(() => historyUrls.some(url =>
     url.includes('flow_route=%23squid%40codex%3E%40revuqwen')
@@ -241,31 +247,21 @@ test('/f supports a route-chain flow filter', async ({ page }) => {
   expect(historyUrls.at(-1)).toContain('flow_route=%23squid%40codex%3E%40revuqwen');
 });
 
-test('filter badge segments can be removed independently and clicked to edit', async ({ page }) => {
+test('filter route can be edited without changing the message draft', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
   await page.goto('/');
-
   await page.fill('#input', '/f #squid@claude!');
   await page.keyboard.press('Enter');
-  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
-  await expect(page.locator('.filter-scope-agent')).toContainText('@claude!');
-
-  await page.locator('.filter-scope-topic .filter-scope-remove').click();
-  await expect(page.locator('.filter-scope-topic')).toHaveCount(0);
-  await expect(page.locator('.filter-scope-agent')).toContainText('@claude!');
-
+  await expectFilterScope(page, '#squid@claude!');
   await page.fill('#input', 'unfinished prompt');
-  await page.locator('.filter-scope-agent').click();
-  await expect(page.locator('#input')).toHaveValue('/f @claude!');
-  await page.locator('#input').press('ArrowUp');
+  await page.fill('#search-bar-scope', '@claude!');
+  await page.locator('#search-bar-scope').press('Enter');
+  await expectFilterScope(page, '@claude!');
   await expect(page.locator('#input')).toHaveValue('unfinished prompt');
-
-  await page.fill('#input', '/f #squid@claude!');
-  await page.keyboard.press('Enter');
-  await page.locator('.filter-scope-agent .filter-scope-remove').click();
-  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
-  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+  await page.fill('#search-bar-scope', '#squid');
+  await page.locator('#search-bar-scope').press('Enter');
+  await expectFilterScope(page, '#squid');
 });
 
 test('/filter reset clears filter and reloads history without params', async ({ page }) => {
@@ -324,7 +320,7 @@ test('composer filter action clears an active filter even when current route dif
   await page.goto('/');
   await page.fill('#input', '/f #squid');
   await page.keyboard.press('Enter');
-  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
+  await expectFilterScope(page, /\#squid/);
 
   await page.fill('#input', '#squid@claude draft');
   await page.locator('#chip-filter-btn').click();
@@ -429,25 +425,21 @@ test('/bookmarks and /bm toggle bookmarked only like the composer bookmark icon'
   await expect(page.locator('#chip-bookmark-btn')).toHaveAttribute('aria-pressed', 'false');
 });
 
-test('/bad renders the filter tag as a filled thumb-down icon', async ({ page }) => {
+test('/bad highlights the shared thumbs-down toggle', async ({ page }) => {
   await mockBackend(page);
-  await page.unroute('**/history**');
   await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
-
   await page.goto('/');
   await page.fill('#input', '/bad');
   await page.keyboard.press('Enter');
-
-  const badTag = page.locator('.filter-scope-bad');
-  const badIcon = badTag.locator('.filter-scope-icon.material-symbols-outlined');
-  await expect(badTag).toBeVisible();
-  await expect(badIcon).toHaveText('thumb_down');
-  await expect(badIcon).toHaveAttribute('aria-label', 'Marked bad responses');
-  await expect(badTag).not.toContainText('marked bad');
-
-  const fill = await badIcon.evaluate(el => getComputedStyle(el).fontVariationSettings);
-  expect(fill).toMatch(/["']FILL["'] 1/);
-  await expect(badIcon).toHaveCSS('color', 'rgb(240, 112, 64)');
+  await page.locator('#chip-search-btn').click();
+  const toggle = page.getByRole('button', { name: 'Bad responses only', exact: true });
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  await expect(toggle).toHaveClass(/active/);
+  const icon = toggle.locator('.material-symbols-outlined');
+  await expect(icon).toHaveText('thumb_down');
+  expect(await icon.evaluate(el => getComputedStyle(el).fontVariationSettings)).toMatch(/["']FILL["'] 1/);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
 });
 
 test('message bookmark and bad-response buttons post marker-only payloads', async ({ page }) => {
@@ -668,7 +660,7 @@ test('/f #topic* filters the whole subtree and sends topic_subtree=true', async 
   await page.waitForTimeout(300);
   expect(capturedUrl).toMatch(/topic=squid/);
   expect(capturedUrl).toMatch(/topic_subtree=true/);
-  await expect(page.locator('.filter-scope-topic')).toContainText('#squid*');
+  await expectFilterScope(page, /\#squid\*/);
 });
 
 test('/f #topic.cat* filters a nested subtree at any depth', async ({ page }) => {
@@ -687,7 +679,7 @@ test('/f #topic.cat* filters a nested subtree at any depth', async ({ page }) =>
   await page.waitForTimeout(300);
   expect(capturedUrl).toMatch(/topic=squid\.cat1/);
   expect(capturedUrl).toMatch(/topic_subtree=true/);
-  await expect(page.locator('.filter-scope-topic')).toContainText('#squid.cat1*');
+  await expectFilterScope(page, /\#squid\.cat1\*/);
 });
 
 test('/f #topic* without a wildcard stays exact (no topic_subtree param)', async ({ page }) => {
@@ -706,5 +698,52 @@ test('/f #topic* without a wildcard stays exact (no topic_subtree param)', async
   await page.waitForTimeout(300);
   expect(capturedUrl).toMatch(/topic=squid/);
   expect(capturedUrl).not.toMatch(/topic_subtree/);
-  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
+  await expectFilterScope(page, /\#squid/);
 });
+
+for (const width of [1280, 375]) {
+  test(`shared history dropdown edits route at width ${width}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 812 });
+    await mockBackend(page);
+    const urls = [];
+    await page.route('**/history**', route => {
+      urls.push(new URL(route.request().url()));
+      return route.fulfill({ json: { items: [], has_more: false } });
+    });
+    await page.goto('/');
+    await page.fill('#input', '/f #squid@claude!');
+    await page.keyboard.press('Enter');
+    await page.fill('#input', 'keep my draft');
+    await page.locator('#chip-search-btn').click();
+    await page.locator('#search-scope-toggle').click();
+    await expect(page.locator('#search-scope-options')).toBeVisible();
+    await page.locator('#search-scope-options [data-scope="#squid"]').click();
+    await page.locator('#search-bar-submit').click();
+    await expectFilterScope(page, '#squid');
+    await expect.poll(() => urls.at(-1)?.searchParams.get('topic')).toBe('squid');
+    expect(urls.at(-1).searchParams.has('agent')).toBe(false);
+    await expect(page.locator('#input')).toHaveValue('keep my draft');
+    await expect(page.locator('#chip-filter-btn')).toHaveClass(/active/);
+    expect(await page.locator('#search-bar').evaluate(el => el.getBoundingClientRect().right <= innerWidth)).toBe(true);
+    await page.fill('#search-bar-scope', 'invalid route');
+    await page.locator('#search-bar-scope').press('Enter');
+    await expect(page.locator('#search-bar-scope')).toHaveAttribute('aria-invalid', 'true');
+    await page.locator('#chip-filter-btn').click();
+    await expectFilterScope(page, '#all');
+    await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
+    await page.locator('#chip-bookmark-btn').click();
+    await expect(page.locator('#search-bar-bookmarks')).toHaveAttribute('aria-pressed', 'true');
+    await page.fill('#input', '/f #squid');
+    await page.locator('#input').press('Enter');
+    await page.locator('#chip-search-btn').click();
+    await page.locator('#search-bar-scope').focus();
+    await page.locator('#search-bar-scope').press('Escape');
+    await expect(page.locator('#search-scope-options')).not.toBeVisible();
+    await page.locator('#search-bar-scope').press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await expectFilterScope(page, '#all');
+    await page.locator('#search-bar-submit').click();
+    await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
+    await expect(page.locator('#chip-bookmark-btn')).toHaveAttribute('aria-pressed', 'true');
+  });
+}
