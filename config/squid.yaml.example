@@ -50,6 +50,10 @@ auth:
   # tailnet.
   allow_remote_keychain_unlock: false
 
+# ADR-0054: worktree.enabled also enables one durable successor per human
+# one-shot CLI turn; no separate continuation setting is required.
+# Parent completion and all repo syncs must succeed. Same agent/topic, maximum
+# successor timeout 600 seconds, no grandchildren, watch/Flow or publication.
 worktree:
   # Per-turn code-root isolation. Opt in with enabled: true; otherwise use direct writes.
   enabled: false

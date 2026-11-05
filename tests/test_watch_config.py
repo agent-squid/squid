@@ -43,6 +43,8 @@ def test_enabled_registry_is_lazy_and_uses_existing_probe_contract():
 def test_invalid_host_configuration_prevents_startup_before_tasks(monkeypatch):
     from agent import server
 
+    from agent import continuations
+    monkeypatch.setattr(server, 'WORKTREE_ISOLATION_ENABLED', True)
     monkeypatch.setattr(server, '_cfg', {'watches': {'enabled': 'yes'}})
     started = []
     monkeypatch.setattr(server._realtime_notifier, 'start', lambda loop: started.append(True))
@@ -54,6 +56,7 @@ def test_invalid_host_configuration_prevents_startup_before_tasks(monkeypatch):
     with pytest.raises(ValueError, match='must be a boolean'):
         asyncio.run(start())
     assert started == []
+    assert continuations._enabled is False
 
 
 def test_config_editor_rejects_invalid_registry():

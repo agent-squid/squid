@@ -1043,6 +1043,8 @@ def init_db() -> None:
         from .watch_runs import SCHEMA as watch_run_schema
         for ddl in (*_TABLES, *watch_schema, *watch_run_schema):
             conn.execute(ddl)
+        from .continuations import initialize as initialize_continuations
+        initialize_continuations(conn)
         if "pause_reason" not in _table_columns(conn, "watches"):
             conn.execute("ALTER TABLE watches ADD COLUMN pause_reason TEXT")
             conn.execute("""UPDATE watches SET pause_reason=
@@ -1810,7 +1812,7 @@ def insert_user_message(
     flow_route: Optional[str] = None,
     flow_step_id: Optional[str] = None,
 ) -> int:
-    if source not in {"human", "workflow", "diff_viewer"}:
+    if source not in {"human", "workflow", "diff_viewer", "continuation"}:
         source = "human"
     if context_ids or mem or mem_revision:
         context = {"pins": context_ids or [], "mem": mem}

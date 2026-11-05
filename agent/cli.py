@@ -3,6 +3,9 @@ import sys
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'continue':
+        from .continuation_cli import main as continue_main
+        raise SystemExit(continue_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] in {'watch', 'tools'}:
         from .watch_cli import main as watch_main
         raise SystemExit(watch_main(sys.argv[1:]))

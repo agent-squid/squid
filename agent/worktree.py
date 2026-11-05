@@ -493,9 +493,24 @@ def sync_after_turn(
         base_commit = _base_commit_from_registry(repo_root, topic, agent) or base_commit_for(repo_root, topic, agent)
         if not base_commit:
             raise RuntimeError(f"missing base commit for worktree {wt}")
-        _promote_new_ignored_files(repo_root, wt)
-        turn_tree = turn_tree or _snapshot_dir(repo_root, wt)
+        from .continuations import git_only
+        git_only_turn = git_only(agent, durable=True)
+        # Check before ANY promotion, including opted-in ignored files. Recovery
+        # reaches this path even if the runner never reached its completion guard.
+        if not git_only_turn:
+            _promote_new_ignored_files(repo_root, wt)
+        turn_tree = (_snapshot_dir(repo_root, wt) if git_only_turn else
+                     turn_tree or _snapshot_dir(repo_root, wt))
         base_tree = _run_git(repo_root, "show", "--format=%T", "--no-patch", base_commit).stdout.strip()
+        if git_only_turn:
+            new_ignored_files = any(
+                not (repo_root / rel).exists() and not (repo_root / rel).is_symlink()
+                for rel in _ignored_file_rel_paths(repo_root, wt)
+            )
+            if turn_tree != base_tree or new_ignored_files:
+                from .stats_db import mark_worktree_status
+                mark_worktree_status(topic, agent, str(repo_root), 'promotion_failed')
+                raise RuntimeError('Git-only continuation changed files; automatic promotion blocked.')
         if turn_tree == base_tree:
             return []
 

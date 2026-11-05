@@ -179,8 +179,10 @@ backing-repo access is possible today. Prompt instructions and post-run checks
 must not be described as prevention of arbitrary shell side effects. Any
 stronger mode enforcement requires an actual execution boundary.
 
-This ADR is proposed; no tool or execution mode described here is implemented
-by adding this document. See the [implementation plan](../plans/adr-0054-agent-capabilities-and-continuations.md).
+This ADR remains proposed. An opt-in [first CLI/HTTP slice](../continuations.md)
+implements one successor per human turn, enabled automatically by
+`worktree.enabled` without a separate continuation option; broader discovery, MCP, route and
+budget requirements remain pending. See the [implementation plan](../plans/adr-0054-agent-capabilities-and-continuations.md).
 
 ## References
 

@@ -446,6 +446,8 @@ class TopicWorker:
         asyncio.create_task(_run(), name=f"squid-chain-{msg_id}")
 
     async def _process(self, item: QueueItem):
+        completion_success = False
+        completion_reason = "turn_failed_or_cancelled"
         from .runners import CLIError, CLIAuthRequired, effective_protocol, runner_for_agent
         from .config import SQUID_HOME, WORKTREE_ISOLATION_ENABLED
         if item.watch_run_id:
@@ -589,6 +591,7 @@ class TopicWorker:
                 }
             except Exception:
                 log.debug("worktree lookup skipped topic=%s msg_id=%s", item.topic, item.msg_id, exc_info=True)
+        source_roots = [remap_worktree_paths(root, worktree_sources) for root in item.code_roots or []]
         runtime_blocks = assemble_runtime(
             protocol=effective_protocol(resolved, adhoc=item.adhoc),
             native_shell=item.native_shell,
@@ -644,6 +647,7 @@ class TopicWorker:
 
         response_remapper = _StreamingWorktreePathRemapper(worktree_sources)
         worktree_turn_trees: dict[tuple[str, str], str] = {}
+        stream_error = False
 
         async def _emit_git_diff():
             if not git_trackers:
@@ -675,13 +679,15 @@ class TopicWorker:
                 await _emit_tool(no_change_tool)
 
         async def _stream(prompt, **kw):
-            nonlocal run_seq, session_id, raw, status_raw
+            nonlocal run_seq, session_id, raw, status_raw, stream_error
             from .watch_launch import run as run_with_watch_credentials
+            from .continuations import capture_scope
             from contextlib import aclosing
             async with aclosing(run_with_watch_credentials(
                 runner, prompt,
                 persistent=not item.native_shell and effective_protocol(resolved, adhoc=item.adhoc) != "oneshot-cli",
                 shell=item.native_shell,
+                continuation_scope=capture_scope(source_roots, item.configured_cwd),
                 request_text=item.display_prompt if item.display_prompt is not None else item.prompt,
                 **kw,
             )) as stream:
@@ -723,6 +729,7 @@ class TopicWorker:
                             insert_run_event(item.msg_id, run_seq, "status", chunk["_status"])
                             await item.out_q.put(chunk)
                         elif "_error" in chunk:
+                            stream_error = True
                             insert_run_event(item.msg_id, run_seq, "error", chunk["_error"])
                             await item.out_q.put(chunk)
                         elif "_diag" in chunk:
@@ -734,6 +741,10 @@ class TopicWorker:
             await _emit_text(response_remapper.flush())
 
         try:
+            from . import continuations
+            if not await asyncio.to_thread(continuations.check_execution_scope, item.msg_id,
+                                           source_roots, item.configured_cwd):
+                raise RuntimeError('Continuation repository scope changed; execution blocked.')
             # prepare_trackers may perform filesystem and git work after the
             # earlier cancellation check. Recheck at the final async boundary
             # before asking the runner to create its process.
@@ -792,10 +803,24 @@ class TopicWorker:
                 clear_topic_session(item.topic, item.agent)
 
             await _emit_git_diff()
+            from . import continuations
+            if continuations.git_only(item.msg_id) and any(
+                    tool.get('name') == 'GitDiff' and tool.get('files') for tool in tool_events):
+                # Reuse the existing manual-attention status so both cleanup and
+                # admission settlement retain these edits without promoting them.
+                from .stats_db import mark_worktree_status
+                for rec in await asyncio.to_thread(get_worktrees, item.topic, str(item.msg_id)):
+                    await asyncio.to_thread(mark_worktree_status, item.topic, str(item.msg_id),
+                                            rec['repo_root'], 'promotion_failed')
+                    await _emit_tool(dict(name='WorktreeSync', status='promotion_failed',
+                                          repo=rec['repo_root'], worktree_repo=rec['worktree_path'],
+                                          reason='git_only_edit'))
+                raise RuntimeError('Git-only continuation changed files; sync blocked. Inspect any Git effects before retrying.')
 
             worktree_sync_elapsed_ms: Optional[float] = None
             worktree_sync_statuses: list[str] = []
             worktree_sync_repo_count = 0
+            sync_evidence_valid = True
             if item.agent and item.msg_id and item.worktree_isolated:
                 wt_key = str(item.msg_id)
                 from .stats_db import mark_worktree_synced, mark_worktree_status
@@ -807,6 +832,10 @@ class TopicWorker:
                     wt_records = []
                     log.debug("worktree sync lookup skipped topic=%s msg_id=%s", item.topic, item.msg_id, exc_info=True)
                 worktree_sync_repo_count = len(wt_records)
+                sync_evidence_valid = all(
+                    any(Path(root).resolve().is_relative_to(Path(rec['worktree_path']).resolve())
+                        for rec in wt_records) for root in tracking_roots
+                ) and all(Path(rec['worktree_path']).is_dir() for rec in wt_records)
                 for rec in wt_records:
                     repo_root = rec["repo_root"]
                     worktree_repo = rec["worktree_path"]
@@ -881,6 +910,11 @@ class TopicWorker:
             update_assistant_message(item.msg_id, content or "Agent returned no output.", session_id,
                                      "done" if content else "error", context=context_json,
                                      status_raw=status_raw, only_if_pending=True)
+            completion_success = bool(content) and not stream_error and sync_evidence_valid and (
+                not item.worktree_isolated or (
+                    worktree_sync_repo_count > 0 and
+                    all(status == 'synced' for status in worktree_sync_statuses)))
+            completion_reason = 'completed_and_synced' if completion_success else 'completion_or_sync_failed'
             insert_run_event(item.msg_id, run_seq, "done", None)
             if item.msg_id:
                 self._trigger_chain_continuation(
@@ -888,6 +922,8 @@ class TopicWorker:
                 )
 
         except Exception as exc:
+            completion_success = False
+            completion_reason = "turn_failed"
             err_text = str(exc)
             if not isinstance(exc, CLIError):
                 log.exception("Unexpected error processing msg_id=%s", item.msg_id)
@@ -921,6 +957,10 @@ class TopicWorker:
             await item.out_q.put({"_error": err_text})
 
         finally:
+            from . import continuations
+            if continuations._enabled and item.msg_id:
+                await asyncio.to_thread(continuations.complete, item.msg_id,
+                                        completion_success, completion_reason)
             await item.out_q.put(None)
 
 

@@ -380,80 +380,93 @@ async def _resume_stalled_flows_on_startup():
 async def _lifespan(_app: FastAPI):
     # Enclose startup as well as shutdown so startup failures also release the
     # idle WAL connection. It is opened and closed on the event loop thread.
-    with database_lifetime():
-        async with _server_lifespan(_app):
-            yield
+    from . import continuations
+    continuations.configure(False)
+    try:
+        with database_lifetime():
+            async with _server_lifespan(_app):
+                yield
+    finally:
+        continuations.configure(False)
 
 
 @asynccontextmanager
 async def _server_lifespan(_app: FastAPI):
     from .context import runtime_templates
     runtime_templates()
+    from . import continuations, watch_launch
     from .watch_config import load_watch_configuration
     # Validate before starting tasks. Construction opens no transports and
     # grants no activation or dispatch authority.
     _app.state.watch_configuration = load_watch_configuration(_cfg)
     from .watch_service import WatchService
     _app.state.watch_service = WatchService(_app.state.watch_configuration)
-    from .watch_auth import load_digest
-    _app.state.watch_control_digest = load_digest(os.environ, create=_app.state.watch_configuration.enabled)
-    from . import watch_launch
-    watch_host = _cfg["server"]["host"]
-    if watch_host in {"0.0.0.0", "::"}:
-        watch_host = "127.0.0.1" if watch_host == "0.0.0.0" else "::1"
-    if ":" in watch_host:
-        watch_host = f"[{watch_host}]"
-    watch_launch.configure(_app.state.watch_service,
-                           f'http://{watch_host}:{_cfg["server"]["port"]}')
-    _realtime_notifier.start(asyncio.get_running_loop())
-    set_process_change_listener(_publish_process_changed)
-    dispatcher.set_queue_change_listener(_publish_queue_changed)
-    await asyncio.to_thread(prune_realtime_data)
-    # Process and queue registries are intentionally in-memory. Publishing
-    # their authoritative startup state advances the durable cursor after a
-    # server restart, so a reconnecting client cannot retain pre-restart rows.
-    _publish_process_changed(list_active_procs())
-    _publish_queue_changed(dispatcher.all_queued_items())
-    await asyncio.to_thread(_sync_pi_agents_models_store)
-    await _recover_orphaned_pending_on_startup()
-    # Watch turns reconcile their own linked evidence, including ambiguous
-    # interrupted work, even when execution has been disabled after restart.
-    from .watch_dispatch import WatchDispatch
-    await WatchDispatch(_app.state.watch_service, dispatcher).recover()
-    await _resume_stalled_flows_on_startup()
-    from .flow import maintain_durable_flows
-    durable_maintenance = asyncio.create_task(
-        maintain_durable_flows(), name="squid-flow-durable-maintenance",
-    )
     global _shore_connection
-    shore_stop = asyncio.Event()
-    shore_connection = None
+    continuation_maintenance = None
+    durable_maintenance = None
     shore_task = None
+    shore_stop = asyncio.Event()
     try:
-        from .shore_transport import configured_host_connection
-        if shore_enabled():
-            shore_connection = await asyncio.to_thread(configured_host_connection, shore_identity_dir(_cfg))
-    except (OSError, TypeError, ValueError, RuntimeError) as exc:
-        log.error("Shore host connection disabled: %s", exc)
-    _shore_connection = shore_connection
-    if shore_connection is not None:
-        shore_task = asyncio.create_task(
-            shore_connection.run(shore_stop), name="squid-shore-host-connection",
+        from .watch_auth import load_digest
+        _app.state.watch_control_digest = load_digest(os.environ, create=_app.state.watch_configuration.enabled)
+        watch_host = _cfg["server"]["host"]
+        if watch_host in {"0.0.0.0", "::"}:
+            watch_host = "127.0.0.1" if watch_host == "0.0.0.0" else "::1"
+        if ":" in watch_host:
+            watch_host = f"[{watch_host}]"
+        watch_launch.configure(_app.state.watch_service,
+                               f'http://{watch_host}:{_cfg["server"]["port"]}')
+        _realtime_notifier.start(asyncio.get_running_loop())
+        set_process_change_listener(_publish_process_changed)
+        dispatcher.set_queue_change_listener(_publish_queue_changed)
+        await asyncio.to_thread(prune_realtime_data)
+        # Process and queue registries are intentionally in-memory. Publishing
+        # their authoritative startup state advances the durable cursor after a
+        # server restart, so a reconnecting client cannot retain pre-restart rows.
+        _publish_process_changed(list_active_procs())
+        _publish_queue_changed(dispatcher.all_queued_items())
+        await asyncio.to_thread(_sync_pi_agents_models_store)
+        await _recover_orphaned_pending_on_startup()
+        # Watch turns reconcile their own linked evidence, including ambiguous
+        # interrupted work, even when execution has been disabled after restart.
+        from .watch_dispatch import WatchDispatch
+        await WatchDispatch(_app.state.watch_service, dispatcher).recover()
+        await asyncio.to_thread(continuations.recover)
+        continuation_maintenance = asyncio.create_task(
+            continuations.maintain(dispatcher), name='squid-continuations')
+        await _resume_stalled_flows_on_startup()
+        from .flow import maintain_durable_flows
+        durable_maintenance = asyncio.create_task(
+            maintain_durable_flows(), name="squid-flow-durable-maintenance",
         )
-        def _log_shore_failure(task: asyncio.Task) -> None:
-            if task.cancelled():
-                return
-            failure = task.exception()
-            if failure is not None:
-                log.error("Shore host connection stopped with an error: %s", failure)
-            elif not shore_stop.is_set():
-                log.error("Shore host connection stopped and requires daemon restart or login")
-        shore_task.add_done_callback(_log_shore_failure)
-    try:
+        shore_connection = None
+        try:
+            from .shore_transport import configured_host_connection
+            if shore_enabled():
+                shore_connection = await asyncio.to_thread(configured_host_connection, shore_identity_dir(_cfg))
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            log.error("Shore host connection disabled: %s", exc)
+        _shore_connection = shore_connection
+        if shore_connection is not None:
+            shore_task = asyncio.create_task(
+                shore_connection.run(shore_stop), name="squid-shore-host-connection",
+            )
+            def _log_shore_failure(task: asyncio.Task) -> None:
+                if task.cancelled():
+                    return
+                failure = task.exception()
+                if failure is not None:
+                    log.error("Shore host connection stopped with an error: %s", failure)
+                elif not shore_stop.is_set():
+                    log.error("Shore host connection stopped and requires daemon restart or login")
+            shore_task.add_done_callback(_log_shore_failure)
         _app.state.watch_service.start_monitoring()
         _app.state.watch_service.start_dispatch(dispatcher)
+        continuations.configure(WORKTREE_ISOLATION_ENABLED)
         yield
     finally:
+        continuations.configure(False)
+        await _cancel_background_task(continuation_maintenance)
         watch_launch.configure(None)
         await _app.state.watch_service.stop_dispatch()
         await _app.state.watch_service.stop_monitoring()
@@ -1067,7 +1080,7 @@ async def _prepare_chat_turn(
     model: Optional[str] = agent_config.get("model") or None
     native_backend_command = _is_backend_native_chat_command(message)
 
-    if watch_run_id is None:
+    if watch_run_id is None and source != "continuation":
         upsert_topic(topic, resolved_agent, last_prompt=message,
                      last_harness=harness, last_provider=provider, last_model=model, adhoc=adhoc)
     agent_cwd: Optional[str] = agent_config.get("cwd") or None
@@ -4839,6 +4852,8 @@ async def realtime_v1(websocket: WebSocket):
 
 from .watch_api import router as watch_router
 app.include_router(watch_router)
+from .continuation_api import router as continuation_router
+app.include_router(continuation_router)
 
 if UI_DIR.exists():
     app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")

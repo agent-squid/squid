@@ -62,7 +62,7 @@ def load_digest(environment, *, create=False):
 
 def restart_environment(environment, digest):
     result = dict(environment)
-    for name in ('SQUID_WATCH_CONTROL_TOKEN', RESTART_DIGEST, 'SQUID_TURN_TOKEN', 'SQUID_API_URL'):
+    for name in ('SQUID_WATCH_CONTROL_TOKEN', RESTART_DIGEST, 'SQUID_TURN_TOKEN', 'SQUID_CONTINUE_TOKEN', 'SQUID_API_URL'):
         result.pop(name, None)
     if digest is not None:
         result[RESTART_DIGEST] = digest.hex()

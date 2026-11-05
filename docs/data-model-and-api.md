@@ -1140,3 +1140,39 @@ Revert a file to the `before` snapshot of a given edit.
 
 - **`get_stats_by_agent` collapses all runs under the same agent name** even when harness/provider/model changed. Should group by `(agent, harness, provider, model)` and show as separate rows.
 - **`session_stats.model`** is populated from the `_stats` chunk (reported by CLI). May differ from `agents.model` if the CLI auto-selects a model.
+
+## Opt-in single-successor continuations (ADR-0054 first slice)
+
+Common database setup idempotently creates three SQLite tables through
+`agent.continuations.initialize`, on the shared database connection: `continuation_credentials` (hashed launch
+credential, issuing assistant message ID, expiry and revocation),
+`turn_completion_gates` (assistant message ID, successful completion/sync flag
+and reason), and `continuations` (unique parent message, request key, prompt,
+mode, topic/agent, state/reason, unique child message and creation time).
+A state/creation index supports scheduler polling. Completion evidence is
+written only for turns linked to a continuation. There is no schema rewrite of
+existing Flow or watch tables.
+
+The issuing instance exposes `POST /continuations` (create),
+`GET /continuations` (latest 100 in the issuing human turn's topic),
+`GET /continuations/{id}` and `POST /continuations/{id}/cancel`.
+These use a separate `SQUID_CONTINUE_TOKEN` bearer credential, never a watch
+execution grant or human watch-control secret. Create accepts exactly
+`request_key`, `prompt`, `mode`; topic, agent and parent identity are derived
+server-side. Identical retries return the existing record; conflicting payloads
+return 409. Missing/expired/revoked credentials return 403; invalid requests
+return 400. Responses never include credentials. See the
+[operator contract](continuations.md) for modes, eligibility, cancellation and
+conservative restart behavior.
+
+Continuation credentials and records additionally store nullable `scope_json`
+(canonical code roots and configured agent directory). Startup adds this column
+to existing tables without inferring values for old rows; unknown original
+scope cannot authorize dispatch. Scope comes from the executing parent rather
+than create input and is revalidated at preparation and worker execution.
+
+Continuation lifecycle errors use stable codes: `parent_not_running` and
+`original_scope_unavailable` return 409, and an unknown or out-of-topic
+continuation ID returns `continuation_not_found` (404). Invalid JSON, including
+excessive nesting, returns `invalid_continuation_request` (400). Provider or
+arbitrary exception details are never returned.

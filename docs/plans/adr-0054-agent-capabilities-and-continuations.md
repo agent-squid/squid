@@ -1,9 +1,11 @@
 # Implementation plan: agent capabilities and durable continuations
 
-Status: proposed; implementation not started. Date: 2026-11-01.
+Status: partial implementation, opt-in single-successor CLI/HTTP slice. Updated: 2026-11-04.
 
 Design authority: [ADR-0054](../decisions/0054-agent-callable-squid-capabilities-and-continuations.md).
-Names below are proposed contracts. This plan adds no production enablement.
+The milestone list below remains the full proposed contract. The first slice is
+documented in [continuations](../continuations.md); it does not enable production
+configuration or complete all milestones.
 
 ## Scope and existing integration points
 

@@ -26,15 +26,27 @@ def configure(service, api_url=None):
     _service, _api_url = service, api_url
 
 
-async def run(runner, prompt, *, persistent=False, shell=False, request_text=None, **kwargs):
+async def run(runner, prompt, *, persistent=False, shell=False, request_text=None, continuation_scope=None, **kwargs):
     service = _service
     turn = None
+    continuation_token = None
     kwargs = dict(kwargs)
     env = dict(kwargs.get('backend_env') or {})
     # Never inherit a human control secret or another turn's credential.
     env.update(SQUID_WATCH_CONTROL_TOKEN=None, SQUID_INTERNAL_WATCH_CONTROL_DIGEST=None,
-               SQUID_TURN_TOKEN=None, SQUID_API_URL=None)
+               SQUID_TURN_TOKEN=None, SQUID_API_URL=None, SQUID_CONTINUE_TOKEN=None)
+    original_request = prompt if request_text is None else request_text
+    inject_notice = not shell and not kwargs.get('resume_session_id') and not original_request.lstrip().startswith('/')
     try:
+        if _api_url and not persistent and not shell:
+            from . import continuations
+            continuation_token = await call(continuations.mint, kwargs.get('msg_id'), continuation_scope)
+            if continuation_token:
+                env.update(SQUID_API_URL=_api_url, SQUID_CONTINUE_TOKEN=continuation_token)
+                if inject_notice:
+                    prompt = ('Squid supports one durable successor after successful completion and sync. '
+                              'Use `agentsquid continue --help` to schedule requested follow-on work. '
+                              'Do not claim it completed before its result exists.\n\n' + prompt)
         if service is not None and _api_url and not persistent:
             policy = service.configuration.effective_policy(kwargs['topic'])
             if policy.enabled:
@@ -42,12 +54,7 @@ async def run(runner, prompt, *, persistent=False, shell=False, request_text=Non
                 token = await call(WatchControl(service).mint, turn=turn, topic=kwargs['topic'],
                     operations=policy.operations, expires_at=service.clock() + 3600)
                 env.update(SQUID_API_URL=_api_url, SQUID_TURN_TOKEN=token)
-                executable = Path(sys.executable).parent / 'agentsquid'
-                if not executable.is_file():
-                    executable = Path(shutil.which('agentsquid') or executable)
-                env['PATH'] = str(executable.parent) + os.pathsep + (env.get('PATH') or os.environ.get('PATH', ''))
-                original_request = prompt if request_text is None else request_text
-                if not shell and not kwargs.get('resume_session_id') and not original_request.lstrip().startswith('/'):
+                if inject_notice:
                     availability = ('Local-work watch turns require recorded execution grants; publication is disabled.'
                                     if service.dispatch_enabled and policy.execution_enabled else
                                     'Monitoring only; no automatic agent work or publication.'
@@ -55,10 +62,17 @@ async def run(runner, prompt, *, persistent=False, shell=False, request_text=Non
                                     'Watch registration currently saves proposals only; persistent monitoring is not enabled.')
                     prompt = ('Squid shared tools: `agentsquid tools --help`; '
                               '`agentsquid watch --help`. ' + availability + '\n\n' + prompt)
+        if continuation_token or turn:
+            executable = Path(sys.executable).parent / 'agentsquid'
+            if not executable.is_file():
+                executable = Path(shutil.which('agentsquid') or executable)
+            env['PATH'] = str(executable.parent) + os.pathsep + (env.get('PATH') or os.environ.get('PATH', ''))
         kwargs['backend_env'] = env
         async with aclosing(runner(prompt, **kwargs)) as stream:
             async for chunk in stream:
                 yield chunk
     finally:
+        if continuation_token:
+            await call(continuations.revoke, continuation_token)
         if turn is not None:
             await call(WatchControl(service).revoke_turn, turn)

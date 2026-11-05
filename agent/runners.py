@@ -580,7 +580,7 @@ def _apply_env_overrides(env: dict, overrides: Optional[dict]) -> None:
 
 def _child_env(extra_env: Optional[dict] = None) -> dict:
     env = os.environ.copy()
-    for name in ("SQUID_WATCH_CONTROL_TOKEN", "SQUID_INTERNAL_WATCH_CONTROL_DIGEST", "SQUID_TURN_TOKEN", "SQUID_API_URL"):
+    for name in ("SQUID_WATCH_CONTROL_TOKEN", "SQUID_INTERNAL_WATCH_CONTROL_DIGEST", "SQUID_TURN_TOKEN", "SQUID_CONTINUE_TOKEN", "SQUID_API_URL"):
         env.pop(name, None)
     if PROXY_ENV:
         env.update(PROXY_ENV)
