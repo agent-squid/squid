@@ -1788,7 +1788,7 @@ body {
 #scroll-btn {
   display: none;
   position: absolute;
-  bottom: 5rem;
+  bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   background: var(--raised);
@@ -4908,10 +4908,6 @@ button {
     display: none;
   }
 
-  #scroll-btn {
-    bottom: calc(7.25rem + env(safe-area-inset-bottom));
-  }
-
   .view { padding-top: var(--mobile-view-top-space); }
   #view-chat { padding-top: 0; }
   #view-community {
@@ -5580,7 +5576,7 @@ button {
   background: var(--surface);
   border-color: var(--border);
   gap: 0.4rem;
-  padding: 0.25rem 0.75rem;
+  padding: 0.25rem 4px;
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
@@ -5619,7 +5615,7 @@ button {
 }
 #search-scope-options button, #filter-scope-options button { display: block; width: 100%; padding: 0.5rem; border: 0; background: transparent; color: var(--text); text-align: left; font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 #search-scope-options button:hover, #search-scope-options button:focus, #filter-scope-options button:hover, #filter-scope-options button:focus { background: var(--border); outline: 1px solid var(--accent); }
-#search-bar-operator { flex: 0 0 auto; cursor: pointer; }
+#search-bar-operator { flex: 0 0 auto; cursor: pointer; font-size: 0.85em; font-weight: 500; }
 #search-bar-keywords { flex: 1 1 70%; }
 #search-bar-submit {
   display: inline-flex;
@@ -5627,9 +5623,9 @@ button {
   justify-content: center;
   flex-shrink: 0;
   padding: 0.35rem;
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 4px;
-  background: var(--surface);
+  background: transparent;
   color: var(--text);
   cursor: pointer;
 }
@@ -6047,7 +6043,7 @@ mark.search-kw-highlight {
 #search-bar .history-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #search-bar-reset { background: transparent; color: var(--text-muted); border: 0; cursor: pointer; }
 
-#search-bar { gap: 0.3rem; grid-template-columns: 28px 28px minmax(0, 1fr) max-content minmax(0, 2fr) repeat(3, 28px); }
+#search-bar { gap: 2px; grid-template-columns: 28px 32px minmax(0, 1fr) max-content minmax(0, 2fr) repeat(3, 28px); }
 #search-bar.active { display: grid; }
 #search-scope-picker { width: 100%; }
 #search-bar-keywords { width: 100%; box-sizing: border-box; }
@@ -6056,8 +6052,11 @@ mark.search-kw-highlight {
   box-sizing: border-box; flex: 0 0 28px; width: 28px; height: 30px;
 }
 #search-bar .material-symbols-outlined { font-size: 20px; }
+/* Balance filter glyphs with the search/reset icons without shrinking hit areas. */
+#search-bar-bookmarks .material-symbols-outlined { transform: scale(0.85); }
+#search-bar-bad .material-symbols-outlined { transform: scale(0.75); }
 @media (max-width: 600px) {
-  #search-bar { gap: 3px; padding: 4px; grid-template-columns: 24px 24px minmax(0, 1fr) 32px minmax(0, 1.2fr) repeat(3, 24px); }
+  #search-bar { gap: 1px; padding: 4px; grid-template-columns: 24px 28px minmax(0, 1fr) 32px minmax(0, 1.2fr) repeat(3, 24px); }
   #search-bar input, #search-bar-operator { font-size: 12px; }
   #search-bar .history-toggle, #search-bar-submit, #search-bar-reset, #search-bar-clear {
     flex-basis: 24px; width: 24px; height: 30px; padding: 2px;

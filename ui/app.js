@@ -79,6 +79,15 @@ if ('serviceWorker' in navigator) {
 messages.addEventListener('scroll', () => {
   updateScrollButtonVisibility();
 });
+// Follow the transcript edge as search, panels, and the composer change height.
+const scrollButtonLayoutObserver = new ResizeObserver(() => {
+  const chat = scrollBtn.parentElement;
+  if (!chat.clientHeight) return;
+  scrollBtn.style.bottom = `${chat.clientHeight - messages.offsetTop - messages.offsetHeight + 12}px`;
+});
+scrollButtonLayoutObserver.observe(messages);
+scrollButtonLayoutObserver.observe(scrollBtn.parentElement);
+
 scrollBtn.addEventListener('click', () => {
   if (historyWindowMode) {
     resetHistoryToLatest();
