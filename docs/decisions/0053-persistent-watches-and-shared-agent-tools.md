@@ -372,6 +372,54 @@ sync, commit, and push failures as distinct outcomes. This stage is a required
 implementation milestone for autonomous fixes; creating a watch must not
 advertise working automatic publication before it exists.
 
+### Secure issue-to-draft-PR workflow (proposed, 2026-11-05)
+
+Offer a repository-level “Fix issues and draft PRs” setup with a short summary
+of the repository, eligible issue trigger, trusted maintainers/reviewers,
+publication scope, expiry, and finite run/revision limits. A suggested preset
+accepts issues labeled `squid-ready` by an approved maintainer, allows at most
+three revision rounds, and never merges. Verify the actor who applied the label;
+the label's presence alone is not authorization. Only approved reviewers may
+trigger revisions, within the existing grant. Keep pause/cancel and an activity
+log visible through the existing watch controls.
+
+Treat issue bodies, comments, reviews, repository content, and tool output as
+untrusted task data. Even a maintainer-approved issue can contain malicious
+instructions. Such content cannot grant permissions, change repository/branch
+scope, enable tools, access secrets, or create additional workflow steps.
+Prompt warnings and model compliance are not security boundaries.
+
+Before enabling automatic publication, enforce these boundaries outside the
+model:
+
+- Run editing and checks in an execution sandbox with access limited to the
+  intended workspace, restricted network egress, and no production secrets or
+  publication credentials. Tests and other repository commands execute under
+  the same restrictions. Worktree isolation alone does not provide this.
+- Keep narrowly scoped publication credentials in a separate controlled worker,
+  unavailable to the editing agent. After verified completion and sync, validate
+  the repository, remote, allowed branch, expected head, captured changes,
+  restricted paths, current grant, and remaining limits before each mutation.
+  Draft PRs may use dedicated workflow branches authorized by that grant, never
+  internal per-turn `sqd-*` branches. Arbitrary agent commands are not a
+  publication API.
+- Persist the issue → fix → draft PR → review → revision lifecycle with one
+  scheduler owner, durable claims, and bounded attempts. Bind review handling
+  to the current PR head, deduplicate events, and reconcile remote outcomes
+  after interruption rather than blindly replaying a push or PR creation.
+  Recheck revocation/cancellation before publication.
+
+Roll out with explicit approval of each concrete publication, bound to the
+reviewed change set and expected head; changed prerequisites invalidate that
+approval. Offer automatic draft PRs only after the execution and publication
+boundaries are enforced and tested, under an explicit finite human grant.
+This watch-specific authorization does not add approval requirements to ordinary
+human-requested continuations in ADR-0054.
+
+This is a design note, not an implemented capability. Current local-work grants
+exclude publication, and automatic watch publication remains disabled. Neither
+the GitHub test MCP nor availability of `gh` changes that restriction.
+
 ### Limits and visibility
 
 Require finite turn/attempt and repeated-failure limits. Support expiry and a
@@ -442,6 +490,14 @@ old review comments; self-push CI results; human-push conflicts; publication
 scope and unrelated-file protection; cancellation before push; retry/limit
 pauses; provider outages; and durable UI state. Crash tests must distinguish
 observed, queued, handled, and remotely published outcomes.
+
+For the proposed issue-to-draft-PR workflow, test malicious issue/review/tool
+content attempting secret access, network exfiltration, scope expansion, and
+direct publication. Verify sandbox enforcement, credential separation, forged
+or unauthorized label/reviewer triggers, restricted-path changes, stale approval
+and head rejection, revision limits, revocation before mutation, and recovery
+after a remote write succeeds but its local acknowledgement is lost. Include
+the normal maintainer-label-to-draft-PR path with the same enforcement enabled.
 
 Also verify central registry translation and topic narrowing across harnesses;
 MCP/CLI authorization parity; native discovery and CLI fallback; on-demand skill
