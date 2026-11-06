@@ -78,14 +78,16 @@ def test_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_real_stdio_tool(tmp_path):
+@pytest.mark.parametrize('new_issues', [False, True])
+async def test_real_stdio_tool(tmp_path, new_issues):
     pytest.importorskip('mcp')
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
     import os
 
+    record = issue() if new_issues else comment()
     gh = tmp_path / 'gh'
-    gh.write_text(f'#!{sys.executable}\nimport json\nprint(json.dumps({[comment()]!r}))\n')
+    gh.write_text(f'#!{sys.executable}\nimport json\nprint(json.dumps({[record]!r}))\n')
     gh.chmod(0o755)
     params = StdioServerParameters(command=sys.executable, args=[str(SERVER)],
                                   env={'PATH': str(tmp_path) + os.pathsep + os.environ.get('PATH', '')})
@@ -93,10 +95,13 @@ async def test_real_stdio_tool(tmp_path):
         async with ClientSession(*streams) as session:
             await session.initialize()
             catalog = await session.list_tools()
-            assert [tool.name for tool in catalog.tools] == ['read_issue_comments']
-            result = await session.call_tool('read_issue_comments', dict(owner='o', repo='r', issue_number=1))
+            assert [tool.name for tool in catalog.tools] == ['read_issue_comments', 'read_issues']
+            result = await session.call_tool(
+                'read_issues' if new_issues else 'read_issue_comments',
+                dict(owner='o', repo='r') if new_issues else dict(owner='o', repo='r', issue_number=1))
             assert not result.isError
-            assert result.structuredContent == {'comments': [comment()], 'complete': True}
+            assert result.structuredContent == {
+                'issues' if new_issues else 'comments': [record], 'complete': True}
 
 
 def test_metadata_does_not_consume_watch_output_budget(monkeypatch):
@@ -133,7 +138,8 @@ def test_unicode_snapshot_at_transport_size_boundary(monkeypatch, glyph):
 
 
 @pytest.mark.asyncio
-async def test_reader_through_durable_watch_polling(tmp_path, monkeypatch):
+@pytest.mark.parametrize('new_issues', [False, True])
+async def test_reader_through_durable_watch_polling(tmp_path, monkeypatch, new_issues):
     pytest.importorskip('mcp')
     import os
     from agent import stats_db, watches
@@ -141,8 +147,10 @@ async def test_reader_through_durable_watch_polling(tmp_path, monkeypatch):
     from agent.watch_policy import OPERATIONS
     from agent.watch_service import WatchControl, WatchService
 
+    record = issue if new_issues else comment
+    tool = 'read_issues' if new_issues else 'read_issue_comments'
     state_file = tmp_path / 'comments.json'
-    state_file.write_text(json.dumps([comment()]))
+    state_file.write_text(json.dumps([record()]))
     gh = tmp_path / 'gh'
     gh.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nprint(Path({str(state_file)!r}).read_text())\n')
     gh.chmod(0o755)
@@ -151,14 +159,15 @@ async def test_reader_through_durable_watch_polling(tmp_path, monkeypatch):
     stats_db.init_db()
     configuration = load_watch_configuration({'watches': {'enabled': True, 'connections': {
         'github-test': {'connection': {'transport': 'stdio', 'argv': [sys.executable, str(SERVER)]},
-                        'read_tools': ['read_issue_comments']}}}})
+                        'read_tools': [tool]}}}})
     service = WatchService(configuration, clock=lambda: 100)
     control = WatchControl(service)
     token = control.mint(turn='setup', topic='test', operations=OPERATIONS, expires_at=900)
     plan = dict(version=1, initial='quiet', steps=[dict(
-        server='github-test', tool='read_issue_comments',
-        arguments=dict(owner='o', repo='r', issue_number=1), items='/comments',
-        identity=['/id', '/updated_at'], complete={'path': '/complete', 'equals': True})])
+        server='github-test', tool=tool,
+        arguments=dict(owner='o', repo='r') if new_issues else dict(owner='o', repo='r', issue_number=1),
+        items='/issues' if new_issues else '/comments',
+        identity=['/id'] if new_issues else ['/id', '/updated_at'], complete={'path': '/complete', 'equals': True})])
     proposal = await service.create_plan(token, target='https://github.com/o/r/issues/1',
                                          plan=plan, request_key='gh-integration')
     grant = control.record_grant(topic='test', watch_id=proposal['id'], user_action='test',
@@ -178,11 +187,49 @@ async def test_reader_through_durable_watch_polling(tmp_path, monkeypatch):
         return observed
 
     assert not (await poll(100)).events
-    state_file.write_text(json.dumps([comment(), comment(2)]))
+    state_file.write_text(json.dumps([record(), record(2)]))
     assert len((await poll(130)).events) == 1
     await poll(160)
-    state_file.write_text(json.dumps([comment(), comment(2, '2026-11-05T00:01:00Z')]))
+    state_file.write_text(json.dumps([record(), record(2, '2026-11-05T00:01:00Z')]))
     assert len((await poll(190)).events) == 1
+    # Polls replay non-baseline identities; the durable inbox deduplicates them.
     await poll(220)
     with watches._connect() as conn:
-        assert conn.execute('SELECT COUNT(*) FROM watch_events').fetchone()[0] == 2
+        assert conn.execute('SELECT COUNT(*) FROM watch_events').fetchone()[0] == (1 if new_issues else 2)
+
+
+def issue(number=1, updated='2026-11-05T00:00:00Z'):
+    return dict(id=number, number=number, title='Test issue', body=None,
+                html_url=f'https://github.com/o/r/issues/{number}',
+                created_at='2026-11-05T00:00:00Z', updated_at=updated, state='open')
+
+
+def test_issue_snapshot_and_command(monkeypatch):
+    calls = fake_gh(monkeypatch, [issue(), issue(2) | {'pull_request': {}}])
+    assert reader.read_issues('o', 'r') == {'issues': [issue()], 'complete': True}
+    assert calls[0][-1] == 'repos/o/r/issues?state=all&sort=created&direction=asc&per_page=51'
+
+
+@pytest.mark.parametrize('payload', [[], [issue(i + 1) for i in range(50)],
+                                    [issue() | {'state': 'closed'}]])
+def test_issue_complete_boundary(monkeypatch, payload):
+    fake_gh(monkeypatch, payload)
+    assert reader.read_issues('o', 'r')['complete'] is True
+
+
+@pytest.mark.parametrize('payload', [[issue(i + 1) for i in range(51)], {}, [None],
+                                    [{'id': 1}], [issue() | {'number': True}],
+                                    [issue() | {'body': 42}],
+                                    [issue() | {'body': 'x' * reader.LIMIT}]])
+def test_issue_invalid_or_oversized_snapshot(monkeypatch, payload):
+    fake_gh(monkeypatch, payload)
+    with pytest.raises(ValueError):
+        reader.read_issues('o', 'r')
+
+
+@pytest.mark.parametrize('owner,repo', [('o/x', 'r'), ('o', '../r'), ('o', '..')])
+def test_issue_invalid_coordinates(monkeypatch, owner, repo):
+    calls = fake_gh(monkeypatch, [])
+    with pytest.raises(ValueError):
+        reader.read_issues(owner, repo)
+    assert not calls

@@ -1042,7 +1042,8 @@ def init_db() -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         from .watches import SCHEMA as watch_schema
         from .watch_runs import SCHEMA as watch_run_schema
-        for ddl in (*_TABLES, *watch_schema, *watch_run_schema):
+        from .watch_messages import SCHEMA as watch_message_schema
+        for ddl in (*_TABLES, *watch_schema, *watch_run_schema, *watch_message_schema):
             conn.execute(ddl)
         from .continuations import initialize as initialize_continuations
         initialize_continuations(conn)

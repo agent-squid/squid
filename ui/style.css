@@ -769,6 +769,9 @@ body {
   z-index: 30;
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
   min-width: 340px;
+  max-width: calc(100vw - 1.5rem);
+  max-height: calc(100dvh - 5rem);
+  overflow: auto;
 }
 #proc-status-popup.open { display: block; }
 #proc-status-popup table {
@@ -858,7 +861,7 @@ body {
   color: var(--text-dim);
   font-style: italic;
 }
-.proc-deq-btn {
+.proc-deq-btn, .proc-watch-job {
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -868,6 +871,7 @@ body {
   line-height: 1;
   padding: 0.15rem 0.45rem;
 }
+.proc-watch-job:hover { border-color: var(--accent); color: var(--accent); }
 .proc-deq-btn:hover { border-color: var(--danger); color: var(--danger); }
 .proc-status-empty {
   color: var(--text-ghost);
@@ -6065,3 +6069,8 @@ mark.search-kw-highlight {
   #search-bar-operator { appearance: none; width: 32px; padding: 5px 2px; text-align: center; }
   #search-scope-toggle { padding: 0 2px; }
 }
+
+.monitor-body { overflow-wrap: anywhere; color: var(--text-mid); }
+.monitor-body > div { margin-bottom: 0.4rem; }
+.monitor-state { color: var(--accent); font-weight: 600; }
+.monitor-body > button { margin: 0.3rem 0.4rem 0 0; }

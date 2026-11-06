@@ -1,7 +1,7 @@
 ---
 status: proposed
 date: 2026-10-30
-updated: 2026-11-01
+updated: 2026-11-05
 ---
 # ADR-0053: Persistent Watches and Shared Agent Tools
 
@@ -519,7 +519,52 @@ or agent execution. These are deployment settings, not shipped defaults.
 
 Richer observation plans (pagination and step bindings), GitHub
 PR predicates and stale-head reconciliation, deadline rules,
-native MCP tool/skill delivery, persistent harness refresh, operational watch
-UI and ambiguous-run resolution, and controlled publication remain pending.
+native MCP tool/skill delivery, persistent harness refresh, full watch creation/activation
+UI, ambiguous-run resolution, and controlled publication remain pending.
 No automatic publication or external mutation is enabled. Generic probe/Echo
 coverage does not establish autonomous PR handling.
+
+
+### Browser monitor anchors and bounded GitHub readers (2026-11-05)
+
+The status blinker lists unexpired proposed, active, and paused watches across
+all topics. Proposals are labeled as awaiting activation; they are not presented
+as monitoring. The browser can pause or cancel through same-origin,
+version-checked stop controls. These controls confer no activation or execution
+authority. The popup scrolls within the viewport on mobile.
+
+Each watch has one durable assistant display message (`source=monitor`), linked
+through `watch_messages`. New watches create their anchor atomically with the
+proposal; browser status reads backfill existing live watches. Idempotent
+creation reuses the anchor. If history deletion clears its message reference,
+a subsequent status read repairs the link without changing watch authorization,
+expiry, baseline, or source cursor. Topic deletion removes the watch and its
+mapping. Anchors have storage status `done` so ordinary turn recovery and work
+queues never interpret a long-lived monitor as a pending model invocation.
+
+Clicking a status row opens that monitor bubble. Snapshot polling updates its
+status in place: awaiting activation, checking/waiting, offline, read failure,
+paused, or terminal. Last-check time is saved with accepted poll ingestion,
+including failed reads. Triggered jobs remain separate ordinary WIP/result
+messages; the monitor and status panel link to the latest job. Visible terminal
+anchors request their current snapshot by message ID after leaving the live
+list. UI refresh reloads durable state rather than replaying every poll into
+chat, and never reinitializes source observation. This is snapshot polling,
+not a new event-stream cursor protocol or a per-poll chat activity log.
+
+The development GitHub stdio MCP utility exposes bounded read-only issue-comment
+and repository-issue snapshots. Repository issues include open and closed issues,
+exclude pull requests, and use issue ID identity for once-per-issue dispatch.
+More than 50 combined issue/PR records fails explicitly; pagination remains
+unsupported. Existing source authentication and observation/execution grants
+still apply. See [GitHub test setup](../watch-gh-test.md).
+
+Parent-child monitor creation, inherited activation/publication grants,
+repository-wide PR/review readers, task-owned branches, and automatic
+issue-to-PR-to-review workflows remain design work. Neither monitor anchors nor
+the GitHub reader enables publication or recursive watch activation.
+
+Verification covers anchor idempotency/repair, accepted last-check persistence,
+source-cursor and anchor identity across real-server restarts, terminal snapshot
+restoration, separate job navigation, same-origin/version checks, input bounds,
+and mobile control reachability.

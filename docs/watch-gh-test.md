@@ -1,7 +1,7 @@
 # Test a watch with GitHub CLI over stdio MCP
 
 `tools/gh_watch_mcp.py` is a development/test utility, not an installed console
-entry point. It exposes one ordinary read tool, `read_issue_comments`, and uses
+entry point. It exposes read tools `read_issue_comments` and `read_issues`, and uses
 `gh api` with GitHub CLI's existing authentication. It does not post comments,
 close issues, resolve review threads, or contain watch/change-detection logic.
 PR conversation comments work; inline PR review comments are not included.
@@ -27,7 +27,7 @@ watches:
         argv:
           - /absolute/path/to/squid/.venv/bin/python
           - /absolute/path/to/squid/tools/gh_watch_mcp.py
-      read_tools: [read_issue_comments]
+      read_tools: [read_issue_comments, read_issues]
 ```
 
 Preserve existing watch policy/connections. If `policy.adapters` is explicitly
@@ -97,3 +97,37 @@ Tests use a fake `gh`, including real MCP stdio calls and a durable watch test
 covering quiet baseline, new comments, edits, and event deduplication. They
 require no GitHub account and make no external writes. A live watch still needs
 host configuration, a target issue, grants and activation.
+
+## Watch newly created repository issues
+
+Use the same connection and authorization lifecycle, with this proposal instead:
+
+```json
+{
+  "target": "https://github.com/OWNER/REPO/issues",
+  "request_key": "github-new-issues-test-1",
+  "plan": {
+    "version": 1,
+    "initial": "quiet",
+    "steps": [{
+      "server": "github-test",
+      "tool": "read_issues",
+      "arguments": {"owner": "OWNER", "repo": "REPO"},
+      "items": "/issues",
+      "identity": ["/id"],
+      "complete": {"path": "/complete", "equals": true}
+    }]
+  }
+}
+```
+
+After observation grant and activation, wait for a successful baseline poll,
+then manually create a throwaway issue. The next poll should record one event;
+unchanged polls and issue edits should not create further events. Cancel when
+done. A local agent turn still requires its own execution grant.
+
+The reader includes open and closed issues so closing an issue does not remove
+it from the snapshot. Pull requests are excluded. The GitHub issues endpoint
+returns PRs too: more than 50 combined issue/PR records fails explicitly, even
+when fewer than 50 are issues. This is a bounded test reader, without pagination;
+it does not support larger repositories or guarantee detection of deleted issues.

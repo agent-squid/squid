@@ -102,6 +102,8 @@ def create_watch(*, topic, adapter, target, request_key, poll_interval, now, exp
             if any(row[k] != v for k, v in dict(adapter=adapter, target=target,
                                                poll_interval=poll_interval, expires_at=expires_at, observation_plan=observation_plan).items()):
                 raise ValueError('request key already used with different watch parameters')
+            from .watch_messages import ensure
+            ensure(conn, row)
             return row
     finally:
         conn.close()
@@ -267,6 +269,7 @@ def finish_poll(watch, *, now, observation=None, error=None, _guard=None):
                 version=version+CASE WHEN status!=? THEN 1 ELSE 0 END WHERE id=?""",
                 (status, cursor, failures, error, now + delay,
                  'poll_failures' if status == 'paused' else None, status, watch['id']))
+            conn.execute('UPDATE watch_messages SET last_checked_at=? WHERE watch_id=?', (now, watch['id']))
             return True
     finally:
         conn.close()

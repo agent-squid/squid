@@ -17,27 +17,46 @@ router = APIRouter()
 
 
 @router.get('/watch-status')
-async def watch_status(request: Request):
+async def watch_status(request: Request, include_messages: str = ""):
     """Compact browser status; never expose grants, credentials or source payloads."""
     from .server import _same_origin
     if not _same_origin(request):
         return JSONResponse({'error': 'forbidden'}, status_code=403)
+    try:
+        message_ids = [int(value) for value in include_messages.split(',') if value]
+        if len(message_ids) > 100 or any(not 1 <= value <= 2**63 - 1 for value in message_ids):
+            raise ValueError()
+    except ValueError:
+        return JSONResponse({'error': 'invalid_monitor_messages'}, status_code=400)
     service = request.app.state.watch_service
     def snapshot():
         from .watches import _connect
         now = service.clock()
         with _connect() as conn:
-            rows = conn.execute('''SELECT w.id,w.topic,w.target,w.status,w.version,
+            from .watch_messages import ensure
+            with conn:
+                for watch in conn.execute("SELECT * FROM watches WHERE status IN ('proposed','active','paused') AND expires_at>?", (now,)).fetchall():
+                    ensure(conn, dict(watch))
+            placeholders = ','.join('?' for _ in message_ids) or 'NULL'
+            rows = conn.execute(f'''SELECT w.id,w.topic,w.target,w.status,w.version,
                 w.next_poll,w.expires_at,w.lease_until,w.last_error,w.pause_reason,
-                g.agent,g.flow_route,g.instructions
+                g.agent,g.flow_route,g.instructions,m.msg_id AS monitor_msg_id,m.last_checked_at,
+                (SELECT r.assistant_msg_id FROM watch_runs r WHERE r.watch_id=w.id
+                 ORDER BY r.created_at DESC,r.id DESC LIMIT 1) AS latest_msg_id,
+                (SELECT r.state FROM watch_runs r WHERE r.watch_id=w.id
+                 ORDER BY r.created_at DESC,r.id DESC LIMIT 1) AS latest_run_state
                 FROM watches w LEFT JOIN watch_execution_grants g
                 ON g.watch_id=w.id AND g.revoked_at IS NULL
-                WHERE w.status IN ('active','paused') AND w.expires_at>?
-                ORDER BY w.topic,w.id''', (now,)).fetchall()
+                LEFT JOIN watch_messages m ON m.watch_id=w.id
+                WHERE (w.status IN ('proposed','active','paused') AND w.expires_at>?)
+                    OR m.msg_id IN ({placeholders})
+                ORDER BY w.topic,w.id''', (now, *message_ids)).fetchall()
         result = []
         for row in rows:
             item = {k: row[k] for k in ('id','topic','target','status','version','next_poll',
-                                       'agent','flow_route','instructions')}
+                                       'agent','flow_route','instructions','pause_reason','latest_msg_id','latest_run_state','monitor_msg_id','last_checked_at')}
+            if row['expires_at'] <= now and item['status'] in {'active', 'paused', 'proposed'}:
+                item['status'] = 'expired'
             item['polling'] = row['lease_until'] is not None and row['lease_until'] > now
             item['error'] = bool(row['last_error'])
             item['monitoring'] = service.monitoring_enabled
@@ -48,8 +67,16 @@ async def watch_status(request: Request):
 
 @router.post('/watch-status/{watch_id}/cancel')
 async def cancel_status_watch(request: Request, watch_id: str):
-    # Same host-control boundary as browser configuration/stop controls. This
-    # endpoint can only cancel; it cannot create grants or activate monitoring.
+    return await _stop_status_watch(request, watch_id, 'cancel')
+
+
+@router.post('/watch-status/{watch_id}/pause')
+async def pause_status_watch(request: Request, watch_id: str):
+    return await _stop_status_watch(request, watch_id, 'pause')
+
+
+async def _stop_status_watch(request: Request, watch_id: str, action: str):
+    # Browser stop controls can only narrow activity, never grant or activate it.
     from .server import _same_origin
     if not _same_origin(request):
         return JSONResponse({'error': 'forbidden'}, status_code=403)
@@ -58,16 +85,16 @@ async def cancel_status_watch(request: Request, watch_id: str):
         if type(body['version']) is not int or body['version'] < 0:
             raise ValueError('invalid version')
         service = request.app.state.watch_service
-        def cancel():
+        def transition():
             from .watches import _connect, transition_watch
             with _connect() as conn:
                 row = conn.execute('SELECT topic FROM watches WHERE id=?', (watch_id,)).fetchone()
             if row is None:
                 raise ValueError('watch not found')
             transition_watch(watch_id, topic=row['topic'], version=body['version'],
-                             action='cancel', now=service.clock())
-        await call(cancel)
-        return {'cancelled': True}
+                             action=action, now=service.clock())
+        await call(transition)
+        return {'cancelled' if action == 'cancel' else 'paused': True}
     except (ValueError, TypeError) as exc:
         return failure(exc)
 

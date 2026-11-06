@@ -403,3 +403,24 @@ and pauses affected active flows; per-step message references become null while
 start evidence is retained. Successfully completed outcomes are preserved.
 Native Flow scheduling cannot take over these flows after deletion. Upgrades
 backfill legacy ownership and cancel orphaned watch flows.
+
+
+## Monitor bubbles and job navigation
+
+Every new watch has one durable chat message with source `monitor`. Existing
+unexpired proposals, active watches, and paused watches receive an anchor when
+browser status is first read. These anchors are display records marked `done`,
+not pending agent turns: they do not run a model or enter restart recovery as
+unfinished work.
+
+Click a watch row in the status panel to open its monitor bubble. The bubble
+shows the current monitoring state, last completed check (including failed
+checks), next check, pause reason, and latest job link. Agent jobs retain their
+own ordinary WIP/result bubbles. Pause and cancel controls operate on the watch;
+the latest-job link opens the separate agent message.
+
+The browser refreshes snapshots in place using the existing status polling.
+Visible terminal monitors remain readable by their message IDs, even after they
+leave the active status list. Reloading reads durable watch state and the saved
+last-check time; it does not replay poll messages, reset the source cursor, or
+change the quiet baseline. No per-poll chat messages are appended.

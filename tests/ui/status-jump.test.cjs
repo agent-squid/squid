@@ -18,7 +18,7 @@ function setup({ matches = true, search = false, bubblePresent = true } = {}) {
     historyFilter: { topic: 'shore' }, searchActive: search,
     searchState: search ? { keywords: ['hello'] } : null,
     promptOnlyHistory: false, bookmarkOnlyHistory: false, badOnlyHistory: false,
-    searchLoading: false, currentView: 'stats',
+    searchLoading: false, searchLoadGeneration: 0, searchPanelOpen: false, currentView: 'stats',
     form: { before() { calls.push('notice'); } },
     messages: { querySelector(selector) { return selector.includes('.msg-thinking') && !bubblePresent ? null : bubble; } },
     document: {

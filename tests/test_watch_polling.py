@@ -308,6 +308,7 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                 if execution:
                     wait_for(lambda: db("SELECT COUNT(*) FROM watch_runs WHERE state='succeeded'")[0][0] == 1)
                 saved_expiry = client.get(path).json()['expires_at']
+                monitor_id = db('SELECT msg_id FROM watch_messages')[0][0]
                 stop()
                 # Exercise overdue startup recovery without a 30-second sleep.
                 with sqlite3.connect(database) as conn:
@@ -318,6 +319,8 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                 second_boot = wait_for(lambda: (value if value != first_boot else None)
                                        if (value := client.get('/health').json().get('boot_time')) else None)
                 assert second_boot != first_boot
+                assert db('SELECT msg_id FROM watch_messages') == [(monitor_id,)]
+                assert db("SELECT COUNT(*) FROM chat_messages WHERE source='monitor'")[0][0] == 1
                 wait_for(lambda: db('SELECT next_poll FROM watches')[0][0] > 0)
                 current = client.get(path).json()
                 assert current['status'] == 'active' and current['cursor'] == ('[]' if generic_plan else 'v2')
@@ -336,7 +339,7 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                     assert db("SELECT COUNT(*) FROM watch_runs")[0][0] == 2
                 else:
                     assert db("SELECT COUNT(*) FROM watch_events WHERE disposition='pending'")[0][0] == 2
-                assert db("SELECT COUNT(*) FROM chat_messages WHERE role='assistant'")[0][0] == (4 if execution == 'flow' else 2 if execution else 0)
+                assert db("SELECT COUNT(*) FROM chat_messages WHERE role='assistant' AND source='watch'")[0][0] == (4 if execution == 'flow' else 2 if execution else 0)
                 if execution == 'flow':
                     assert db("SELECT COUNT(*) FROM flow_steps WHERE status='done'")[0][0] == 4
                     assert db("SELECT COUNT(*) FROM watch_flow_turns WHERE started_at IS NOT NULL")[0][0] == 4

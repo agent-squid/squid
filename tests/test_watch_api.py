@@ -403,3 +403,108 @@ async def test_browser_watch_status_and_versioned_cancel(setup):
         assert (await c.post(path, json={'version': 1})).json() == {'cancelled': True}
         assert (await c.get('/watch-status')).json() == []
     assert service.show(token, row['id'])['status'] == 'cancelled'
+
+
+@pytest.mark.asyncio
+async def test_browser_proposals_across_topics_and_versioned_pause(setup):
+    app, service, control, token, now = setup
+    row = service.create(token, **PAYLOAD)
+    other = control.mint(turn='other', topic='other', operations=OPERATIONS, expires_at=1000)
+    proposal = service.create(other, **(PAYLOAD | {'target': 'task:other'}))
+    grant = control.record_grant(topic='squid', watch_id=row['id'], user_action='test', expires_at=row['expires_at'])
+    active = control.mint(turn='activate', topic='squid', operations=OPERATIONS, grants=[grant], expires_at=1000)
+    service.transition(active, row['id'], version=0, action='activate', grant_id=grant)
+    with stats_db._connect() as conn:
+        msg_id = conn.execute("INSERT INTO chat_messages(topic,agent,role,source,content,status) VALUES ('squid','coder','assistant','watch','Done','done')").lastrowid
+        conn.execute("""INSERT INTO watch_execution_grants
+            (id,watch_id,request_key,agent,agent_revision,instructions,max_runs,max_attempts,expires_at,user_action)
+            VALUES ('job-grant',?,'job','coder','revision','Fix',3,1,?,'test')""", (row['id'], row['expires_at']))
+        conn.execute("""INSERT INTO watch_runs
+            (id,watch_id,grant_id,batch_key,attempt,state,created_at,assistant_msg_id)
+            VALUES ('job-run',?,'job-grant','batch',1,'succeeded',?,?)""", (row['id'], now[0], msg_id))
+    async with client(app, token) as c:
+        rows = {w['id']: w for w in (await c.get('/watch-status')).json()}
+        assert rows[row['id']]['latest_msg_id'] == msg_id
+        assert rows[row['id']]['latest_run_state'] == 'succeeded'
+
+        assert rows[proposal['id']]['status'] == 'proposed'
+        assert rows[proposal['id']]['topic'] == 'other'
+        path = '/watch-status/' + row['id'] + '/pause'
+        assert (await c.post(path, json={'version': 1}, headers={'Origin': 'https://evil.example'})).status_code == 403
+        assert (await c.post(path, json={'version': 0})).status_code == 409
+        assert (await c.post(path, json={'version': True})).status_code == 400
+        assert (await c.post(path, json={'version': 1})).json() == {'paused': True}
+        rows = {w['id']: w for w in (await c.get('/watch-status')).json()}
+        assert rows[row['id']]['status'] == 'paused'
+        assert rows[row['id']]['pause_reason'] == 'manual'
+        assert rows[row['id']]['version'] == 2
+        assert rows[proposal['id']]['latest_msg_id'] is None
+        assert (await c.post('/watch-status/' + proposal['id'] + '/pause', json={'version': 0})).status_code == 409
+        assert service.show(other, proposal['id'])['status'] == 'proposed'
+
+
+@pytest.mark.asyncio
+async def test_monitor_anchor_survives_replay_restart_and_terminal_state(setup):
+    import json
+    from agent import watches
+    app, service, control, token, now = setup
+    row = service.create(token, **PAYLOAD)
+    assert service.create(token, **PAYLOAD)['id'] == row['id']
+    with stats_db._connect() as conn:
+        anchors = conn.execute("SELECT * FROM chat_messages WHERE source='monitor'").fetchall()
+        assert len(anchors) == 1
+        msg_id = anchors[0]['id']
+        assert anchors[0]['status'] == 'done'  # Never dispatched or recovered as an agent turn.
+        assert json.loads(anchors[0]['content'])['watch_id'] == row['id']
+    grant = control.record_grant(topic='squid', watch_id=row['id'], user_action='test', expires_at=row['expires_at'])
+    active = control.mint(turn='activate', topic='squid', operations=OPERATIONS, grants=[grant], expires_at=1000)
+    service.transition(active, row['id'], version=0, action='activate', grant_id=grant)
+    claim = service.claim_due(now=now[0], lease_seconds=30, limit=1)[0]
+    assert service.finish_poll(claim, now=now[0], observation=watches.Observation('saved-cursor', ()))
+    async with client(app, token) as c:
+        snapshot = (await c.get('/watch-status')).json()[0]
+        assert snapshot['monitor_msg_id'] == msg_id
+        assert snapshot['last_checked_at'] == now[0]
+        await c.post('/watch-status/' + row['id'] + '/cancel', json={'version': 1})
+        assert (await c.get('/watch-status')).json() == []
+        service.close()
+        app.state.watch_service = WatchService(service.configuration, clock=lambda: now[0])
+        snapshot = (await c.get(f'/watch-status?include_messages={msg_id}')).json()[0]
+        assert snapshot['status'] == 'cancelled'
+        assert snapshot['monitor_msg_id'] == msg_id
+        assert snapshot['last_checked_at'] == now[0]
+        assert (await c.get('/watch-status?include_messages=oops')).status_code == 400
+    assert stats_db.get_message(msg_id)['source'] == 'monitor'
+    with stats_db._connect() as conn:
+        assert conn.execute('SELECT cursor FROM watches WHERE id=?', (row['id'],)).fetchone()[0] == 'saved-cursor'
+        assert conn.execute("SELECT COUNT(*) FROM chat_messages WHERE source='monitor'").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_monitor_anchor_repairs_deleted_history_without_resetting_watch(setup):
+    app, service, control, token, now = setup
+    row = service.create(token, **PAYLOAD)
+    async with client(app, token) as c:
+        original = (await c.get('/watch-status')).json()[0]['monitor_msg_id']
+        with stats_db._connect() as conn:
+            conn.execute('UPDATE watches SET cursor=? WHERE id=?', ('durable-cursor', row['id']))
+            conn.execute('UPDATE watch_messages SET last_checked_at=? WHERE watch_id=?', (90, row['id']))
+            conn.execute('DELETE FROM chat_messages WHERE id=?', (original,))
+            assert conn.execute('SELECT msg_id FROM watch_messages').fetchone()[0] is None
+        repaired = (await c.get('/watch-status')).json()[0]
+        assert repaired['monitor_msg_id'] != original
+        assert repaired['last_checked_at'] == 90
+        assert (await c.get('/watch-status')).json()[0]['monitor_msg_id'] == repaired['monitor_msg_id']
+        with stats_db._connect() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM chat_messages WHERE source='monitor'").fetchone()[0] == 1
+        assert service.show(token, row['id'])['cursor'] == 'durable-cursor'
+        assert service.show(token, row['id'])['version'] == row['version']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('value', ['0', '-1', str(2**63), '1,' * 100 + '1', 'x'])
+async def test_monitor_snapshot_rejects_invalid_message_ids(setup, value):
+    app, _, _, token, _ = setup
+    async with client(app, token) as c:
+        response = await c.get('/watch-status', params={'include_messages': value})
+        assert response.status_code == 400

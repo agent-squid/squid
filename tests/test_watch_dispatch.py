@@ -68,7 +68,7 @@ def queued(setup):
 def test_batch_message_identity_and_success_ack_only_captured(setup):
     service, _, now, row, _, _ = setup
     run_id, (user, assistant) = queued(setup)
-    assert len(rows('chat_messages')) == 2
+    assert len([m for m in rows('chat_messages') if m['source'] == 'watch']) == 2
     assert claimed(setup) is None
     assert watch_runs.begin(service, run_id)
     with stats_db._connect() as conn:
@@ -141,7 +141,7 @@ async def test_dispatch_through_normal_queue_refreshes_and_finishes(setup, monke
         assert len(entered) == 1
         assert rows('watch_runs')[0]['state'] == 'succeeded'
         assert rows('watch_events')[0]['disposition'] == 'handled'
-        assert rows('chat_messages')[0]['source'] == 'watch'
+        assert stats_db.get_message(entered[0])['source'] == 'watch'
     finally:
         await runtime.stop()
 
@@ -423,7 +423,7 @@ def test_delete_topic_with_watch_history(setup):
     stats_db.delete_topic('squid')
     assert rows('watch_runs') == []
     assert rows('watches') == []
-    assert rows('chat_messages') == []
+    assert not [m for m in rows('chat_messages') if m['source'] != 'monitor']
 
 
 @pytest.mark.parametrize('adhoc', [None, False, True])
@@ -507,7 +507,7 @@ async def test_dispatch_preserves_worktree_blocker_reason(setup, monkeypatch):
     assert rows('watch_runs')[0]['outcome'] == 'worktree_blocked'
     assert rows('watches')[0]['status'] == 'active'
     assert claimed(setup) is None
-    assert rows('chat_messages') == []
+    assert not [m for m in rows('chat_messages') if m['source'] != 'monitor']
 
 
 @pytest.mark.asyncio

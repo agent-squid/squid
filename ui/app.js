@@ -8201,7 +8201,95 @@ function cancelledTurnLabel(content) {
 }
 
 
+function monitorStateLabel(w, fresh = true) {
+  const terminal = { cancelled: 'Cancelled', completed: 'Completed', expired: 'Expired' };
+  if (terminal[w.status]) return terminal[w.status];
+  if (!fresh) return 'Status unavailable';
+  if (w.status === 'proposed') return 'Awaiting activation';
+  if (w.status === 'paused') return `Paused${w.pause_reason ? ` · ${w.pause_reason}` : ''}`;
+  if (!w.monitoring) return 'Monitoring offline';
+  if (w.error) return 'Read failed · waiting to retry';
+  return w.polling ? 'Checking' : 'Monitoring · waiting';
+}
+
+function updateMonitorBubble(bubble, w, fresh = true) {
+  bubble.dataset.monitorId = w.id;
+  bubble.dataset.monitorState = w.status;
+  const body = bubble.querySelector('.monitor-body');
+  body.replaceChildren();
+  const addLine = (text, className = '') => {
+    const line = document.createElement('div');
+    line.className = className;
+    line.textContent = text;
+    body.appendChild(line);
+  };
+  addLine(monitorStateLabel(w, fresh), 'monitor-state');
+  addLine(w.target || '');
+  if (w.instructions) addLine(w.instructions);
+  if (w.last_checked_at != null) addLine(`Last check: ${new Date(w.last_checked_at * 1000).toLocaleString()}`);
+  if (fresh && w.status === 'active' && w.monitoring && !w.polling && w.next_poll != null) {
+    addLine(`Next check in ${Math.max(0, Math.ceil(w.next_poll - Date.now() / 1000))}s`);
+  }
+  if (w.latest_msg_id) {
+    const job = document.createElement('button');
+    job.type = 'button';
+    job.className = 'proc-watch-job';
+    job.textContent = `Latest job · ${w.latest_run_state || 'open'}`;
+    job.addEventListener('click', () => jumpToStatusMessage(Number(w.latest_msg_id)));
+    body.appendChild(job);
+  }
+  if (fresh && ['active', 'paused', 'proposed'].includes(w.status) && Number.isInteger(w.version)) {
+    for (const action of w.status === 'active' ? ['pause', 'cancel'] : ['cancel']) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'proc-deq-btn';
+      button.textContent = action === 'pause' ? 'Pause monitor' : 'Cancel monitor';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          const response = await fetch(`/watch-status/${encodeURIComponent(w.id)}/${action}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ version: w.version }),
+          });
+          if (!response.ok) throw new Error('Unable to update monitor. Refresh and retry.');
+          await refreshWatchStatus();
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = 'Retry';
+          button.title = error.message;
+        }
+      });
+      body.appendChild(button);
+    }
+  }
+}
+
+function appendMonitorItem(item, container) {
+  let saved;
+  try { saved = JSON.parse(item.content); } catch { return; }
+  if (!saved?.watch_id) return;
+  const bubble = document.createElement('div');
+  bubble.className = 'msg assistant history-item monitor-bubble';
+  bubble.dataset.msgId = String(item.id);
+  bubble.dataset.topic = item.topic || 'default';
+  bubble.dataset.monitorId = saved.watch_id;
+  if (item.timestamp) bubble.dataset.orderAt = item.timestamp;
+  const header = document.createElement('div');
+  header.className = 'response-header';
+  header.textContent = `#${item.topic || 'default'} · Monitor`;
+  const body = document.createElement('div');
+  body.className = 'monitor-body';
+  bubble.append(header, body);
+  container.appendChild(bubble);
+  const current = cachedWatchRows.find(w => w.id === saved.watch_id);
+  bubble._monitorSnapshot = current || { id: saved.watch_id, ...saved };
+  updateMonitorBubble(bubble, current || { id: saved.watch_id, ...saved }, !!current && watchStatusFresh);
+  queueMicrotask(() => refreshWatchStatus());
+  return bubble;
+}
+
 function appendHistoryItem(item, container) {
+  if (item.source === 'monitor') return appendMonitorItem(item, container);
   const lb = item.stats?.lookback ?? 0;
   const asstBubble = document.createElement('div');
   asstBubble.className = 'msg assistant history-item';
@@ -12505,34 +12593,48 @@ function renderProcPopup(processes, queued) {
   if (cachedWatchRows.length) {
     const rows = cachedWatchRows.map(w => {
       const route = w.flow_route || (w.agent ? `#${w.topic}@${w.agent}` : `#${w.topic} · Watch`);
-      const status = !watchStatusFresh ? 'Offline' : w.status === 'paused' ? 'Paused' : !w.monitoring ? 'Offline'
+      const status = !watchStatusFresh ? 'Offline' : w.status === 'proposed' ? 'Awaiting activation'
+        : w.status === 'paused' ? 'Paused' : !w.monitoring ? 'Offline'
         : w.error ? 'Error' : w.polling ? 'Polling' : `Next ${Math.max(0, Math.ceil(w.next_poll - Date.now() / 1000))}s`;
-      return `<tr>
+      const job = w.latest_msg_id
+        ? `<button class="proc-watch-job" data-msgid="${Number(w.latest_msg_id)}" title="Open latest job">${escapeHtml(w.latest_run_state || 'Open job')}</button>`
+        : escapeHtml(w.latest_run_state || '—');
+      return `<tr class="${w.monitor_msg_id ? 'proc-row-jumpable' : ''}" data-jump-msgid="${w.monitor_msg_id || ''}">
         <td>${escapeHtml(route)}</td>
-        <td class="proc-queue-preview" title="${escapeHtml(w.target)}">${escapeHtml(w.instructions || w.target)}</td>
-        <td>${status}</td>
-        <td><button class="proc-watch-stop proc-deq-btn" data-watch-id="${escapeHtml(w.id)}" data-version="${w.version}" title="Cancel watch" aria-label="Cancel watch">✕</button></td>
+        <td class="proc-queue-preview" title="${escapeHtml(w.target)}">${escapeHtml(w.target)}${w.instructions ? `<br><small>${escapeHtml(w.instructions)}</small>` : ''}</td>
+        <td title="${escapeHtml(w.pause_reason || '')}">${status}</td>
+        <td>${job}</td>
+        <td>${w.status === 'active' ? `<button class="proc-watch-control proc-deq-btn" data-action="pause" data-watch-id="${escapeHtml(w.id)}" data-version="${w.version}" aria-label="Pause watch">Pause</button>` : ''}
+        <button class="proc-watch-control proc-watch-stop proc-deq-btn" data-action="cancel" data-watch-id="${escapeHtml(w.id)}" data-version="${w.version}" title="Cancel watch" aria-label="Cancel watch">✕</button></td>
       </tr>`;
     }).join('');
-    body += `<div class="proc-section-label">Watches</div><table><thead><tr><th>Route</th><th>Prompt</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+    body += `<div class="proc-section-label">Watches (${cachedWatchRows.length})</div><table><thead><tr><th>Route</th><th>Target / prompt</th><th>Status</th><th>Last job</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   procStatusPopup.innerHTML = header + body;
-  procStatusPopup.querySelectorAll('.proc-watch-stop').forEach(btn => {
+  procStatusPopup.querySelectorAll('.proc-watch-control').forEach(btn => {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
       btn.disabled = true;
       try {
-        const res = await fetch(`/watch-status/${encodeURIComponent(btn.dataset.watchId)}/cancel`, {
+        const res = await fetch(`/watch-status/${encodeURIComponent(btn.dataset.watchId)}/${btn.dataset.action}`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ version: Number(btn.dataset.version) }),
         });
-        if (!res.ok) throw new Error('Unable to cancel watch. Refresh and retry.');
+        if (!res.ok) throw new Error('Unable to update watch. Refresh and retry.');
         await pollProcs();
       } catch (error) {
         btn.disabled = false;
         btn.textContent = 'Retry';
         btn.title = error.message;
       }
+    });
+  });
+
+  procStatusPopup.querySelectorAll('.proc-watch-job').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      procStatusPopup.classList.remove('open');
+      jumpToStatusMessage(Number(btn.dataset.msgid));
     });
   });
 
@@ -12568,13 +12670,13 @@ function renderProcPopup(processes, queued) {
     const msgId = parseInt(row.dataset.jumpMsgid, 10);
     if (!Number.isFinite(msgId)) return;
     row.addEventListener('click', e => {
-      if (e.target.closest('.proc-stop-btn')) return;
+      if (e.target.closest('button')) return;
       procStatusPopup.classList.remove('open');
       jumpToStatusMessage(msgId);
     });
   });
 
-  procStatusPopup.querySelectorAll('.proc-deq-btn:not(.proc-watch-stop)').forEach(btn => {
+  procStatusPopup.querySelectorAll('.proc-deq-btn:not(.proc-watch-control)').forEach(btn => {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
       btn.disabled = true; btn.textContent = '…';
@@ -12619,6 +12721,7 @@ let cachedProcRows  = [];
 let cachedQueueRows = [];
 let cachedWatchRows = [];
 let watchStatusLoading = false;
+let watchStatusRefreshPending = false;
 let watchStatusFresh = false;
 let realtimeProcessStateReceived = false;
 
@@ -12650,24 +12753,41 @@ function releaseRealtimeProcessState() {
 }
 
 async function refreshWatchStatus() {
-  if (watchStatusLoading) return;
+  if (watchStatusLoading) {
+    watchStatusRefreshPending = true;
+    return;
+  }
+  watchStatusRefreshPending = false;
   watchStatusLoading = true;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
   try {
-    const res = await fetch('/watch-status', { signal: controller.signal });
+    const visibleMonitors = [...document.querySelectorAll('.monitor-bubble[data-msg-id]')].map(b => b.dataset.msgId).slice(0, 100);
+    const suffix = visibleMonitors.length ? `?include_messages=${visibleMonitors.join(',')}` : '';
+    const res = await fetch(`/watch-status${suffix}`, { signal: controller.signal });
     if (!res.ok) throw new Error('Watch status unavailable');
     const rows = await res.json();
     if (!Array.isArray(rows)) throw new Error('Invalid watch status');
-    cachedWatchRows = rows;
+    cachedWatchRows = rows.filter(w => ['active', 'paused', 'proposed'].includes(w.status));
     watchStatusFresh = true;
+    for (const bubble of document.querySelectorAll('.monitor-bubble')) {
+      const row = rows.find(w => w.id === bubble.dataset.monitorId);
+      if (row) {
+        bubble._monitorSnapshot = row;
+        updateMonitorBubble(bubble, row);
+      }
+    }
   } catch {
     // Keep jobs available for inspection/cancellation, but never claim that a
     // cached snapshot proves monitoring is still healthy.
     watchStatusFresh = false;
+    for (const bubble of document.querySelectorAll('.monitor-bubble')) {
+      if (bubble._monitorSnapshot) updateMonitorBubble(bubble, bubble._monitorSnapshot, false);
+    }
   } finally {
     clearTimeout(timeout);
     watchStatusLoading = false;
+    if (watchStatusRefreshPending) queueMicrotask(() => refreshWatchStatus());
   }
   updateProcStatusDot(cachedProcRows, cachedQueueRows);
   if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
