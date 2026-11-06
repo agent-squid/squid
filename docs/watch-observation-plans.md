@@ -109,10 +109,11 @@ records when monitoring begins.
 
 Version 1 supports one to four independent reads, literal tool arguments,
 structured JSON objects or a single JSON text object, equality predicates,
-32,768-byte plans, 65,536-byte results/events and at most 50 matching records
-across the plan (each input array also has a 50-record limit). A complete
+32,768-byte plans, 65,536-byte results/events and at most 500 matching records
+across the plan (each input array also has a 500-record limit). A complete
 observation has a 20-second timeout; connection cleanup can add transport
-cancellation overhead. Quiet baseline identities fit the existing cursor bound.
+cancellation overhead. Quiet baseline identities use a bounded 65,536-character plan cursor; legacy
+probe cursors retain their 4,096-character limit.
 Tool discovery is bounded to one page, 200 tools and 65,536 bytes per connection.
 Descriptions are limited to 2,048 characters. Schemas must be self-contained;
 external JSON Schema references (including dynamic references and rebased local

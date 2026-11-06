@@ -10,6 +10,9 @@ from . import watch_mcp
 from .watches import Observation, encode_event_payload
 
 
+MAX_RECORDS = 500
+
+
 PLAN_ERRORS = {
     'plan_schema_timeout': 'The tool schema exceeded its validation budget; simplify the schema or use another read tool.',
     'plan_discovery_limit': 'The MCP tool catalog is paginated or too large; expose a smaller read-tool catalog.',
@@ -26,8 +29,8 @@ PLAN_ERRORS = {
     'plan_arguments_invalid': 'Match the arguments to the discovered input schema.',
     'plan_tool_unavailable': 'Reconnect the service or select an available approved read tool.',
     'plan_source_identity_required': 'Select stable source IDs plus immutable edit versions or run attempt IDs.',
-    'plan_record_limit': 'Narrow the source query to at most 50 records; do not truncate silently.',
-    'plan_record_limit_or_duplicate_identity': 'Use unique source versions and at most 50 matching records.',
+    'plan_record_limit': 'Narrow the source query to at most 500 records; do not truncate silently.',
+    'plan_record_limit_or_duplicate_identity': 'Use unique source versions and at most 500 matching records.',
     'plan_invalid_json': 'Supply finite JSON values.',
     'plan_size_limit': 'Keep plan JSON within 32768 bytes.',
     'plan_invalid_schema': 'Use version 1, initial quiet/actionable and one to four steps.',
@@ -209,7 +212,7 @@ class PlanAdapter:
             except watch_mcp.MCPProbeError:
                 unavailable.append(dict(server=name, error='plan_connection_unavailable'))
         return dict(operations=operations, unavailable=unavailable,
-                    plan_version=1, plan_schema=PLAN_SCHEMA, max_steps=4, max_records=50,
+                    plan_version=1, plan_schema=PLAN_SCHEMA, max_steps=4, max_records=MAX_RECORDS,
                     workflow=['discover', 'validate', 'create proposal', 'activate with exact-watch grant'],
                     field_scopes={'when': 'each record', 'stop': 'whole response; any step may stop',
                                   'complete': 'whole response; false rejects the entire read'},
@@ -249,7 +252,7 @@ class PlanAdapter:
             if 'stop' in step:
                 closed |= matches(result, step['stop'])
             records = pointer(result, step['items']) if 'items' in step else [result]
-            if not isinstance(records, list) or len(records) > 50:
+            if not isinstance(records, list) or len(records) > MAX_RECORDS:
                 raise PlanError('plan_record_limit')
             for record in records:
                 identity = [pointer(record, path) for path in step['identity']]
@@ -260,7 +263,7 @@ class PlanAdapter:
                     payload = dict(source=step['server'], tool=step['tool'], identity=identity, data=record)
                     encode_event_payload(payload)
                     events.append((key, payload))
-        if len(events) > 50 or len({k for k, _ in events}) != len(events):
+        if len(events) > MAX_RECORDS or len({k for k, _ in events}) != len(events):
             raise PlanError('plan_record_limit_or_duplicate_identity')
         # Keep the initial quiet baseline permanently. Later replay is deduplicated
         # by the durable event inbox, including after records disappear/reappear.

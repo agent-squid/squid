@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import json
 import logging
 import math
+import random
 import time
 from typing import Protocol
 from uuid import uuid4
@@ -229,13 +230,21 @@ def encode_event_payload(payload):
     return encoded
 
 
-def finish_poll(watch, *, now, observation=None, error=None, _guard=None):
+def _idle_interval(row, quiet_polls, cap):
+    tiers = (60, 180, 300, 600, 900)
+    return max(row['poll_interval'], min(tiers[min(quiet_polls // 2, len(tiers) - 1)], cap))
+
+
+def finish_poll(watch, *, now, observation=None, error=None, _guard=None, max_idle_poll_seconds=900):
     # Bound data before opening the transaction. Failure leaves the old cursor
     # unchanged so retries cannot skip incompletely ingested observations.
     events = []
+    # Plan cursors retain up to 500 SHA-256 baseline identities. Legacy probes
+    # keep their original bound; both paths remain finite before DB mutation.
+    cursor_limit = 65536 if watch['adapter'] == 'plan' else 4096
     if observation is not None:
         if len(observation.events) > 1000 or (observation.cursor is not None and
-                (not isinstance(observation.cursor, str) or len(observation.cursor) > 4096)):
+                (not isinstance(observation.cursor, str) or len(observation.cursor) > cursor_limit)):
             raise ValueError('observation exceeds limits')
         for key, payload in observation.events:
             encoded = encode_event_payload(payload)
@@ -254,20 +263,31 @@ def finish_poll(watch, *, now, observation=None, error=None, _guard=None):
             if _guard is not None and not _guard(conn, dict(row), now):
                 return False
             failures = row['failures'] + 1 if error else 0
-            delay = min(max(3600, row['poll_interval']),
-                        row['poll_interval'] * 2 ** min(failures, 6))
+            delay = max(_idle_interval(row, row['quiet_polls'], max_idle_poll_seconds),
+                        min(max(3600, row['poll_interval']),
+                            row['poll_interval'] * 2 ** min(failures, 6)))
             status = 'paused' if failures >= 5 else 'active'
             cursor = row['cursor']
+            quiet_polls = row['quiet_polls']
             if observation is not None and not error:
+                before = conn.total_changes
                 conn.executemany('INSERT OR IGNORE INTO watch_events(watch_id,event_key,payload,observed_at) VALUES (?,?,?,?)', events)
+                changed = conn.total_changes > before or (
+                    row['cursor'] is not None and observation.cursor is not None
+                    and observation.cursor != row['cursor'])
+                quiet_polls = 0 if changed else min(quiet_polls + 1, 8)
+                # Two successful quiet reads per tier; errors never advance it.
+                interval = _idle_interval(row, quiet_polls, max_idle_poll_seconds)
+                delay = max(row['poll_interval'], min(
+                    max_idle_poll_seconds, interval * random.uniform(.9, 1.1)))
                 if observation.cursor is not None:
                     cursor = observation.cursor
                 if observation.closed:
                     status = 'completed'
             conn.execute("""UPDATE watches SET status=?,cursor=?,failures=?,last_error=?,
-                next_poll=?,claim_token=NULL,lease_until=NULL,pause_reason=?,
+                next_poll=?,quiet_polls=?,claim_token=NULL,lease_until=NULL,pause_reason=?,
                 version=version+CASE WHEN status!=? THEN 1 ELSE 0 END WHERE id=?""",
-                (status, cursor, failures, error, now + delay,
+                (status, cursor, failures, error, now + delay, quiet_polls,
                  'poll_failures' if status == 'paused' else None, status, watch['id']))
             conn.execute('UPDATE watch_messages SET last_checked_at=? WHERE watch_id=?', (now, watch['id']))
             return True

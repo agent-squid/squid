@@ -136,3 +136,26 @@ def test_plan_discovery_and_validation_routes(transport, tmp_path):
     assert transport[-1].url.path == '/watches/validate'
     assert watch_cli.main(['watch', 'validate', '--input', str(payload), '--human-topic', 'squid']) == 0
     assert transport[-1].url.path == '/watch-control/squid/watches/validate'
+
+
+def test_missing_operator_credential_does_not_create_key_or_request(transport, monkeypatch, capsys):
+    from agent.watch_auth import control_token_file
+    monkeypatch.delenv('SQUID_WATCH_CONTROL_TOKEN')
+    assert watch_cli.main(['tools', '--human-topic', 'squid']) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error['error'] == 'watch_control_credential_missing'
+    assert 'cold startup' in error['hint']
+    assert not control_token_file().exists()
+    assert not transport
+
+
+def test_operator_auth_failure_has_safe_actionable_hint(transport, monkeypatch, capsys):
+    with httpx.Client() as client:
+        client_type = type(client)
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: client_type(transport=httpx.MockTransport(
+        lambda request: httpx.Response(403, text='human-secret')), **kw))
+    assert watch_cli.main(['tools', '--human-topic', 'squid']) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error['error'] == 'watch_control_not_authorized'
+    assert 'verifier' in error['hint']
+    assert 'human-secret' not in str(error)

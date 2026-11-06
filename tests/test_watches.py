@@ -8,6 +8,7 @@ from agent import stats_db, watches
 
 @pytest.fixture
 def db(tmp_path, monkeypatch):
+    monkeypatch.setattr(watches.random, 'uniform', lambda low, high: 1)
     monkeypatch.setattr(stats_db, '_DB_PATH', tmp_path / 'watch.db')
     stats_db.init_db()
     stats_db.init_db()  # additive and repeatable
@@ -62,19 +63,32 @@ def test_restart_lease_recovery_rejects_old_owner(db):
     assert rows('watches')[0]['cursor'] == 'cursor'
 
 
+@pytest.mark.parametrize('adapter,limit', [('fake', 4096), ('plan', 65536)])
+def test_cursor_bounds_are_enforced_before_ingestion(db, adapter, limit):
+    activate(create(adapter=adapter))
+    poll = claim()[0]
+    with pytest.raises(ValueError, match='observation exceeds limits'):
+        watches.finish_poll(poll, now=101, observation=watches.Observation(
+            'x' * (limit + 1), (('must-not-ingest', {}),)))
+    assert not rows('watch_events')
+    assert rows('watches')[0]['cursor'] is None
+    assert watches.finish_poll(poll, now=101, observation=watches.Observation('x' * limit))
+    assert len(rows('watches')[0]['cursor']) == limit
+
+
 def test_ingestion_is_atomic_deduplicates_and_retains_pending(db):
     activate(create())
     first = claim()[0]
     observation = watches.Observation('one', (('failure:1', {'sha': 'head'}),))
     assert watches.finish_poll(first, now=101, observation=observation)
-    second = claim(132)[0]
-    assert watches.finish_poll(second, now=133, observation=observation)
+    second = claim(162)[0]
+    assert watches.finish_poll(second, now=163, observation=observation)
     assert len(rows('watch_events')) == 1
     assert rows('watch_events')[0]['disposition'] == 'pending'
-    third = claim(164)[0]
+    third = claim(224)[0]
     oversized = watches.Observation('must-not-advance', (('failure:2', {'log': 'a' * 65536}),))
     with pytest.raises(ValueError):
-        watches.finish_poll(third, now=165, observation=oversized)
+        watches.finish_poll(third, now=225, observation=oversized)
     assert rows('watches')[0]['cursor'] == 'one'
     assert len(rows('watch_events')) == 1
 
@@ -209,7 +223,7 @@ def test_simultaneous_claimers_do_not_share_watch(db):
 def test_absent_cursor_preserves_saved_position(db):
     activate(create())
     watches.finish_poll(claim()[0], now=101, observation=watches.Observation('saved'))
-    watches.finish_poll(claim(132)[0], now=133, observation=watches.Observation(None))
+    watches.finish_poll(claim(162)[0], now=163, observation=watches.Observation(None))
     assert rows('watches')[0]['cursor'] == 'saved'
 
 
@@ -402,3 +416,91 @@ def test_generic_probe_events_survive_loop_restart(db):
     assert len(rows('watch_events')) == 1
     assert rows('watch_events')[0]['disposition'] == 'pending'
     assert rows('watches')[0]['cursor'] == 'comment:edited'
+
+
+def test_adaptive_polling_persists_resets_and_caps(db, monkeypatch):
+    monkeypatch.setattr(watches.random, 'uniform', lambda low, high: 1)
+    activate(create(expires_at=100000))
+    now = 100
+    for index in range(12):
+        poll = claim(now)[0]
+        assert watches.finish_poll(poll, now=now, observation=watches.Observation('baseline'))
+        row = rows('watches')[0]
+        expected = (60, 180, 300, 600, 900)[min((index + 1) // 2, 4)]
+        assert row['next_poll'] - now == expected
+        now = row['next_poll']
+        stats_db.init_db()  # quiet count survives initialization/restart
+    poll = claim(now)[0]
+    assert watches.finish_poll(poll, now=now, observation=watches.Observation(
+        'new', (('new-event', {}),)))
+    row = rows('watches')[0]
+    assert row['quiet_polls'] == 0
+    assert row['next_poll'] == now + 60
+    # Repeated event payloads do not keep the watch at the fastest tier.
+    for _ in range(3):
+        now = row['next_poll']
+        poll = claim(now)[0]
+        watches.finish_poll(poll, now=now, observation=watches.Observation(
+            'new', (('new-event', {}),)), max_idle_poll_seconds=45)
+        row = rows('watches')[0]
+    assert row['next_poll'] == now + 45
+
+
+def test_adaptive_errors_do_not_advance_quiet_tier(db, monkeypatch):
+    monkeypatch.setattr(watches.random, 'uniform', lambda low, high: 1)
+    activate(create())
+    poll = claim()[0]
+    watches.finish_poll(poll, now=100, observation=watches.Observation('one'))
+    poll = claim(160)[0]
+    watches.finish_poll(poll, now=160, error='TimeoutError')
+    assert rows('watches')[0]['quiet_polls'] == 1
+    assert rows('watches')[0]['next_poll'] == 220
+
+
+@pytest.mark.parametrize('factor', [.9, 1.1])
+def test_adaptive_jitter_respects_requested_minimum(db, monkeypatch, factor):
+    monkeypatch.setattr(watches.random, 'uniform', lambda low, high: factor)
+    activate(create(poll_interval=300))
+    poll = claim()[0]
+    watches.finish_poll(poll, now=100, observation=watches.Observation('one'))
+    assert rows('watches')[0]['next_poll'] == 100 + max(300, 300 * factor)
+
+
+def test_cursor_change_resets_idle_schedule_and_jitter_stays_below_cap(db, monkeypatch):
+    monkeypatch.setattr(watches.random, 'uniform', lambda low, high: 1.1)
+    activate(create())
+    with stats_db._connect() as conn:
+        conn.execute("UPDATE watches SET quiet_polls=18,cursor='old'")
+    poll = claim()[0]
+    watches.finish_poll(poll, now=100, observation=watches.Observation('old'))
+    assert rows('watches')[0]['next_poll'] == 1000
+    poll = claim(1000)[0]
+    watches.finish_poll(poll, now=1000, observation=watches.Observation('new'))
+    row = rows('watches')[0]
+    assert row['quiet_polls'] == 0
+    assert row['next_poll'] == 1066
+
+
+@pytest.mark.parametrize('quiet_polls,minimum,cap,expected', [
+    (10, 30, 900, 900),
+    (18, 30, 900, 900),  # existing counters from the three-check schedule
+    (6, 30, 900, 600),
+    (10, 30, 180, 180),
+    (10, 7200, 900, 7200),
+])
+def test_error_retries_respect_idle_interval(db, quiet_polls, minimum, cap, expected):
+    activate(create(poll_interval=minimum, expires_at=100000))
+    with stats_db._connect() as conn:
+        conn.execute('UPDATE watches SET quiet_polls=?', (quiet_polls,))
+    now = 100
+    for failure in range(5):
+        poll = claim(now)[0]
+        assert watches.finish_poll(poll, now=now, error='TimeoutError', max_idle_poll_seconds=cap)
+        row = rows('watches')[0]
+        assert row['next_poll'] - now >= expected
+        assert row['quiet_polls'] == quiet_polls
+        assert row['failures'] == failure + 1
+        if failure == 0:
+            assert row['next_poll'] - now == max(expected, min(max(3600, minimum), minimum * 2))
+        now = row['next_poll']
+    assert row['status'] == 'paused'

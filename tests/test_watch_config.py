@@ -101,3 +101,13 @@ def test_invalid_policy_rejected(extra):
 
 def test_empty_yaml_watch_section_is_disabled():
     assert not load_watch_configuration({'watches': None}).enabled
+
+
+def test_idle_poll_cap_is_configurable_and_topics_only_lower_it():
+    config = load_watch_configuration({'watches': {
+        'policy': {'max_idle_poll_seconds': 600},
+        'topics': {'fast': {'max_idle_poll_seconds': 180},
+                   'slow': {'max_idle_poll_seconds': 1800}}}})
+    assert config.effective_policy('fast').max_idle_poll_seconds == 180
+    assert config.effective_policy('slow').max_idle_poll_seconds == 600
+    assert config.effective_policy('other').max_idle_poll_seconds == 600

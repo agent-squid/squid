@@ -17,6 +17,7 @@ from agent.watch_service import WatchControl, WatchDenied, WatchService
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(watches.random, 'uniform', lambda low, high: 1)
     monkeypatch.setattr(stats_db, '_DB_PATH', tmp_path / 'watch.db')
     stats_db.init_db()
     now = [100.0]
@@ -96,9 +97,9 @@ def test_expiry_uses_transaction_clock_and_supersedes_pending(setup):
     activate(setup)
     claim = service.claim_due(now=100, lease_seconds=60, limit=4)[0]
     assert service.finish_poll(claim, now=101, observation=watches.Observation('a', (('event', {}),)))
-    claim = service.claim_due(now=132, lease_seconds=1000, limit=4)[0]
+    claim = service.claim_due(now=162, lease_seconds=1000, limit=4)[0]
     now[0] = 901
-    assert not service.finish_poll(claim, now=133, observation=watches.Observation('too-late'))
+    assert not service.finish_poll(claim, now=163, observation=watches.Observation('too-late'))
     assert rows('watches')[0]['status'] == 'expired'
     assert rows('watch_events')[0]['disposition'] == 'superseded'
 
@@ -141,9 +142,9 @@ async def test_restart_reclaims_lease_and_deduplicates_events(setup):
     assert not recovered.finish_poll(abandoned, now=162, observation=watches.Observation('stale'))
     event = watches.Observation('revision:1', (('event:1', {'summary': 'changed'}),))
     assert recovered.finish_poll(claim, now=162, observation=event)
-    now[0] = 193
-    claim = recovered.claim_due(now=193, lease_seconds=60, limit=4)[0]
-    assert recovered.finish_poll(claim, now=194, observation=event)
+    now[0] = 223
+    claim = recovered.claim_due(now=223, lease_seconds=60, limit=4)[0]
+    assert recovered.finish_poll(claim, now=224, observation=event)
     assert len(rows('watch_events')) == 1
     assert rows('watch_events')[0]['disposition'] == 'pending'
     with pytest.raises(WatchDenied):
@@ -189,7 +190,7 @@ async def test_disabled_configuration_does_not_start_worker(setup):
 
 
 @pytest.mark.parametrize('execution', [False, True, 'flow'])
-@pytest.mark.parametrize('generic_plan', [False, True])
+@pytest.mark.parametrize('generic_plan', [False, True, 'github_bugs'])
 def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, execution, generic_plan):
     if generic_plan:
         pytest.importorskip('mcp')
@@ -209,13 +210,28 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
     def source(revision, changed=False):
         temporary = state.with_suffix('.new')
         snapshot = {'revision': revision, 'changed': changed, 'summary': revision}
-        temporary.write_text(json.dumps({'prs': {'owner/repo#1': snapshot}} if generic_plan else snapshot))
+        if generic_plan == 'github_bugs':
+            # Two nonmatching issues must never enter the event inbox. New
+            # matching IDs simulate freshly filed bugs on the GitHub side.
+            def issue(number, author_id=7, label='bug'):
+                return dict(id=number, number=number, title='Test bug', body='Untrusted task data',
+                    html_url=f'https://github.com/owner/repo/issues/{number}',
+                    created_at='2026-11-05T00:00:00Z', updated_at='2026-11-05T00:00:00Z', state='open',
+                    user={'id': author_id, 'login': 'alice' if author_id == 7 else 'eve'},
+                    labels=[{'name': label}])
+            snapshot = [issue(i) for i in range(1, int(revision[1:]) + 1)]
+            snapshot += [issue(100, author_id=8), issue(101, label='feature')]
+        elif generic_plan:
+            snapshot = {'prs': {'owner/repo#1': snapshot}}
+        temporary.write_text(json.dumps(snapshot))
         temporary.replace(state)
     source('v1')
     probe = home / 'probe.py'
     probe.write_text('import pathlib,sys\nprint(pathlib.Path(sys.argv[1]).read_text())\n')
     database = home / 'watch.db'
-    environment = dict(os.environ, SQUID_DB_PATH=str(database), SQUID_LOG_DIR=str(home / 'logs'),
+    environment = dict({k: v for k, v in os.environ.items() if not k.startswith('SQUID_')},
+                       HOME=str(home), USER='watch-e2e-' + tmp_path.name, LOGNAME='watch-e2e-' + tmp_path.name,
+                       SQUID_DB_PATH=str(database), SQUID_LOG_DIR=str(home / 'logs'),
                        SQUID_WATCH_CONTROL_TOKEN='test-operator-' * 4, PYTHONPATH=str(root))
     process = None
     with socket.socket() as listener, (home / 'process.log').open('w') as log:
@@ -235,6 +251,16 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                 'connection': {'transport': 'stdio', 'argv': [sys.executable,
                     str(root / 'tests/fixtures/watch_mcp_server.py'), '--state', str(state)]},
                 'read_tools': ['read_pr']}}
+        if generic_plan == 'github_bugs':
+            gh = home / 'gh'
+            gh.write_text(f'#!{sys.executable}\nimport json,sys,pathlib\n'
+                f'print(json.dumps({{"id": 7, "login": "alice"}}) if sys.argv[-1].startswith("users/") '
+                f'else pathlib.Path({str(state)!r}).read_text())\n')
+            gh.chmod(0o755)
+            environment['PATH'] = str(home) + os.pathsep + environment.get('PATH', '')
+            configuration['watches']['connections'] = {'github': {
+                'connection': {'transport': 'stdio', 'argv': [sys.executable, str(root / 'tools/gh_watch_mcp.py')]},
+                'read_tools': ['read_bugs']}}
         (home / '.squid' / 'squid.yaml').write_text(yaml.safe_dump(configuration))
         def start():
             return subprocess.Popen([sys.executable, str(root / 'tests/fixtures/watch_host.py'),
@@ -277,6 +303,10 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                     payload['plan'] = dict(version=1, initial='quiet', steps=[dict(server='github',
                         tool='read_pr', arguments={'repository': 'owner/repo', 'number': 1},
                         identity=['/revision'], when={'path': '/changed', 'equals': True})])
+                if generic_plan == 'github_bugs':
+                    payload['plan']['steps'] = [dict(server='github', tool='read_bugs',
+                        arguments=dict(owner='owner', repo='repo', author='alice', author_id=7, label='bug'),
+                        items='/issues', identity=['/id'], complete={'path': '/complete', 'equals': True})]
                 # Plan creation includes MCP negotiation and real read validation.
                 response = client.post(path, json=payload, timeout=10)
                 assert response.status_code == 200
@@ -284,7 +314,8 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                 path += '/' + row['id']
                 grant = client.post(path + '/grant', json={'expires_at': row['expires_at']}).json()['grant_id']
                 assert client.post(path + '/activate', json={'version': 0, 'grant_id': grant}).json()['status'] == 'active'
-                wait_for(lambda: client.get(path).json().get('cursor') == ('[]' if generic_plan else 'v1'))
+                wait_for(lambda: client.get(path).json().get('cursor') is not None)
+                baseline_cursor = client.get(path).json()['cursor']
                 assert db('SELECT COUNT(*) FROM watch_events')[0][0] == 0
                 def reschedule():
                     current = client.get(path).json()
@@ -298,6 +329,8 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                     if execution == 'flow':
                         assert client.post('/config/agents', json={'name': 'watch-review', 'harness': 'echo', 'provider': 'echo'}).status_code == 200
                         target = dict(flow_route='#squid@watch-echo>@watch-review')
+                        if generic_plan == 'github_bugs':
+                            target = dict(flow_route='#squid@watch-echo<>@watch-review')
                     execution_response = client.post(path + '/execution-grant', json=dict(**target,
                         instructions='Inspect the event and report locally', max_runs=2, max_attempts=1, request_key='execute'))
                     assert execution_response.status_code == 200
@@ -308,6 +341,8 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                 if execution:
                     wait_for(lambda: db("SELECT COUNT(*) FROM watch_runs WHERE state='succeeded'")[0][0] == 1)
                 saved_expiry = client.get(path).json()['expires_at']
+                saved_cursor = client.get(path).json()['cursor']
+                assert saved_cursor != baseline_cursor or generic_plan
                 monitor_id = db('SELECT msg_id FROM watch_messages')[0][0]
                 stop()
                 # Exercise overdue startup recovery without a 30-second sleep.
@@ -323,7 +358,7 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                 assert db("SELECT COUNT(*) FROM chat_messages WHERE source='monitor'")[0][0] == 1
                 wait_for(lambda: db('SELECT next_poll FROM watches')[0][0] > 0)
                 current = client.get(path).json()
-                assert current['status'] == 'active' and current['cursor'] == ('[]' if generic_plan else 'v2')
+                assert current['status'] == 'active' and current['cursor'] == saved_cursor
                 assert current['expires_at'] == saved_expiry
                 assert db('SELECT COUNT(*) FROM watch_events')[0][0] == 1
                 source('v3', True)
@@ -339,10 +374,11 @@ def test_real_host_restart_keeps_cursor_events_and_monitoring(tmp_path, executio
                     assert db("SELECT COUNT(*) FROM watch_runs")[0][0] == 2
                 else:
                     assert db("SELECT COUNT(*) FROM watch_events WHERE disposition='pending'")[0][0] == 2
-                assert db("SELECT COUNT(*) FROM chat_messages WHERE role='assistant' AND source='watch'")[0][0] == (4 if execution == 'flow' else 2 if execution else 0)
+                flow_turns = 6 if generic_plan == 'github_bugs' else 4
+                assert db("SELECT COUNT(*) FROM chat_messages WHERE role='assistant' AND source='watch'")[0][0] == (flow_turns if execution == 'flow' else 2 if execution else 0)
                 if execution == 'flow':
-                    assert db("SELECT COUNT(*) FROM flow_steps WHERE status='done'")[0][0] == 4
-                    assert db("SELECT COUNT(*) FROM watch_flow_turns WHERE started_at IS NOT NULL")[0][0] == 4
+                    assert db("SELECT COUNT(*) FROM flow_steps WHERE status='done'")[0][0] == flow_turns
+                    assert db("SELECT COUNT(*) FROM watch_flow_turns WHERE started_at IS NOT NULL")[0][0] == flow_turns
                     assert all(r[0] for r in db('SELECT flow_run_id FROM watch_runs'))
                 cancelled = client.post(path + '/cancel', json={'version': client.get(path).json()['version']})
                 assert cancelled.json()['status'] == 'cancelled'

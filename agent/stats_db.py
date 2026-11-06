@@ -1052,6 +1052,8 @@ def init_db() -> None:
             conn.execute("""UPDATE watches SET pause_reason=
                 CASE WHEN failures>=5 THEN 'poll_failures' ELSE 'manual' END
                 WHERE status='paused'""")
+        if "quiet_polls" not in _table_columns(conn, "watches"):
+            conn.execute("ALTER TABLE watches ADD COLUMN quiet_polls INTEGER NOT NULL DEFAULT 0")
         if "observation_plan" not in _table_columns(conn, "watches"):
             conn.execute("ALTER TABLE watches ADD COLUMN observation_plan TEXT")
         if "flow_route" not in _table_columns(conn, "watch_execution_grants"):

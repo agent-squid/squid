@@ -28,6 +28,7 @@ def plan():
 @pytest.fixture
 def source(tmp_path, monkeypatch):
     pytest.importorskip('jsonschema')
+    monkeypatch.setattr(watches.random, 'uniform', lambda low, high: 1)
     monkeypatch.setattr(stats_db, '_DB_PATH', tmp_path / 'watch.db')
     stats_db.init_db()
     state = dict(comments=[dict(id='C1', updatedAt='v1', resolved=False, body='please fix')],
@@ -63,6 +64,7 @@ def source(tmp_path, monkeypatch):
 async def test_discovery_validation_and_persisted_polling(source):
     service, control, token, state, schema, calls, raw = source
     tools = await service.discover_observation_tools(token)
+    assert tools['max_records'] == 500
     assert [t['name'] for t in tools['operations']] == ['read_issue']
     assert tools['operations'][0]['input_schema'] == schema
     proposal = await service.create_plan(token, target='issue:I-1', plan=plan(), request_key='r')
@@ -85,18 +87,18 @@ async def test_discovery_validation_and_persisted_polling(source):
     assert baseline.events == ()
     restarted.finish_poll(row, now=100, observation=baseline)
     state['comments'][0]['updatedAt'] = 'v2'
-    row = restarted.claim_due(now=130, lease_seconds=30, limit=1)[0]
+    row = restarted.claim_due(now=160, lease_seconds=30, limit=1)[0]
     changed = await adapter.poll(row)
     assert len(changed.events) == 1
-    restarted.finish_poll(row, now=130, observation=changed)
+    restarted.finish_poll(row, now=160, observation=changed)
     # Repeated observations and replays never duplicate durable events.
-    row = restarted.claim_due(now=160, lease_seconds=30, limit=1)[0]
-    restarted.finish_poll(row, now=160, observation=await adapter.poll(row))
+    row = restarted.claim_due(now=220, lease_seconds=30, limit=1)[0]
+    restarted.finish_poll(row, now=220, observation=await adapter.poll(row))
     conn = watches._connect()
     assert conn.execute('SELECT COUNT(*) FROM watch_events').fetchone()[0] == 1
     conn.close()
     state['comments'][0]['updatedAt'] = 'v1'
-    row = restarted.claim_due(now=190, lease_seconds=30, limit=1)[0]
+    row = restarted.claim_due(now=280, lease_seconds=30, limit=1)[0]
     assert not (await adapter.poll(row)).events
     state['closed'] = True
     assert (await adapter.poll(row)).closed
@@ -265,9 +267,28 @@ async def test_remote_schema_refs_and_excess_records_rejected(source):
     with pytest.raises(PlanError, match='plan_schema_reference_unsupported'):
         await service.validate_plan(token, target='I-1', plan=plan())
     schema['properties']['issueId'] = {'type': 'string'}
-    state['comments'] = [dict(id=str(i), updatedAt='v1', resolved=False) for i in range(51)]
+    state['comments'] = [dict(id=str(i), updatedAt='v1', resolved=False) for i in range(501)]
     with pytest.raises(PlanError, match='plan_record_limit'):
         await service.validate_plan(token, target='I-1', plan=plan())
+
+
+@pytest.mark.asyncio
+async def test_plan_record_limit_applies_across_all_steps(source):
+    service, _, _, state, _, _, _ = source
+    adapter = service.configuration.adapters['plan']
+    combined = plan()
+    combined['steps'] *= 2
+    state['comments'] = [dict(id=str(i), updatedAt='v1', resolved=False) for i in range(250)]
+    quiet, _ = await adapter.evaluate(combined)
+    assert len(json.loads(quiet.cursor)) == 500
+    assert not quiet.events
+    actionable = deepcopy(combined)
+    actionable['initial'] = 'actionable'
+    observed, _ = await adapter.evaluate(actionable)
+    assert len(observed.events) == 500
+    state['comments'].append(dict(id='extra', updatedAt='v1', resolved=False))
+    with pytest.raises(PlanError, match='plan_record_limit_or_duplicate_identity'):
+        await adapter.evaluate(combined)
 
 
 @pytest.mark.asyncio

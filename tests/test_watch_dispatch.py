@@ -563,9 +563,11 @@ def test_unsupported_watch_flow_rejected(setup, route):
 
 
 @pytest.mark.asyncio
-async def test_flow_dispatch_two_agents_and_single_run_budget(setup, monkeypatch):
+@pytest.mark.parametrize('roundtrip', [False, True])
+async def test_flow_dispatch_two_agents_and_single_run_budget(setup, monkeypatch, roundtrip):
     from agent import flow
-    grant = flow_grant(setup)
+    grant = flow_grant(setup, route='#squid@watch-agent<>@review-agent' if roundtrip
+                       else '#squid@watch-agent>@review-agent')
     service = setup[0]
     entered, native = [], []
     async def unexpected(*args, **kwargs):
@@ -577,6 +579,8 @@ async def test_flow_dispatch_two_agents_and_single_run_budget(setup, monkeypatch
         if message['agent'] == 'review-agent':
             assert 'Implementation complete' in prompt
             assert 'Previous granted flow steps' in prompt
+        if roundtrip and len(entered) == 2:
+            assert 'Review complete' in prompt
         assert 'local isolated files only' in prompt
         entered.append(message['agent'])
         yield 'Implementation complete' if message['agent'] == 'watch-agent' else 'Review complete'
@@ -587,13 +591,14 @@ async def test_flow_dispatch_two_agents_and_single_run_budget(setup, monkeypatch
     run_id = claimed(setup)
     try:
         await asyncio.wait_for(runtime.dispatch(run_id), 10)
-        assert entered == ['watch-agent', 'review-agent']
+        expected = ['watch-agent', 'review-agent'] + (['watch-agent'] if roundtrip else [])
+        assert entered == expected
         run = rows('watch_runs')[0]
         assert run['state'] == 'succeeded'
         assert run['flow_run_id'] == 'watch-' + run_id
-        assert [s['status'] for s in stats_db.get_flow_steps(run['flow_run_id'])] == ['done', 'done']
+        assert [s['status'] for s in stats_db.get_flow_steps(run['flow_run_id'])] == ['done'] * len(expected)
         assert rows('watch_events')[0]['disposition'] == 'handled'
-        assert len(rows('watch_flow_turns')) == 2
+        assert len(rows('watch_flow_turns')) == len(expected)
         assert all(t['started_at'] is not None for t in rows('watch_flow_turns'))
         assert not native
         with stats_db._connect() as conn:

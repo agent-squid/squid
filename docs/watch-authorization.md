@@ -50,6 +50,27 @@ policy and durable grants inside claim and ingestion transactions and immediatel
 before source reads. It pauses unauthorized active watches with `policy_changed`
 or `grant_required`, invalidates their claims, and rejects late observations.
 
+## Adaptive polling
+
+Successful quiet checks back off through 1 minute, 3 minutes,
+5 minutes, 10 minutes and 15 minutes, advancing after two quiet checks per
+level. Activity resets the schedule to 1 minute (subject to the configured minimum
+and cap). A newly ingested event or changed established cursor resets the quiet
+count. The initial quiet baseline counts as a quiet check. The counter and next
+check time survive restarts; pause/resume does not reset the quiet counter.
+
+The requested `poll_interval` remains a minimum. Each delay has ±10% jitter,
+clamped to that minimum and the idle cap. Set
+`watches.policy.max_idle_poll_seconds` (default 900) to lower the idle cap;
+topic policies can lower it further. The requested minimum takes precedence
+when it exceeds the cap. Existing watches use the new schedule on their next
+successful check. Expiry and execution budgets are unchanged.
+
+Errors retain their separate exponential retry schedule, with the current idle
+interval as a minimum, and pause after five failures. Failed checks do not advance
+the quiet counter. Source-specific rate-limit retry headers are not currently carried through the generic probe
+interface.
+
 ## Trusted control versus agent operations
 
 `WatchService` derives topic and operations from a credential, never from a

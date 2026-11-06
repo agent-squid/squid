@@ -95,7 +95,7 @@ async def test_real_stdio_tool(tmp_path, new_issues):
         async with ClientSession(*streams) as session:
             await session.initialize()
             catalog = await session.list_tools()
-            assert [tool.name for tool in catalog.tools] == ['read_issue_comments', 'read_issues']
+            assert [tool.name for tool in catalog.tools] == ['read_issue_comments', 'read_issues', 'read_bugs']
             result = await session.call_tool(
                 'read_issues' if new_issues else 'read_issue_comments',
                 dict(owner='o', repo='r') if new_issues else dict(owner='o', repo='r', issue_number=1))
@@ -138,7 +138,7 @@ def test_unicode_snapshot_at_transport_size_boundary(monkeypatch, glyph):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('new_issues', [False, True])
+@pytest.mark.parametrize('new_issues', [False, True, 'bugs'])
 async def test_reader_through_durable_watch_polling(tmp_path, monkeypatch, new_issues):
     pytest.importorskip('mcp')
     import os
@@ -147,12 +147,24 @@ async def test_reader_through_durable_watch_polling(tmp_path, monkeypatch, new_i
     from agent.watch_policy import OPERATIONS
     from agent.watch_service import WatchControl, WatchService
 
-    record = issue if new_issues else comment
-    tool = 'read_issues' if new_issues else 'read_issue_comments'
+    filtered = new_issues == 'bugs'
+    record = bug if filtered else issue if new_issues else comment
+    tool = 'read_bugs' if filtered else 'read_issues' if new_issues else 'read_issue_comments'
+    baseline_count = 101 if filtered else 1
+    baseline = [record(i + 1) for i in range(baseline_count)]
+    new_id = baseline_count + 1
     state_file = tmp_path / 'comments.json'
-    state_file.write_text(json.dumps([record()]))
+    state_file.write_text(json.dumps(baseline))
     gh = tmp_path / 'gh'
     gh.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nprint(Path({str(state_file)!r}).read_text())\n')
+    if filtered:
+        gh.write_text(f'#!{sys.executable}\nimport json,sys\nfrom pathlib import Path\n'
+            'from urllib.parse import parse_qs,urlsplit\n'
+            'if sys.argv[-1].startswith("users/"): print(json.dumps({"id":7,"login":"alice"}))\n'
+            'else:\n'
+            ' page=int(parse_qs(urlsplit(sys.argv[-1]).query)["page"][0])\n'
+            f' records=json.loads(Path({str(state_file)!r}).read_text())\n'
+            ' print(json.dumps(records[(page-1)*100:page*100]))\n')
     gh.chmod(0o755)
     monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ.get('PATH', ''))
     monkeypatch.setattr(stats_db, '_DB_PATH', tmp_path / 'watch.db')
@@ -165,7 +177,8 @@ async def test_reader_through_durable_watch_polling(tmp_path, monkeypatch, new_i
     token = control.mint(turn='setup', topic='test', operations=OPERATIONS, expires_at=900)
     plan = dict(version=1, initial='quiet', steps=[dict(
         server='github-test', tool=tool,
-        arguments=dict(owner='o', repo='r') if new_issues else dict(owner='o', repo='r', issue_number=1),
+        arguments=dict(owner='o', repo='r', author='alice', author_id=7) if filtered else
+            dict(owner='o', repo='r') if new_issues else dict(owner='o', repo='r', issue_number=1),
         items='/issues' if new_issues else '/comments',
         identity=['/id'] if new_issues else ['/id', '/updated_at'], complete={'path': '/complete', 'equals': True})])
     proposal = await service.create_plan(token, target='https://github.com/o/r/issues/1',
@@ -181,16 +194,26 @@ async def test_reader_through_durable_watch_polling(tmp_path, monkeypatch, new_i
     adapter = configuration.adapters['plan']
 
     async def poll(now):
+        with watches._connect() as conn:
+            due = conn.execute('SELECT next_poll FROM watches WHERE id=?', (proposal['id'],)).fetchone()[0]
+        now = max(now, due)
         row = service.claim_due(now=now, lease_seconds=30, limit=1)[0]
         observed = await adapter.poll(row)
         service.finish_poll(row, now=now, observation=observed)
         return observed
 
     assert not (await poll(100)).events
-    state_file.write_text(json.dumps([record(), record(2)]))
+    if filtered:
+        with watches._connect() as conn:
+            saved = conn.execute('SELECT cursor,status FROM watches WHERE id=?', (proposal['id'],)).fetchone()
+        assert len(saved['cursor']) > 4096
+        assert saved['status'] == 'active'
+        service = WatchService(configuration, clock=lambda: 100)
+    state_file.write_text(json.dumps(baseline + [record(new_id)]))
     assert len((await poll(130)).events) == 1
     await poll(160)
-    state_file.write_text(json.dumps([record(), record(2, '2026-11-05T00:01:00Z')]))
+    edited = record(new_id) | {'updated_at': '2026-11-05T00:01:00Z'}
+    state_file.write_text(json.dumps(baseline + [edited]))
     assert len((await poll(190)).events) == 1
     # Polls replay non-baseline identities; the durable inbox deduplicates them.
     await poll(220)
@@ -233,3 +256,106 @@ def test_issue_invalid_coordinates(monkeypatch, owner, repo):
     with pytest.raises(ValueError):
         reader.read_issues(owner, repo)
     assert not calls
+
+
+
+def bug(number=1, **changes):
+    return issue(number) | {'user': {'id': 7, 'login': 'alice'},
+                            'labels': [{'name': 'bug'}]} | changes
+
+
+def bug_pages(monkeypatch, pages, account=None):
+    calls = []
+    def read(endpoint):
+        calls.append(endpoint)
+        if endpoint.startswith('users/'):
+            return account if account is not None else {'id': 7, 'login': 'alice'}
+        return pages.pop(0)
+    monkeypatch.setattr(reader, '_read', read)
+    return calls
+
+
+def test_bugs_verify_account_and_filter_locally(monkeypatch):
+    calls = bug_pages(monkeypatch, [[bug(), bug(2, user={'id': 8, 'login': 'bob'}),
+        bug(3, labels=[{'name': 'feature'}]), bug(4, pull_request={}),
+        bug(5, user={'id': 8, 'login': 'alice'})]])
+    snapshot = reader.read_bugs('o', 'r', 'ALICE', 7)
+    assert snapshot == {'issues': [issue() | {'author': {'id': 7, 'login': 'alice'},
+                                            'labels': ['bug']}], 'complete': True}
+    assert calls[0] == 'users/ALICE'
+    from urllib.parse import parse_qs, urlsplit
+    assert parse_qs(urlsplit(calls[1]).query) == dict(state=['all'], creator=['alice'],
+        labels=['bug'], sort=['created'], direction=['asc'], per_page=['100'], page=['1'])
+
+
+def test_bugs_paginate_and_encode_label(monkeypatch):
+    pages = [[bug(i + 1, labels=[{'name': 'type: bug'}]) for i in range(100)], []]
+    calls = bug_pages(monkeypatch, pages)
+    snapshot = reader.read_bugs('o', 'r', 'alice', 7, 'type: bug')
+    assert len(snapshot['issues']) == 100 and snapshot['complete']
+    assert 'labels=type%3A+bug' in calls[1]
+    assert calls[2].endswith('page=2')
+
+
+@pytest.mark.parametrize('account', [{}, {'id': True, 'login': 'alice'},
+    {'id': 7, 'login': 'bob'}, {'id': 0, 'login': 'alice'}, {'id': 8, 'login': 'alice'}])
+def test_bugs_reject_unverified_author(monkeypatch, account):
+    calls = bug_pages(monkeypatch, [], account)
+    with pytest.raises(ValueError, match='identity'):
+        reader.read_bugs('o', 'r', 'alice', 7)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('changes', [{'author': '../alice'}, {'owner': 'o/x'},
+    {'repo': '..'}, {'label': 'bug,feature'}, {'label': ''}, {'label': 'bug\n'},
+    {'author': None}, {'author_id': True}, {'author_id': 0}, {'label': 'x' * 51}])
+def test_bugs_invalid_filter_never_reads(monkeypatch, changes):
+    calls = bug_pages(monkeypatch, [])
+    with pytest.raises(ValueError):
+        reader.read_bugs(**(dict(owner='o', repo='r', author='alice', author_id=7) | changes))
+    assert not calls
+
+
+@pytest.mark.parametrize('pages', [[{}], [[bug(user=None)]], [[bug(labels=['bug'])]],
+    [[bug(number=True)]], [[bug(body=42)]], [[bug(body='x' * reader.LIMIT)]],
+    [[bug(), bug()]]])
+def test_bugs_reject_invalid_or_oversized_pages(monkeypatch, pages):
+    bug_pages(monkeypatch, pages)
+    with pytest.raises(ValueError):
+        reader.read_bugs('o', 'r', 'alice', 7)
+
+
+def test_bugs_fail_instead_of_truncating_or_replaying_pages(monkeypatch):
+    # PRs consume the page bound too, while not consuming the output budget.
+    pages = [[bug(page * 100 + i + 1, pull_request={}) for i in range(100)]
+             for page in range(5)]
+    calls = bug_pages(monkeypatch, pages)
+    with pytest.raises(ValueError, match='five-page limit'):
+        reader.read_bugs('o', 'r', 'alice', 7)
+    assert len(calls) == 6
+    page = [bug(i + 1, pull_request={}) for i in range(100)]
+    bug_pages(monkeypatch, [page, page])
+    with pytest.raises(ValueError, match='pagination changed'):
+        reader.read_bugs('o', 'r', 'alice', 7)
+
+
+@pytest.mark.asyncio
+async def test_real_stdio_filtered_bug_tool(tmp_path):
+    pytest.importorskip('mcp')
+    import os
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    gh = tmp_path / 'gh'
+    gh.write_text(f'#!{sys.executable}\nimport json,sys\n'
+                  f'print(json.dumps({{"id": 7, "login": "alice"}} if sys.argv[-1].startswith("users/") '
+                  f'else {[bug(), bug(2, user={"id": 9, "login": "eve"})]!r}))\n')
+    gh.chmod(0o755)
+    params = StdioServerParameters(command=sys.executable, args=[str(SERVER)],
+        env={'PATH': str(tmp_path) + os.pathsep + os.environ.get('PATH', '')})
+    async with stdio_client(params) as streams:
+        async with ClientSession(*streams) as session:
+            await session.initialize()
+            result = await session.call_tool('read_bugs', dict(owner='o', repo='r', author='alice', author_id=7))
+            assert not result.isError
+            assert [record['id'] for record in result.structuredContent['issues']] == [1]
+            assert result.structuredContent['complete'] is True

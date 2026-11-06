@@ -151,6 +151,7 @@ class WatchService:
     def finish_poll(self, watch, **kwargs):
         with self._lock:
             return watches.finish_poll(watch, **kwargs,
+                                       max_idle_poll_seconds=self.configuration.effective_policy(watch['topic']).max_idle_poll_seconds,
                                        _guard=lambda conn, row, now: self._poll_guard(conn, row, now, claimed=True))
 
     def prepare_poll(self, watch, *, now):

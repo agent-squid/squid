@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from typing import Any
+from urllib.parse import urlencode
 
 
 LIMIT = 65_536
@@ -109,12 +110,77 @@ def read_issues(owner: str, repo: str) -> dict[str, Any]:
     return snapshot
 
 
+def read_bugs(owner: str, repo: str, author: str, author_id: int, label: str = 'bug') -> dict[str, Any]:
+    """Read issues filed by one verified GitHub account with one required label.
+
+    Includes open and closed issues. Reads at most five 100-record pages and
+    fails rather than returning a truncated snapshot. Identity /id detects
+    issues newly entering this filtered set, including later label additions.
+    This filters task data; it does not authorize execution or publication.
+    """
+    login_pattern = r'[A-Za-z0-9][A-Za-z0-9-]{0,99}'
+    if (not isinstance(owner, str) or not re.fullmatch(login_pattern, owner)
+            or not isinstance(repo, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', repo)
+            or repo in {'.', '..'} or not isinstance(author, str)
+            or not re.fullmatch(login_pattern, author) or type(author_id) is not int or author_id < 1
+            or not isinstance(label, str) or not 1 <= len(label) <= 50
+            or label != label.strip() or ',' in label
+            or any(ord(c) < 32 or ord(c) == 127 for c in label)):
+        raise ValueError('Invalid GitHub bug filter')
+    account = _read(f'users/{author}')
+    if (not isinstance(account, dict) or type(account.get('id')) is not int
+            or account['id'] != author_id or not isinstance(account.get('login'), str)
+            or account['login'].casefold() != author.casefold()):
+        raise ValueError('GitHub author identity could not be verified')
+    records, seen = [], set()
+    for page in range(1, 6):
+        query = urlencode(dict(state='all', creator=account['login'], labels=label,
+                               sort='created', direction='asc', per_page=100, page=page))
+        issues = _read(f'repos/{owner}/{repo}/issues?{query}')
+        if not isinstance(issues, list) or len(issues) > 100:
+            raise ValueError('GitHub returned an unexpected issue page')
+        for issue in issues:
+            if (not isinstance(issue, dict) or type(issue.get('id')) is not int
+                    or issue['id'] < 1 or issue['id'] in seen):
+                raise ValueError('GitHub issue identity is invalid or pagination changed')
+            seen.add(issue['id'])
+            if 'pull_request' in issue:
+                continue
+            user, labels = issue.get('user'), issue.get('labels')
+            if (not isinstance(user, dict) or type(user.get('id')) is not int
+                    or not isinstance(user.get('login'), str) or not isinstance(labels, list)
+                    or any(not isinstance(item, dict) or not isinstance(item.get('name'), str)
+                           for item in labels)):
+                raise ValueError('GitHub issue lacks author or label evidence')
+            # Recheck provider filters locally, including immutable account ID.
+            if (user['id'] != account['id'] or user['login'].casefold() != author.casefold()
+                    or not any(item['name'].casefold() == label.casefold() for item in labels)):
+                continue
+            if (type(issue.get('number')) is not int or issue['number'] < 1
+                    or any(not isinstance(issue.get(key), str) or not issue[key]
+                           for key in ('title', 'html_url', 'created_at', 'updated_at'))
+                    or issue.get('state') not in ('open', 'closed')
+                    or issue.get('body') is not None and not isinstance(issue['body'], str)):
+                raise ValueError('GitHub issue lacks required identity or content fields')
+            record = {key: issue.get(key) for key in
+                      ('id', 'number', 'title', 'body', 'html_url', 'created_at', 'updated_at', 'state')}
+            record.update(author={'id': user['id'], 'login': user['login']},
+                          labels=[item['name'] for item in labels])
+            records.append(record)
+            if len(json.dumps({'issues': records, 'complete': True}, allow_nan=False).encode()) > LIMIT:
+                raise ValueError('GitHub snapshot exceeds the watch output limit')
+        if len(issues) < 100:
+            return {'issues': records, 'complete': True}
+    raise ValueError('Incomplete snapshot: five-page limit reached')
+
+
 def make_server():
     from mcp.server.fastmcp import FastMCP
 
     server = FastMCP('GitHub watch test reader')
     server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_issue_comments)
     server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_issues)
+    server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_bugs)
     return server
 
 

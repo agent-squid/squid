@@ -47,6 +47,13 @@ def main(argv):
         token = os.environ.get('SQUID_WATCH_CONTROL_TOKEN' if human else 'SQUID_TURN_TOKEN', '')
         if human and not token:
             token = file_token()
+            if not token:
+                print(json.dumps({'error': 'watch_control_credential_missing',
+                    'hint': 'Use the credential configured for this host via SQUID_WATCH_CONTROL_TOKEN. '
+                            'File credentials are provisioned on enabled cold startup without an override; '
+                            'self-restart preserves the existing verifier. Do not generate a replacement client key.'}),
+                    file=sys.stderr)
+                return 1
         if not token or len(token) > 512:
             raise ValueError()
         path = '/watch-tools' if action == 'observation-tools' else '/tools' if action == 'tools' else '/watches'
@@ -81,6 +88,11 @@ def main(argv):
             except (ValueError, AttributeError):
                 code = None
             detail = {'error': 'watch_request_failed', 'status': response.status_code}
+            if human and response.status_code == 403:
+                detail.update(error='watch_control_not_authorized',
+                    hint='Check the selected instance and its operator credential. An environment override or '
+                         'preserved restart verifier may differ from the local credential file. '
+                         'Agent turn credentials cannot grant watch execution.')
             if isinstance(code, str) and code in PLAN_ERRORS:
                 detail.update(error=code, hint=PLAN_ERRORS[code])
             print(json.dumps(detail), file=sys.stderr)

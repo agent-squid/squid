@@ -624,3 +624,49 @@ Verification covers anchor idempotency/repair, accepted last-check persistence,
 source-cursor and anchor identity across real-server restarts, terminal snapshot
 restoration, separate job navigation, same-origin/version checks, input bounds,
 and mobile control reachability.
+
+### Author-filtered bug reader and local workflow tests (2026-11-05)
+
+The GitHub test MCP now exposes `read_bugs`, filtering by creator and required
+label while pinning the creator's numeric GitHub account ID. It verifies the
+login/ID pair and checks returned author/label evidence locally. Bounded
+pagination reads at most five 100-record pages and fails on incomplete results,
+duplicate identities, or output limits. Unrelated repository issues/PRs no
+longer impose the legacy reader's 50-record ceiling. Issues entering the filter
+after baseline can trigger work, including older issues subsequently labeled;
+this is not a creation-event or trusted-label-actor subscription.
+
+Operator CLI diagnostics distinguish a missing credential from rejected human
+authentication, without provisioning a client key or changing server authority.
+An environment-origin verifier survives self-restart; losing its plaintext
+credential requires operator recovery, not an agent-authentication fallback.
+
+Disposable-server tests connect the real GitHub MCP stdio reader (fake `gh`)
+to observation/execution grants and a three-step `implementer<>reviewer` flow.
+They cover excluded issues, quiet baseline, event dispatch, restart deduplication,
+run limits, and cancellation using Echo agents. A live read of
+`agent-squid/squid` through real MCP/`gh` also succeeded for `haebin` (ID 913093),
+with zero matching bugs. Neither check establishes real model fixes or live
+production watch activation. See the [operator setup](../watch-gh-test.md#monitor-bugs-filed-by-one-account).
+
+The running host had no GitHub watch connection or available operator token
+file. No production configuration or grants were changed. Secure execution,
+controlled publication, and automatic PR creation remain pending; publication
+is still disabled.
+
+
+### Paginated-reader integration limit correction (2026-11-06)
+
+Observation plans now permit up to 500 records per input array and 500 matching
+records across all steps, retaining the existing tool-result/event byte limits.
+Discovery and safe error hints expose the same bound. Plan quiet baselines have
+a 65,536-character cursor limit so larger snapshots can be persisted; legacy
+probe cursors retain their 4,096-character limit. No stored representation or
+existing baseline changes. The GitHub reader still fails at five full pages
+rather than silently returning an incomplete result.
+
+A real MCP-to-durable-watch regression uses a paginated 101-issue baseline,
+reconstructs the service, detects a newly added issue once, and verifies replay
+and issue edits do not create duplicate events. Boundary tests cover 500 matched
+records across steps, rejection above that limit, and cursor-limit enforcement
+before any event ingestion. Publication authority is unchanged.
