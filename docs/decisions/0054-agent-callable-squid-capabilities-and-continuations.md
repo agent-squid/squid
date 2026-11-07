@@ -1,6 +1,7 @@
 ---
 status: proposed
 date: 2026-11-01
+updated: 2026-11-07
 ---
 # ADR-0054: Agent-Callable Squid Capabilities and Durable Continuations
 
@@ -47,7 +48,7 @@ model promise is not enforcement.
 ### Durable continuation as the first execution primitive
 
 Allow the current turn to request a subsequent agent turn after its successful
-completion and sync. Proposed CLI spelling (not yet implemented):
+completion and sync. Implemented CLI spelling:
 
 ```sh
 agentsquid continue create --input continuation.json
@@ -61,16 +62,18 @@ turn, topic, original request, and parent Flow/watch lineage from its credential
 caller-provided IDs cannot substitute another origin. The response returns a
 durable ID and state, not a claim that execution already happened.
 
-The first execution slice supports one immediate successor per turn. A successor
-may schedule another successor only within the same root execution budget.
-Later slices may expose bounded route execution through the same interface.
+The delivered continuation slice supports one predeclared sequence of up to eight
+follow-on steps per human turn. Sequence members cannot extend or change it.
+The opt-in bounded route slice shares root execution budgets across nested
+routes and isolated continuation sequences.
 Do not invent a second route language or implicitly parse a prompt into a DAG.
 
 Continuations are normal agent turns, not necessarily git-only. An isolated
 continuation can review or edit, sync, and request another step. A continuation
 explicitly intended for backing-repo Git operations makes no file edits and
 uses a distinct execution mode. Release version bumps belong in an editing
-turn; commit/tag/push can follow its sync. Mode violations stop execution
+turn; requested commit/push can follow its sync. Tags and releases remain
+unsupported. Mode violations stop execution
 before later steps become eligible; they must not silently promote a turn to
 broader access. Host operations may later optimize concrete steps without
 requiring a fixed catalogue of commit/tag/release actions now.
@@ -127,8 +130,9 @@ Descendants retain the original request's scope and provenance; a model-authored
 continuation cannot manufacture a new human request or increase permissions.
 
 Watch local-work grants continue excluding commit, push, and publication.
-Watch-triggered Flow descendants keep that restriction. Supporting watch
-publication remains ADR-0053 work and is not enabled by this decision.
+Watch-triggered Flow descendants keep that restriction. The separately delivered
+recorded-grant task publication path requires explicit activation and review;
+this decision does not grant publication authority.
 
 Configure finite maximum depth, total started turns, cumulative execution time,
 and execution concurrency per root request, with topic/global ceilings. Persist
@@ -186,6 +190,26 @@ enabled automatically by
 [bounded route slice](../routes.md) adds same-topic immediate routes, shared
 descendant budgets and an optional native MCP adapter. Broader operational
 discovery, general routes and budgets outside managed route roots remain pending. See the [implementation plan](../plans/adr-0054-agent-capabilities-and-continuations.md).
+
+### Completion recorded on 2026-11-07
+
+Milestone 4 is complete for `isolated`, `backing_git`, `task_review`, and
+recorded-grant `task_publication`; milestone 5 is complete for explicitly opt-in
+same-topic immediate routes and the optional native MCP adapter. Restart and
+duplicate-request acceptance (scenario 6) is also complete, including fresh-process
+recovery at thirteen continuation boundaries and around push and PR creation.
+The implementation plan records **1,778 passing Python tests** after the final
+claim-lock fix and acceptance expansion, with links to the supporting tests.
+This is recorded validation evidence, not a new test run for this documentation
+update.
+
+Task publication requires an explicitly activated human publication scope and a
+separate successful read-only `task_review` before terminal host-run publication;
+local-work watch grants do not authorize it. See [task publication](../task-publication.md).
+Completion of these supported subsets does not complete the broader ADR, enable
+production configuration, or authorize publication. General routes, broader
+operational discovery, budgets outside managed roots, and tag/release execution
+remain outside the delivered scope.
 
 ## References
 
