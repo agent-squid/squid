@@ -182,8 +182,10 @@ stronger mode enforcement requires an actual execution boundary.
 This ADR remains proposed. An opt-in [first CLI/HTTP slice](../continuations.md)
 implements one predeclared sequence of up to eight follow-on steps per human turn,
 enabled automatically by
-`worktree.enabled` without a separate continuation option; broader discovery, MCP, route and
-budget requirements remain pending. See the [implementation plan](../plans/adr-0054-agent-capabilities-and-continuations.md).
+`worktree.enabled` without a separate continuation option. An explicitly opt-in
+[bounded route slice](../routes.md) adds same-topic immediate routes, shared
+descendant budgets and an optional native MCP adapter. Broader operational
+discovery, general routes and budgets outside managed route roots remain pending. See the [implementation plan](../plans/adr-0054-agent-capabilities-and-continuations.md).
 
 ## References
 

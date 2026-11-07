@@ -1,6 +1,125 @@
 # Task workspaces and fix, review, revise and PR workflows
 
-Status: implementation proposal. Watch publication remains disabled.
+Status: stages 1–4 implemented. Task publication requires explicit human activation; stages 5–6 and live proof remain.
+
+The first increment records direct human continuation owners on credentials and
+every sequence step, preserving the originating request identity and digest.
+Acceptance, claim, dispatch and worker admission recheck provenance; changed,
+deleted or cancelled owners block future work. Missing legacy owner records
+fail closed. Existing bounded sequences inherit their original owner rather
+than gaining authority from generated prompts.
+
+Stage 1 now also records watch-run/grant and human-owned Flow proofs at launch.
+Validation binds watch identity, original grant instructions/audit, expiry,
+attempts, configured agents, Flow plan and canonical code-root scope. Revocation,
+cancellation and drift invalidate the saved proof; a watch-owned Flow cannot
+become human-owned by changing message provenance. The authenticated host
+execution-grant endpoint accepts an optional `publication` object containing
+`repository`, `remote`, `base_branch`, `push: true` and `pull_request: true`.
+It records the selected repository's Git identity, fetch/push URLs and original
+execution scope; later remote or scope drift blocks authorization. Existing
+grants migrate with no publication scope.
+
+Existing publication-intent grants remain inactive. Stage 4 requires fresh human
+activation before host publication. Stage 3 enables
+local watch and human Flow continuation successors with descendant settlement,
+budgets and task routing. Their owner records do not permit
+`backing_git` or expand the eight-step sequence budget.
+
+Stage 2 adds `task_workspaces` and immutable per-turn destination/scope records.
+Explicit chat requests can supply `task_workspace: {repository, base_ref}` to
+create a task from a committed base, or `task_id` to target an existing task for
+that turn. These are also accepted over realtime chat. Task creation does not
+select a workspace for unrelated later turns; persistent selection is stage 5.
+Task branches use `squid/task/<id>`, and the persistent worktrees retain their
+Git metadata. Worker editing directories remain branchless and snapshot the
+accumulated task edits, including when ordinary dirty-root tracking is off.
+
+PR-intent watch runs capture one issue identity per run and reuse that issue's
+task workspace. New tasks pin the configured remote-tracking base
+(`refs/remotes/<remote>/<base_branch>`); an unavailable remote base blocks
+creation rather than falling back to a local branch. Unsupported event data without an issue number or an explicit
+issue URL target blocks instead of batching unrelated work. Local-only watches
+retain their existing batching. Flow steps and local continuation steps inherit
+the saved task. `backing_git` is blocked for task sequences; publication uses stage 4's
+separate host-executed mode.
+
+Setup, admission, worker completion, cleanup and conflict promotion validate the
+persisted destination's repository/Git metadata, branch, pinned ancestry and
+captured scope. Missing or changed destinations block with recovery artifacts
+retained. Conflict resolution targets the retained integration worktree, records
+its task destination for the resolution turn and marks the task for renewed
+review. No automatic task-workspace deletion is introduced. Real local Git tests
+cover dirty backing exclusion, task-only sync, restart/conflict recovery,
+one-issue watch routing, continuation/Flow inheritance and unchanged main-chat
+sessions.
+
+Stage 3 connects local bounded descendants to watch settlement and durable Flow
+step completion. The existing continuation scheduler runs the saved steps; no
+second scheduler or automatic retry path is introduced. A watch retains its run
+and topic ownership until every descendant completes and syncs. Each entire
+sequence consumes one watch attempt/run; Flow members share the eight-follow-on
+reservation. Watch deadlines are pinned at claim to the earlier of grant expiry
+and the configured response timeout; children/retries receive only the remaining
+budget. Human Flow sequences share a saved deadline across their members.
+
+Watch/Flow successors allow only `isolated` mode. Original human/watch proofs
+are inherited and checked at acceptance, claim, dispatch and each worker launch,
+including retries. Pending human work preempts a future watch child. Cancellation,
+revocation, expiry, drift, failed or ambiguous descendants stop advancement and
+leave events pending. A local fix followed by a known descendant failure records
+a paused `partial` outcome; partial and ambiguous runs block automatic replay,
+even if the watch is resumed. Restart recovery never replays a possibly executed
+child. Native Flow scheduling cannot advance past unresolved descendants. Worker
+admission rechecks the owning durable Flow run and step before every launch,
+including fresh-session retries; cancelled or missing saved plans block queued
+execution. Native Flow
+completion and restart recovery also require persisted successful completion
+and sync evidence, using the same proof as watch-owned Flows. Partial CLI output,
+error events, sync conflicts or missing completion evidence do not release the
+next member. Worker failures are recorded before the terminal event, including
+sync failures after nonempty output.
+
+Regression coverage includes each authority boundary, cancellation before and
+after claim/launch, deadlines and attempt accounting, crash ambiguity, held watch
+settlement, Flow dependency ordering, and real Git task fix/review/revise routing
+with dirty/concurrent human files excluded.
+
+Stage 4 adds `task_review` and terminal host-executed `task_publication` steps.
+Direct human task requests can record publication scope through host-controlled
+HTTP before the agent starts; watch grants require explicit
+`enable_publication: true`. Older intent-only scopes and local-only grants stay
+inactive. Scope is bound to the human request, task destination, repository,
+remote URLs, base and agents. A separate read-only review approves an exact
+head/tree; edits or failed sync invalidate it. Publication in a non-final Flow
+member is rejected rather than preceding downstream review.
+
+The host persists intent/SHA before compare-and-set task ref promotion, an exact
+non-force branch push, and same-repository GitHub PR creation/update. It never
+switches the human branch, pushes tags/unrelated refs, merges or deploys. Partial
+commit/push/PR outcomes and existing PR identity survive failures. Startup only
+observes effects: it confirms matching refs/PRs and blocks unknown or conflicting
+outcomes without replay. Explicit host reconciliation can append fresh human
+authority while retaining the original intent. Failed/expired watches stay
+paused; reconciliation does not revive their grants. See
+[task-publication.md](../task-publication.md) for grant, review and recovery APIs.
+
+Real Git/local bare-remote and fake-GitHub tests cover exact diffs, dirty backing
+exclusion, separate worker review, quarantined review edits, single-issue watch
+settlement, activation, scope drift/revocation, commit/push/PR failure/crash
+boundaries, duplicate suppression, concurrent reconciliation, existing PR
+updates and unknown outcomes that must remain blocked. No external publication
+or live-model proof was run. Stages 5–6 below remain required.
+
+Recovery note: the Step 2 code was retained, but its scheduled turn hit the old
+600-second continuation cap and was recorded as failed. Revocation of that
+turn's credential caused its later outcome report to receive HTTP 403. The
+timeout fix uses the configured `agent.response_timeout` for continuations and
+matches result-credential lifetime to the launch deadline plus 60 seconds,
+retaining revocation on process exit. Reload the server after syncing this fix
+before running new workflow steps. The failed Step 2 record must not be rewritten
+as a successful execution or automatically replayed. Step 3 was requested
+separately; the failed sequence has not been resumed.
 
 ## Intended behavior
 

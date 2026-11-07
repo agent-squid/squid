@@ -10,8 +10,12 @@ grant and a running polling worker; a stopped worker returns
 Automatic local turns additionally require a distinct exact-watch execution
 grant, an explicitly selected configured agent, instructions, finite run/attempt
 limits, and execution enablement in effective global/topic policy. Observation
-authority never authorizes a model turn. Publication, external mutation grants,
-deadlines, and dedicated PR semantics remain unavailable.
+authority never authorizes a model turn. Bounded isolated successors share the
+run's attempt budget and saved deadline; settlement waits for all descendants.
+Task publication requires an explicitly activated human scope, an exact-tree
+review and a terminal host publication step. Existing intent-only scopes remain
+inactive. See [task-publication.md](task-publication.md). Other external mutations
+remain unsupported.
 
 ## Host policy
 
@@ -373,7 +377,9 @@ does not change the topic's human-selected sticky agent or last prompt.
 Immediately before execution, the ordinary topic worker rechecks grant, policy,
 agent/root identity, expiry, budget, and pending user work, then refreshes the
 registered source. Refresh failures pause before model execution. A closed
-source stops the watch without running a model. Fresh data is bounded and
+source stops the watch without running a model.
+Fresh-session retries also recheck current watch authority without consuming a
+second run-budget slot. Fresh data is bounded and
 explicitly marked if truncated; source-specific stale-head handling belongs to
 the future dedicated PR adapter. Refresh does not acknowledge newer events or
 advance the polling cursor outside its durable ingestion transaction.

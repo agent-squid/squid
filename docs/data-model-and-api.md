@@ -1150,7 +1150,8 @@ credential, issuing assistant message ID, expiry and revocation),
 and reason), and `continuations` (unique parent message, request key, prompt,
 mode, topic/agent, state/reason, unique child message and creation time).
 A state/creation index supports scheduler polling. Completion evidence is
-written only for turns linked to a continuation. There is no schema rewrite of
+written for turns linked to a continuation, accepted route request or managed
+route membership. There is no schema rewrite of
 existing Flow or watch tables.
 
 The issuing instance exposes `POST /continuations` (create),
@@ -1176,3 +1177,87 @@ Continuation lifecycle errors use stable codes: `parent_not_running` and
 continuation ID returns `continuation_not_found` (404). Invalid JSON, including
 excessive nesting, returns `invalid_continuation_request` (400). Provider or
 arbitrary exception details are never returned.
+
+Continuation initialization also installs idempotent INSERT/UPDATE triggers
+that append `continuation.changed` rows to `realtime_events` in the mutation's
+transaction. Updates emit only when state, reason, child linkage, cancellation
+flag or reported result changes. Each event is scoped by topic/agent with
+`msg_id` set to the parent assistant ID. Payload fields are `id`, `parent_id`,
+`origin_parent_id` (root parent), `child_id`, `mode`, `state`, `reason`,
+`cancel_requested`, and `result_success`. Prompts, credentials and repository
+scope are excluded. Existing records are not backfilled with synthetic events;
+CLI/HTTP inspection remains the source for initial state. Continuation-owned
+transactions notify realtime readers only after commit; every writer's events
+remain available through normal durable replay.
+Notification failures are logged without failing the committed continuation
+operation. In particular, a failed wake-up cannot strand a successful claim
+before dispatch or report an accepted create as rejected.
+
+A BEFORE DELETE trigger on `chat_messages` freezes unfinished sequences linked through
+the removed parent, child, root parent, or either turn's request. It sets cancellation
+and clears the saved remaining plan in the same transaction as deletion.
+Waiting/eligible work becomes cancelled; claimed/running work becomes ambiguous
+with `history_deleted`. Terminal states/reasons remain intact, and continuation
+records retain their original message IDs for audit and stop cleanup. The
+existing lifecycle triggers append these changes to the outbox atomically.
+Fully terminal sequences remain unchanged, including their aggregate outcome.
+Initialization replaces older history-deletion trigger definitions within the
+schema transaction so existing databases receive these rules.
+
+
+## Bounded route exposure (ADR-0054 milestone 5)
+
+See [routes](routes.md) for the supported subset and opt-in policy. Shared database
+initialization idempotently adds four tables; existing records need no backfill:
+
+- `route_roots`: original assistant ID, topic, immutable original owner proof,
+  saved finite limits, and aggregate declared-turn reservations.
+- `route_requests`: durable route/Flow ID, unique issuing assistant ID, root ID,
+  depth, canonical request payload, inherited proof, participant scopes/runtime
+  revisions, state/reason and creation time.
+- `route_turns`: unique prepared assistant ID, shared root ID, depth and charge key.
+- `route_charges`: unique Flow/continuation step key, root ID, reserved execution
+  seconds, original reservation time and active concurrency flag.
+
+The request, root reservations and full existing `flow_runs`/`flow_steps` DAG
+commit in one `BEGIN IMMEDIATE` transaction. Flow claim transactions reserve time
+and concurrency; message linkage transactions attach the member to its root.
+Continuation creation/link/claim use the same root and charges. Unknown starts
+retain their charges. A history-deletion trigger freezes route requests;
+maintenance cascades that freeze through Flow and continuation lifecycles.
+
+`GET /capabilities` returns the version-1 shared operation catalog, captured
+turn scope, effective route limits/budgets and supported/enabled/executable
+states. Route endpoints use the existing continuation bearer credential:
+
+| Method/path | Input | Result |
+| --- | --- | --- |
+| `POST /routes/validate` | `{route}` | canonical route, compiled plan and effective availability |
+| `POST /routes` | `{request_key,route,prompt}` | durable ID, parent/root/depth and waiting state |
+| `GET /routes` | none | latest 100 routes in the issuing topic |
+| `GET /routes/{id}` | none | topic-scoped status |
+| `POST /routes/{id}/cancel` | none | persisted cancellation followed by existing stop controls |
+
+Unsupported or malformed routes return 400; idempotency conflicts and exhausted
+turn/depth reservations return 409; other-topic or absent IDs return 404; invalid
+credentials, disabled launch or unsupported authority return 403. Bodies over
+64 KiB are rejected. Caller-supplied identity, scope, budget or grant fields are
+rejected. `route_requests.state` is waiting, active, completed, failed, blocked,
+cancelled or ambiguous; uncertain individual starts are terminal Flow errors
+and are never replayed. Flow step transcript/realtime output remains the member
+execution record. Status responses exclude generated prompts and authority data.
+
+`agent.shared_tools` defines operation schemas and instance-explicit HTTP
+transport for route CLI and optional native stdio MCP. Continuation tools use
+the same existing endpoints. This adds no required MCP dependency and changes
+no persistent harness settings.
+
+
+Continuation claims perform local Git identity preflight without a write
+transaction, then atomically repeat authorization and reserve/claim under
+`BEGIN IMMEDIATE`. `agent.admission_reads` scopes captured Git results to one
+candidate; no new schema or persisted authorization cache is introduced.
+A changed set of required Git reads leaves the candidate eligible for a fresh
+scan. Revocation, cancellation, expiry, parent state and budgets are checked
+against current database state inside the write transaction. Execution and
+publication effects do not reuse admission observations.
