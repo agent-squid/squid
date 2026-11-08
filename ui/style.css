@@ -1040,6 +1040,8 @@ body {
 .ctx-popup-row { display: flex; gap: 0.5rem; align-items: baseline; padding: 0.1rem 0; }
 .ctx-popup-key { color: var(--text-dim); flex-shrink: 0; }
 .ctx-popup-val { color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-popup-instruction-links { display: flex; flex-wrap: wrap; gap: 0.1rem 0.5rem; min-width: 0; }
+.ctx-popup-instruction-links a { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .ctx-popup-divider { border-top: 1px solid #2a2a3a; margin: 0.3rem 0; }
 .ctx-popup-pin { display: flex; gap: 0.4rem; padding: 0.1rem 0; align-items: baseline; cursor: pointer; }
 .ctx-popup-pin:hover .ctx-popup-preview { color: var(--text-muted); }

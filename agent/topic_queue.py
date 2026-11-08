@@ -756,9 +756,12 @@ class TopicWorker:
                     kw['response_timeout'], item.watch_run_id, now)
             # Record after cancellation/timeout checks, immediately before the
             # attempt. Fresh retries get their own source delivery snapshot.
-            if delivery is not None and item.msg_id is not None:
-                insert_run_event(item.msg_id, run_seq, 'context', json.dumps(delivery))
-                run_seq += 1
+            async def record_launch_tools(tools):
+                nonlocal run_seq
+                if delivery is not None and item.msg_id is not None:
+                    delivery['tools'] = tools
+                    insert_run_event(item.msg_id, run_seq, 'context', json.dumps(delivery))
+                    run_seq += 1
             from .watch_launch import run as run_with_watch_credentials
             from contextlib import aclosing
             async with aclosing(run_with_watch_credentials(
@@ -766,6 +769,7 @@ class TopicWorker:
                 persistent=not item.native_shell and effective_protocol(resolved, adhoc=item.adhoc) != "oneshot-cli",
                 shell=item.native_shell,
                 continuation_scope=execution_scope,
+                on_launch=record_launch_tools,
                 request_text=item.display_prompt if item.display_prompt is not None else item.prompt,
                 **kw,
             )) as stream:

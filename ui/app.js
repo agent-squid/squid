@@ -16026,7 +16026,7 @@ async function loadCtxSources(popup, spanEl, msgId) {
     if (popup._forSpanEl !== spanEl || !section?.isConnected) return;
     const attempts = data.attempts?.length ? data.attempts : [data];
     for (const [index, attempt] of attempts.entries()) {
-      if (!attempt.sources?.length && !attempt.instructions?.length) continue;
+      if (!attempt.sources?.length && !attempt.instructions?.length && !attempt.tools) continue;
       const divider = document.createElement('div');
       divider.className = 'ctx-popup-divider';
       section.appendChild(divider);
@@ -16047,12 +16047,53 @@ async function loadCtxSources(popup, spanEl, msgId) {
         });
         section.appendChild(row);
       }
-      for (const instruction of attempt.instructions || []) {
+      if (attempt.tools) {
         const row = document.createElement('div');
-        row.className = 'ctx-popup-row ctx-popup-jump-row';
-        row.innerHTML = `<span class="ctx-popup-key">instructions</span><span class="ctx-popup-val ctx-popup-link">${escapeHtml(instruction.source)} · ${escapeHtml(instruction.delivery)}</span>`;
-        row.querySelector('.ctx-popup-link').title = `${instruction.source} · ${instruction.delivery}`;
-        row.querySelector('.ctx-popup-link').addEventListener('click', () => {
+        row.className = 'ctx-popup-row';
+        row.innerHTML = '<span class="ctx-popup-key">tools</span>';
+        const link = document.createElement('a');
+        link.className = 'ctx-popup-link';
+        link.href = '#';
+        link.textContent = 'Squid';
+        link.addEventListener('click', event => {
+          event.preventDefault();
+          _closeCtxPopup(popup);
+          document.getElementById('msg-modal-title').textContent = 'Squid tools · CLI';
+          const pre = document.createElement('pre');
+          pre.className = 'trace-tool-pre';
+          const tools = attempt.tools;
+          const entries = (tools.operations || []).map(tool =>
+            `${tool.name}\nSquid turn-scoped ${tool.name.replaceAll('_', ' ')}\n${JSON.stringify(tool.input_schema, null, 2)}`);
+          pre.textContent = [
+            'Available through agentsquid CLI commands at launch. MCP is an optional adapter; its connection is not recorded here.',
+            'Tool availability does not grant permission to execute every operation.',
+            ...entries,
+            ...(tools.watch_operations?.length ? ['Watch operations: ' + tools.watch_operations.join(', ')] : []),
+            ...(!entries.length && !tools.watch_operations?.length ? ['No Squid tools exposed for this launch.'] : []),
+          ].join('\n\n');
+          document.getElementById('msg-modal-body').replaceChildren(pre);
+          document.getElementById('msg-modal').classList.add('open');
+        });
+        row.appendChild(link);
+        section.appendChild(row);
+      }
+      const instructions = attempt.instructions || [];
+      let instructionLinks;
+      if (instructions.length) {
+        const row = document.createElement('div');
+        row.className = 'ctx-popup-row';
+        row.innerHTML = '<span class="ctx-popup-key">instructions</span><span class="ctx-popup-instruction-links"></span>';
+        instructionLinks = row.querySelector('.ctx-popup-instruction-links');
+        section.appendChild(row);
+      }
+      for (const instruction of instructions) {
+        const link = document.createElement('a');
+        link.className = 'ctx-popup-link';
+        link.href = '#';
+        link.textContent = instruction.source.split('/').pop().replace(/\.md$/i, '');
+        link.title = `${instruction.source} · ${instruction.delivery}`;
+        link.addEventListener('click', (event) => {
+          event.preventDefault();
           _closeCtxPopup(popup);
           const modal = document.getElementById('msg-modal');
           document.getElementById('msg-modal-title').textContent = instruction.source;
@@ -16063,7 +16104,7 @@ async function loadCtxSources(popup, spanEl, msgId) {
           body.replaceChildren(pre);
           modal.classList.add('open');
         });
-        section.appendChild(row);
+        instructionLinks.appendChild(link);
       }
     }
     _positionCtxPopupNearAnchor(popup, spanEl);

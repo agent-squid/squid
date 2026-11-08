@@ -508,3 +508,39 @@ async def test_monitor_snapshot_rejects_invalid_message_ids(setup, value):
     async with client(app, token) as c:
         response = await c.get('/watch-status', params={'include_messages': value})
         assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_launch_tool_snapshot_matches_watch_scope_and_revokes_on_record_failure(setup, monkeypatch):
+    from agent import continuations
+    _, service, _, _, _ = setup
+    monkeypatch.setattr(watch_launch, '_service', service)
+    monkeypatch.setattr(watch_launch, '_api_url', 'http://127.0.0.1:1234')
+    monkeypatch.setattr(continuations, 'mint', lambda *args: None)
+    snapshots = []
+    tokens = []
+    original_mint = WatchControl.mint
+
+    def mint(self, **kwargs):
+        token = original_mint(self, **kwargs)
+        tokens.append(token)
+        return token
+
+    monkeypatch.setattr(WatchControl, 'mint', mint)
+
+    async def record(tools):
+        snapshots.append(tools)
+        raise RuntimeError('snapshot write failed')
+
+    async def runner(*args, **kwargs):
+        pytest.fail('Runner must not start without a recorded snapshot')
+        yield
+
+    with pytest.raises(RuntimeError, match='snapshot write failed'):
+        async for _ in watch_launch.run(runner, '/test', topic='squid', on_launch=record):
+            pass
+    assert snapshots[0]['operations'] == []
+    assert snapshots[0]['watch_operations'] == sorted(service.configuration.effective_policy('squid').operations)
+    assert len(tokens) == 1
+    with pytest.raises(WatchDenied):
+        service.discover(tokens[0])

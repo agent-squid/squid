@@ -28,7 +28,7 @@ def configure(service, api_url=None):
     continuation_owners.configure(service)
 
 
-async def run(runner, prompt, *, persistent=False, shell=False, request_text=None, continuation_scope=None, **kwargs):
+async def run(runner, prompt, *, persistent=False, shell=False, request_text=None, continuation_scope=None, on_launch=None, **kwargs):
     service = _service
     turn = None
     continuation_token = None
@@ -84,6 +84,13 @@ async def run(runner, prompt, *, persistent=False, shell=False, request_text=Non
             if not executable.is_file():
                 executable = Path(shutil.which('agentsquid') or executable)
             env['PATH'] = str(executable.parent) + os.pathsep + (env.get('PATH') or os.environ.get('PATH', ''))
+        if on_launch is not None:
+            from .shared_tools import catalog
+            await on_launch(dict(
+                transport='cli',
+                operations=catalog() if continuation_token else [],
+                watch_operations=sorted(policy.operations) if turn else [],
+            ))
         kwargs['backend_env'] = env
         async with aclosing(runner(prompt, **kwargs)) as stream:
             async for chunk in stream:

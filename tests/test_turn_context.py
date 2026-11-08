@@ -167,3 +167,29 @@ def test_flow_sources_are_references_until_missing(tmp_path, monkeypatch):
     prompt = flow.chain_handoff_prompt(route, 'codex', 'review', False, 'Review the implementation', user)
     assert 'Review the implementation' not in prompt
     assert f'message #{user}' in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('available', [False, True])
+async def test_launch_records_actual_cli_tool_exposure_before_runner(monkeypatch, available):
+    from agent import watch_launch, continuations, shared_tools
+    monkeypatch.setattr(watch_launch, '_service', None)
+    monkeypatch.setattr(watch_launch, '_api_url', 'http://127.0.0.1:8000' if available else None)
+    monkeypatch.setattr(continuations, 'mint', lambda *args: 'secret-token')
+    monkeypatch.setattr(continuations, 'revoke', lambda *args: None)
+    snapshots = []
+
+    async def record(tools):
+        snapshots.append(tools)
+
+    async def runner(prompt, **kwargs):
+        assert len(snapshots) == 1
+        assert bool(kwargs['backend_env']['SQUID_CONTINUE_TOKEN']) == available
+        yield 'done'
+
+    chunks = [chunk async for chunk in watch_launch.run(
+        runner, '/test', topic='test', msg_id=1, on_launch=record)]
+    assert chunks == ['done']
+    assert snapshots[0]['transport'] == 'cli'
+    assert snapshots[0]['operations'] == (shared_tools.catalog() if available else [])
+    assert 'secret-token' not in json.dumps(snapshots)
