@@ -14,11 +14,50 @@ need_version() {
   local cmd=$1 maj=$2 min=$3 flag=${4:---version}
   if ! command -v "$cmd" &>/dev/null; then return 1; fi
   local raw
-  raw=$("$cmd" $flag 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
-  local vmaj vmin
-  vmaj=$(echo "$raw" | cut -d. -f1)
-  vmin=$(echo "$raw" | cut -d. -f2)
+  raw=$("$cmd" "$flag" 2>/dev/null) || return 1
+  [[ "$raw" =~ ^Python\ ([0-9]+)\.([0-9]+) ]] || return 1
+  local vmaj=${BASH_REMATCH[1]} vmin=${BASH_REMATCH[2]}
   [[ "$vmaj" -gt "$maj" ]] || ( [[ "$vmaj" -eq "$maj" ]] && [[ "$vmin" -ge "$min" ]] )
+}
+
+# Only a terminal may authorize downloads. EOF is a decline, even though
+# pressing Enter explicitly accepts the default.
+confirm() {
+  local answer
+  [[ -t 0 ]] || return 1
+  read -r -p "  $1 [Y/n] " answer || return 1
+  case "$answer" in
+    ""|y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_python() {
+  local installer candidate
+  if [[ -z "$UV" ]]; then
+    confirm "Install uv and Python 3.13 for Squid?" || return 1
+    installer=$(mktemp -t squid-uv-install.XXXXXX) || return 1
+    # Download first so a failed transfer cannot execute a partial script.
+    if ! curl -LsSf https://astral.sh/uv/install.sh -o "$installer"; then
+      rm -f "$installer"
+      return 1
+    fi
+    # Keep the executable location predictable and leave shell profiles alone.
+    if ! env UV_INSTALL_DIR="$HOME/.local/bin" UV_NO_MODIFY_PATH=1 sh "$installer"; then
+      rm -f "$installer"
+      return 1
+    fi
+    rm -f "$installer"
+    [[ -x "$HOME/.local/bin/uv" ]] || return 1
+    UV="$HOME/.local/bin/uv"
+  else
+    confirm "Install Python 3.13 with uv and continue?" || return 1
+  fi
+  "$UV" python install 3.13 || return 1
+  candidate=$("$UV" python find --system --no-python-downloads 3.13) || return 1
+  need_version "$candidate" 3 10 || return 1
+  PYTHON=$candidate
+  ok "Python ready: $PYTHON"
 }
 
 ERRORS=0
@@ -119,20 +158,55 @@ fi
 echo ""
 
 PYTHON=""
-for candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
+for candidate in "$SQUID_DIR/.venv/bin/python" python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do
   if need_version "$candidate" 3 10 "--version"; then
     PYTHON=$candidate
     break
   fi
 done
 
+# uv-managed interpreters need not be on PATH. Do not download anything during
+# detection; downloads require confirmation below.
+UV=""
+if command -v uv &>/dev/null; then
+  UV=$(command -v uv)
+elif [[ -x "$HOME/.local/bin/uv" ]]; then
+  UV="$HOME/.local/bin/uv"
+fi
+if [[ -z "$PYTHON" && -n "$UV" ]]; then
+  candidate=$("$UV" python find --system --no-python-downloads '>=3.10' 2>/dev/null || true)
+  if [[ -n "$candidate" ]] && need_version "$candidate" 3 10; then
+    PYTHON=$candidate
+  fi
+fi
+
 if [[ -z "$PYTHON" ]]; then
-  fail "Python >= 3.10 not found — brew install python@3.13"
+  warn "Squid needs Python 3.10 or newer. No compatible Python was found."
+  for candidate in python3 python; do
+    if command -v "$candidate" &>/dev/null; then
+      warn "Found $candidate at $(command -v "$candidate"): $("$candidate" --version 2>&1 || true)"
+    fi
+  done
+  install_python || true
+fi
+
+if [[ -z "$PYTHON" ]]; then
+  fail "A compatible Python is still needed to install Squid."
+  echo ""
+  echo "  Recommended: install Python 3.13 with uv (leaves system Python unchanged)."
+  if [[ -z "$UV" ]]; then
+    echo "    curl -LsSf https://astral.sh/uv/install.sh | sh"
+    echo '    "$HOME/.local/bin/uv" python install 3.13'
+  else
+    printf '    %q python install 3.13\n' "$UV"
+  fi
+  printf '  Then re-run: bash %q\n' "$SQUID_DIR/bin/install.sh"
+  echo "  Python setup help: https://docs.astral.sh/uv/guides/install-python/"
   mark_error
 else
   VENV_DIR="$SQUID_DIR/.venv"
-  if [[ -x "$VENV_DIR/bin/python" ]] && ! need_version "$VENV_DIR/bin/python" 3 10 "--version"; then
-    warn "existing virtualenv uses Python < 3.10 — recreating it with $PYTHON"
+  if [[ -d "$VENV_DIR" ]] && ! need_version "$VENV_DIR/bin/python" 3 10 "--version"; then
+    warn "existing virtualenv has missing or incompatible Python — recreating it with $PYTHON"
     rm -rf "$VENV_DIR"
   fi
   [[ -x "$VENV_DIR/bin/python" ]] || run_quiet "create Python virtualenv" "$PYTHON" -m venv "$VENV_DIR"
@@ -156,7 +230,7 @@ fi
 # ── result ───────────────────────────────────────────────────────────────────
 echo ""
 if [[ $ERRORS -gt 0 ]]; then
-  fail "${ERRORS} prerequisite(s) missing — fix the errors above, then re-run ./install.sh"
+  fail "${ERRORS} prerequisite(s) missing — fix the errors above, then re-run bin/install.sh"
   exit 1
 else
   USER_CONFIG="$HOME/.squid/squid.yaml"
@@ -164,7 +238,7 @@ else
   # Configure tailscale serve now (not just on first start) so the URLs are
   # visible immediately after install, same block bin/start.sh runs on every
   # start — see that file for why the rules exist and how they're checked.
-  source "$SQUID_DIR/bin/tailscale-serve.sh"
+  PATH="$VENV_DIR/bin:$PATH" source "$SQUID_DIR/bin/tailscale-serve.sh"
   echo -e "  ${BOLD}Start:${RESET}  bin/start.sh"
   echo -e "  ${BOLD}Open:${RESET}   http://127.0.0.1:${PORT}"
   echo ""
