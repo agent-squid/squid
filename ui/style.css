@@ -2873,6 +2873,22 @@ body {
   font-size: var(--text-xs);
 }
 .fv-upload-status[hidden] { display: none; }
+.fv-upload-status.fv-uploading { color: var(--text); }
+.fv-upload-status.fv-uploading::before {
+  content: '';
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-right: 0.5em;
+  border: 2px solid var(--border);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: fv-upload-spin 0.8s linear infinite;
+}
+.fv-action-btn.fv-uploading .material-symbols-outlined {
+  animation: fv-upload-spin 0.8s linear infinite;
+}
+@keyframes fv-upload-spin { to { transform: rotate(360deg); } }
 #file-modal-body.fv-drop-active {
   background: rgba(255,255,255,0.035);
   box-shadow: inset 0 0 0 1px rgba(255,255,255,0.14);

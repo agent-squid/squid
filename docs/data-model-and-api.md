@@ -4,7 +4,7 @@
 
 | Term | Meaning |
 |---|---|
-| **harness** | The coded coding-agent CLI integration: `claudecode`, `codex`, `cursor`, `opencode`, or `pi`. A harness owns command construction, supported protocols, parsing, resume behavior, and token semantics. |
+| **harness** | The coded coding-agent CLI integration: `claudecode`, `codex`, `cursor`, `opencode`, `pi`, or `antigravity` (`agy`). A harness owns command construction, supported protocols, parsing, resume behavior, and token semantics. |
 | **provider** | A model endpoint/account: label, color, base URL, auth/API key, quota gauge, model suggestions, and env/settings/args escapes. |
 | **agent** | A named execution identity: harness, provider, model override, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
 | **topic** | A named conversation/work thread (e.g. `oncall`, `squid`). Each topic has a sticky agent and zero or more sessions and adhoc turns from multiple agents. |
@@ -740,7 +740,7 @@ Returns all active `topic_sessions` rows for an agent, across topics.
 [
   {
     "name":       "string",
-    "harness":    "claudecode | codex | cursor | opencode | pi",
+    "harness":    "claudecode | codex | cursor | opencode | pi | antigravity",
     "provider":   "provider ID | null",
     "provider_label": "string",
     "provider_color": "#RRGGBB",
@@ -763,7 +763,7 @@ identity used in `#topic@agent`: harness, provider, model override, cwd, and tim
 ```json
 {
   "name":     "string (required)",
-  "harness":  "claudecode | codex | cursor | opencode | pi",
+  "harness":  "claudecode | codex | cursor | opencode | pi | antigravity",
   "provider": "provider ID | null",
   "model":    "string | null",
   "cwd":      "string | null  — abs path; null = /tmp/<user>/squid",

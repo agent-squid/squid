@@ -254,6 +254,14 @@ test('codex quota transient error recovers without page refresh', async ({ page 
     };
   });
   await page.goto('/');
+  await page.waitForFunction(() => typeof setVisibleQuotaBackend === 'function');
+  await page.evaluate(async () => {
+    await bootBannerSettled;
+    const state = quotaStateFor('openai');
+    if (state.inFlight) await state.requestDone;
+    clearQuotaRetry(state);
+    window.__quotaTimerCallbacks.length = 0;
+  });
   quotaCalls = 0;
   const result = await page.evaluate(async () => {
     setVisibleQuotaBackend('openai');
@@ -986,4 +994,141 @@ test('Antigravity refresh uses the selected provider and waits for fresh quota',
     await Promise.all([poll, fetchQuotaForBackend('custom-agy'), fetchQuotaForBackend('custom-agy')]);
   });
   expect(requests).toBe(beforePoll + 1);
+});
+
+for (const baseline of [null, 40]) {
+  test(`Antigravity reads quota only after completion and uses the last check (${baseline})`, async ({ page }) => {
+    await mockShell(page);
+    await page.route('**/config/realtime', r => r.fulfill({ json: { transport: 'sse' } }));
+    await page.route('**/quota/provider/anthropic', r => r.fulfill({ json: { status: 'ok', raw: 10, used_percent: 10 } }));
+    let quotaReads = 0;
+    await page.route('**/quota/provider/custom-agy', r => {
+      quotaReads++;
+      return r.fulfill({ json: { status: 'ok', raw: 42, used_percent: 42 } });
+    });
+    const deltas = [];
+    await page.route('**/chat/*/quota-delta', r => {
+      deltas.push(r.request().postDataJSON());
+      return r.fulfill({ json: { ok: true } });
+    });
+    await page.route('**/stats/quota-delta', r => r.fulfill({ json: { ok: true } }));
+    let finish;
+    let started = false;
+    await page.route('**/chat', async r => {
+      started = true;
+      await new Promise(resolve => { finish = resolve; });
+      await r.fulfill({ contentType: 'text/event-stream', body:
+        'event: meta\ndata: {"agent":"agy","provider":"custom-agy","harness":"antigravity","msg_id":10}\n\n' +
+        'data: Done\n\nevent: stats\ndata: {"session_id":"agy-session","input_tokens":20,"output_tokens":5}\n\n' +
+        'event: done\ndata: \n\n' });
+    });
+    await page.goto('/');
+    await page.evaluate(async () => { await bootBannerSettled; });
+    await page.evaluate(value => {
+      resolveActiveQuotaBackend = async () => 'anthropic';
+      _providerMetadata['custom-agy'] = { label: 'AGY', gauge: { type: 'antigravity' } };
+      resolveQuotaProvider = async () => 'custom-agy';
+      quotaStateFor('custom-agy').raw = value;
+      quotaStateFor('custom-agy').readingKey = JSON.stringify([null]);
+    }, baseline);
+    await page.fill('#input', 'hello');
+    await page.locator('#input').press('Enter');
+    await expect.poll(() => started).toBe(true);
+    expect(quotaReads).toBe(0);
+    if (baseline !== null) await page.evaluate(() => { quotaStateFor('custom-agy').raw = 41; });
+    finish();
+    await expect.poll(() => quotaReads).toBe(1);
+    await expect.poll(() => page.evaluate(() => quotaStateFor('custom-agy').activeCount)).toBe(0);
+    if (baseline === null) {
+      expect(deltas).toEqual([]);
+    } else {
+      expect(deltas).toEqual([{ before: 41, after: 42 }]);
+      await expect(page.locator('.stats-quota-delta').last()).toHaveAttribute('title', /Change since last check/);
+    }
+  });
+}
+
+test('Antigravity baselines survive errors and rebase bucket switches and resets', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/quota/provider/*', r => r.fulfill({ json: { status: 'ok', raw: 10, used_percent: 10 } }));
+  await page.goto('/');
+  await page.evaluate(async () => { await bootBannerSettled; });
+  await page.evaluate(() => {
+    _providerMetadata['custom-agy'] = { label: 'AGY', gauge: { type: 'antigravity' } };
+  });
+  let payload;
+  let fail = false;
+  await page.route('**/quota/provider/custom-agy', async r => {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    return fail ? r.fulfill({ status: 502 }) : r.fulfill({ json: payload });
+  });
+  const reading = (used, group = 'Gemini', reset = '2026-11-15T00:00:00Z') => ({
+    status: 'ok', raw: used, used_percent: used, reset_at: reset,
+    buckets: [{ group, window: 'weekly', used_percent: used, reset_at: reset }],
+  });
+  const fetchReading = () => page.evaluate(async () => {
+    const result = await fetchQuotaForBackend('custom-agy', true);
+    return result && { raw: result.raw, previousRaw: result.previousRaw };
+  });
+  payload = reading(40);
+  expect(await fetchReading()).toEqual({ raw: 40, previousRaw: null });
+  fail = true;
+  expect(await fetchReading()).toBeNull();
+  fail = false;
+  for (const invalid of [{ status: 'ok' }, { status: 'error', raw: 0 },
+                         { status: 'ok', raw: '42' }, { status: 'ok', raw: 101 }]) {
+    payload = invalid;
+    expect(await fetchReading()).toBeNull();
+  }
+  payload = reading(42);
+  expect(await fetchReading()).toEqual({ raw: 42, previousRaw: 40 });
+  payload = reading(50, 'Claude');
+  expect(await fetchReading()).toEqual({ raw: 50, previousRaw: null });
+  payload = reading(2, 'Claude', '2026-11-22T00:00:00Z');
+  expect(await fetchReading()).toEqual({ raw: 2, previousRaw: null });
+  payload = reading(1, 'Claude', '2026-11-22T00:00:00Z');
+  expect(await fetchReading()).toEqual({ raw: 1, previousRaw: null });
+  payload = reading(3, 'Claude', '2026-11-22T00:00:00Z');
+  const results = await page.evaluate(async () => {
+    return (await Promise.all([
+      fetchQuotaForBackend('custom-agy', true), fetchQuotaForBackend('custom-agy', true),
+    ])).map(r => ({ raw: r.raw, previousRaw: r.previousRaw }));
+  });
+  expect(results).toEqual([{ raw: 3, previousRaw: 1 }, { raw: 3, previousRaw: 3 }]);
+});
+
+test('discovered Antigravity completion refreshes once and local callbacks keep ownership', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/quota/provider/*', r => r.fulfill({ json: { status: 'ok', raw: 10, used_percent: 10 } }));
+  await page.route('**/chat/123/status', r => r.fulfill({ json: {
+    id: 123, role: 'assistant', topic: 'default', agent: 'agy', status: 'done', content: 'Done',
+  } }));
+  await page.goto('/');
+  await page.evaluate(async () => { await bootBannerSettled; });
+  let reads = 0;
+  await page.route('**/quota/provider/custom-agy', r => {
+    reads++;
+    return r.fulfill({ json: { status: 'ok', raw: 12, used_percent: 12 } });
+  });
+  await page.evaluate(async () => {
+    _providerMetadata['custom-agy'] = { label: 'AGY', gauge: { type: 'antigravity' } };
+    window.__providerLookups = 0;
+    resolveQuotaProvider = async () => ++window.__providerLookups === 1 ? 'custom-agy' : 'anthropic';
+    const item = { id: 123, topic: 'default', agent: 'agy', status: 'pending' };
+    await trackQuotaForPendingTurn(item.id, item.topic, item.agent);
+    const bubble = document.createElement('div');
+    document.getElementById('messages').appendChild(bubble);
+    await replacePendingWithStoredItem(item, bubble);
+    await replacePendingWithStoredItem(item, document.createElement('div'));
+  });
+  expect(reads).toBe(1);
+  expect(await page.evaluate(() => window.__providerLookups)).toBe(1);
+  await page.evaluate(async () => {
+    resolveQuotaProvider = async () => 'custom-agy';
+    const item = { id: 123, topic: 'default', agent: 'agy', status: 'pending' };
+    await trackQuotaForPendingTurn(item.id, item.topic, item.agent);
+    await replacePendingWithStoredItem(item, document.createElement('div'), () => {}, () => {});
+  });
+  expect(reads).toBe(1);
+  expect(await page.evaluate(() => quotaStateFor('custom-agy').activeCount)).toBe(0);
 });

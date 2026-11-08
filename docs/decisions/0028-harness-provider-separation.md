@@ -49,9 +49,9 @@ a named entity in favor of agents selecting harness + provider directly.
 
 The primary runtime term is `harness`: `agent/harnesses.py` owns the supported
 harness set, protocol defaults, install paths, install commands, default
-providers, and API compatibility metadata. Same five values, now spelled out
+providers, and API compatibility metadata. Harness IDs are spelled out
 instead of abbreviated in code (`claudecode`, `codex`, `cursor`, `opencode`,
-`pi`); the `cc`/`cx`/`cr`/`oc`/`pi` short forms from ADR-0027 remain an
+`pi`, `antigravity`); the `cc`/`cx`/`cr`/`oc`/`pi` short forms from ADR-0027 remain an
 ID-prefix convention (agent IDs, gauge labels), not the internal field value.
 Legacy `driver` names still exist in compatibility code while
 `agent/backends.py` and older API fields are being retired.
@@ -87,6 +87,7 @@ duplicated here:
 | Cursor | `cursor` | `cr` | oneshot-cli | Cursor |
 | OpenCode | `opencode` | `oc` | oneshot-cli | NVIDIA NIM (`nvidia`) |
 | Pi | `pi` | `pi` | oneshot-cli | NVIDIA NIM (`nvidia`) |
+| Antigravity | `antigravity` | `agy` | oneshot-cli | Antigravity (`antigravity`) |
 
 "Installed" reuses the existing `shutil.which()` check in `config.py`
 (`CLAUDE_PATH`, `CODEX_PATH`, ...) — no new detection mechanism. This is
@@ -150,7 +151,7 @@ provider, since they describe how to reach an endpoint, not which harness is
 asking.
 
 Squid ships only zero-config providers in code defaults
-(`anthropic`, `openai`, `cursor`, `opencode`). Providers requiring user
+(`anthropic`, `openai`, `cursor`, `opencode`, `antigravity`). Providers requiring user
 credentials, such as `nvidia` and `deepseek`, are documented in
 `config/squid.yaml.example` rather than auto-seeded for existing installs.
 `nvidia` is the canonical provider id for NVIDIA NIM because both Pi and
@@ -242,7 +243,7 @@ since a hosted catalog could later populate the same field.
   `config/squid.yaml.example` ships the new shape.
 - `providers:` is a new top-level config section. Loading uses
   `_configured_providers()` plus a zero-config default providers table
-  (`anthropic`, `openai`, `cursor`, `opencode`). API-key providers such as
+  (`anthropic`, `openai`, `cursor`, `opencode`, `antigravity`). API-key providers such as
   `nvidia` and `deepseek` live in `config/squid.yaml.example`.
 - `backends:` is removed from the primary config shape. New execution uses
   `agent/harnesses.py`, `agent/providers.py`, and `agent/resolve.py`; the

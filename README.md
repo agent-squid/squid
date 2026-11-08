@@ -253,7 +253,7 @@ FastAPI Squid server
               +-- ephemeral worker per adhoc ! turn
         |
         +-- local CLI subprocesses
-              claude / codex / cursor-agent / opencode / pi
+              claude / codex / cursor-agent / opencode / pi / agy
 ```
 
 The CLI owns the real conversation context. Squid stores history, stats, topics, active session IDs, cwd locks, and UI state needed to make the workflow manageable. Session turns use native resume. Adhoc turns build an explicit limited-context prompt, which makes the two modes easy to compare.

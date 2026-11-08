@@ -5787,11 +5787,11 @@ async function sendMessage(text, opts = {}) {
   let firstDataReceived = false;
 
   let quotaBackend = nativeShell ? null : await resolveQuotaProvider(topic, agent);
-  let quotaBeforeSnapshot = nativeShell ? null : await fetchQuotaForBackend(quotaBackend, true);
+  let quotaBeforeSnapshot = nativeShell || gaugeTypeFor(quotaBackend) === 'antigravity'
+    ? null : await fetchQuotaForBackend(quotaBackend, true);
   // fetchQuotaForBackend's null return conflates "this backend has no quota
-  // concept at all" with "the read failed" — resolve that once here (after
-  // fetchQuotaForBackend's own call already ensured quota metadata is
-  // loaded) so finalizeQuotaTracking's terminal-failure fallback only ever
+  // concept at all" with "the read failed". Provider resolution above
+  // ensures metadata is loaded, so the terminal-failure fallback only ever
   // fires for a backend that genuinely has a meter to report on.
   let quotaBackendHasConfig = !nativeShell && !!quotaBackend
     && !!quotaConfigFor(quotaStatusProviderKey(quotaBackend));
@@ -5836,6 +5836,11 @@ async function sendMessage(text, opts = {}) {
     // See ADR-0023.
     await new Promise(r => setTimeout(r, 1000));
     const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend, true);
+    const afterOnly = gaugeTypeFor(quotaBackend) === 'antigravity';
+    if (afterOnly) {
+      quotaBeforeSnapshot = quotaAfterSnapshot?.previousRaw == null
+        ? null : { raw: quotaAfterSnapshot.previousRaw };
+    }
     // Balance-based gauges (DeepSeek/Kimi) with a max budget: use the computed
     // percentage so the delta represents budget-% change, not raw dollars.
     const usePct = isBalanceGauge(quotaBackend)
@@ -5878,14 +5883,14 @@ async function sendMessage(text, opts = {}) {
       const deltaEl = footerEl?.querySelector('.stats-quota-delta');
       if (deltaEl && d > 0) {
         deltaEl.textContent = `  ·  +${d} pp`;
-        deltaEl.title = 'Observed account quota-meter change; not exact message usage';
+        deltaEl.title = 'Change since last check; shared account activity and reporting delays may affect this value';
       }
       // Persist the sign exactly as intended. The DB layer has no backend/gauge
       // context, so balance snapshots are normalized here instead.
       const recordQuotaBefore = isBalanceMeter && quotaBefore > quotaAfter ? quotaAfter : quotaBefore;
       const recordQuotaAfter = isBalanceMeter && quotaBefore > quotaAfter ? quotaBefore : quotaAfter;
       recordQuota(recordQuotaBefore, recordQuotaAfter);
-    } else if (terminalFailure && quotaBackendHasConfig && quotaBefore === null && quotaAfter === null) {
+    } else if (!afterOnly && terminalFailure && quotaBackendHasConfig && quotaBefore === null && quotaAfter === null) {
       // No meter reading at all — not "the after-read failed but we had a
       // real before" (that would discard real data, so record nothing
       // instead), and not "this backend has no quota concept" (recording a
@@ -8593,8 +8598,20 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, on
     refreshAllRevertButtons();
     if (isAtBottom()) scrollToBottom();
   } catch {} finally {
+    // Local WS sends already refresh through their completion callbacks.
+    // Discovered turns have no such owner now that agy active polling is off.
+    const trackedBackend = quotaTrackedMsgIds.get(Number(item.id));
+    const refreshDiscovered = !onStored && !onSettled
+      && item.source !== 'shell' && quotaTrackedMsgIds.has(Number(item.id));
     untrackQuotaForTurn(item.id);
     onSettled?.();
+    if (refreshDiscovered) {
+      try {
+        // Agent configuration can change while a discovered turn is running.
+        const backend = trackedBackend || await resolveQuotaProvider(item.topic, item.agent);
+        if (gaugeTypeFor(backend) === 'antigravity') await fetchQuotaForBackend(backend, true);
+      } catch { /* quota lookup must not fail completed-turn rendering */ }
+    }
   }
 }
 
@@ -9912,7 +9929,7 @@ function addStats(bubble, stats, timestamp) {
     : stats.quota_delta;
   if (msgQd != null && msgQd > 0) {
     qdSpan.textContent = `  ·  +${msgQd} pp`;
-    qdSpan.title = 'Observed account quota-meter change; not exact message usage';
+    qdSpan.title = 'Change since last check; shared account activity and reporting delays may affect this value';
   }
   el.appendChild(qdSpan);
 
@@ -10221,7 +10238,7 @@ function _startQuotaPoll() {
   if (quotaPollInterval) return;
   quotaPollInterval = setInterval(() => {
     for (const [backend, state] of Object.entries(quotaState)) {
-      if (state.activeCount > 0) fetchQuotaForBackend(backend);
+      if (state.activeCount > 0 && gaugeTypeFor(backend) !== 'antigravity') fetchQuotaForBackend(backend);
     }
   }, 30000);
 }
@@ -10573,6 +10590,11 @@ async function fetchQuotaForBackend(backend, requireFresh = false) {
       showQuotaError(provider, `${label} n/a`);
       return null;
     }
+    if (gaugeTypeFor(provider) === 'antigravity'
+        && (data.status !== 'ok' || !Number.isFinite(data.raw) || data.raw < 0 || data.raw > 100)) {
+      showTransientQuotaError(provider, `${label} invalid quota`);
+      return null;
+    }
     const resetAt = typeof data.reset_at === 'number'
       ? data.reset_at * 1000
       : (data.reset_at ? new Date(data.reset_at).getTime() : null);
@@ -10597,8 +10619,23 @@ async function fetchQuotaForBackend(backend, requireFresh = false) {
           : null,
       } : null,
     };
+    // Capture immediately before replacing the last successful reading. Fresh
+    // agy requests are serialized, so overlapping completions cannot reuse one
+    // stale baseline or attribute the same interval twice.
+    let previousRaw = state.raw;
+    if (gaugeTypeFor(provider) === 'antigravity') {
+      // The displayed maximum may switch model group/window. Compare only
+      // like-for-like readings within one reset period, and rebase decreases.
+      const limiting = (data.buckets || []).reduce((max, bucket) =>
+        !max || bucket.used_percent > max.used_percent ? bucket : max, null);
+      const readingKey = JSON.stringify(limiting
+        ? [limiting.group, limiting.window, limiting.reset_at]
+        : [resetAt]);
+      if (state.readingKey !== readingKey || snapshot.raw < previousRaw) previousRaw = null;
+      state.readingKey = readingKey;
+    }
     renderQuotaLoaded(provider, snapshot);
-    return { backend: provider, ...state };
+    return { backend: provider, ...state, previousRaw };
   } catch {
     showTransientQuotaError(provider, `${label} error`);
     return null;
@@ -18827,21 +18864,38 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   async function uploadLocalFiles(parentPath, files, setStatus) {
     const uploadFiles = Array.from(files || []).filter(file => file?.name);
     if (!uploadFiles.length) return [];
-    const uploadedPaths = [];
-    for (let i = 0; i < uploadFiles.length; i++) {
-      const file = uploadFiles[i];
-      setStatus?.(`Uploading ${i + 1}/${uploadFiles.length}: ${file.name}`);
-      const res = await fetch('/localfile/upload?' + new URLSearchParams({ parent: parentPath, name: file.name }), {
-        method: 'POST',
-        body: file,
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `Upload failed: ${file.name}`);
-      uploadedPaths.push(data.path);
+    if (uploadBtn.disabled) throw new Error('An upload is already in progress');
+    uploadBtn.disabled = true;
+    uploadBtn.classList.add('fv-uploading');
+    uploadBtn.setAttribute('aria-label', 'Uploading files');
+    uploadBtn.title = 'Uploading files…';
+    uploadBtn.innerHTML = fvIcon('progress_activity');
+    try {
+      const uploadedPaths = [];
+      for (let i = 0; i < uploadFiles.length; i++) {
+        const file = uploadFiles[i];
+        setStatus?.(`Uploading ${i + 1}/${uploadFiles.length}: ${file.name}`);
+        const res = await fetch('/localfile/upload?' + new URLSearchParams({ parent: parentPath, name: file.name }), {
+          method: 'POST',
+          body: file,
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `Upload failed: ${file.name}`);
+        uploadedPaths.push(data.path);
+      }
+      setStatus?.('Upload complete');
+      loadFile();
+      return uploadedPaths;
+    } catch (err) {
+      setStatus?.(err.message || 'Upload failed');
+      throw err;
+    } finally {
+      uploadBtn.disabled = false;
+      uploadBtn.classList.remove('fv-uploading');
+      uploadBtn.setAttribute('aria-label', 'Upload file');
+      uploadBtn.title = 'Upload file';
+      uploadBtn.innerHTML = FV_ICON_UPLOAD;
     }
-    setStatus?.('Upload complete');
-    loadFile();
-    return uploadedPaths;
   }
   async function uploadAndMaybePick(parentPath, files, setStatus) {
     const uploadedPaths = await uploadLocalFiles(parentPath, files, setStatus);
@@ -18858,7 +18912,6 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   uploadBtn.addEventListener('click', () => uploadInput.click());
   uploadInput.addEventListener('change', async () => {
     if (pathKind !== 'directory' || !uploadInput.files?.length) return;
-    uploadBtn.disabled = true;
     try {
       await uploadAndMaybePick(path, uploadInput.files, setDirUploadStatus);
     } catch (err) {
@@ -19512,6 +19565,7 @@ function _renderDirListing(container, data, opts = {}) {
   const uploadStatus = document.createElement('div');
   uploadStatus.className = 'fv-upload-status';
   uploadStatus.hidden = true;
+  uploadStatus.setAttribute('role', 'status');
   filterWrap.appendChild(uploadStatus);
   container.appendChild(filterWrap);
 
@@ -19521,6 +19575,7 @@ function _renderDirListing(container, data, opts = {}) {
 
   const hasMeta = data.entries.some(e => e.size != null || e.mtime != null);
   const setUploadStatus = text => {
+    uploadStatus.classList.toggle('fv-uploading', !!text?.startsWith('Uploading '));
     uploadStatus.textContent = text || '';
     uploadStatus.hidden = !text;
   };

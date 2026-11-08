@@ -68,14 +68,16 @@ in the agent-creation UI):
 | Cursor (`cursor`)          | `--resume SESSION_ID`   | `system.session_id` |
 | OpenCode (`opencode`)      | `--session SESSION_ID`  | `sessionID` (top-level envelope) |
 | Pi (`pi`)                  | `--session-id SESSION_ID`| `session.id`       |
+| Antigravity (`antigravity`, CLI `agy`) | `--conversation ID` | `init.conversation_id` |
 
-Copilot and Antigravity (`run_copilot`/`run_antigravity` in `agent/runners.py`)
-remain experimental runners — implemented but not part of
-`SUPPORTED_HARNESSES` and not selectable as a configured agent harness (see
-ADR-0024's "Consequences"). Their resume mechanics (`--resume=SESSION_ID` /
-`result.sessionId` for Copilot; `--conversation ID` / `system.session_id` for
-Antigravity) still work the same way if invoked directly, but aren't exposed
-through the harness catalog.
+Antigravity is a supported, selectable harness using the native `agy` one-shot
+NDJSON protocol. Its default agent is `agy`; the harness and provider IDs are
+`antigravity`. See [Antigravity setup](../antigravity-harness.md) for native
+login, model selection, and quota behavior.
+
+Copilot (`run_copilot` in `agent/runners.py`) remains experimental and outside
+`SUPPORTED_HARNESSES`. Its `--resume=SESSION_ID` / `result.sessionId` resume
+mechanics are available only when invoked directly.
 
 All supported harnesses emit a session/thread identifier in their first event,
 and each runner captures it into a local variable as soon as it arrives. Squid

@@ -1,5 +1,6 @@
 # Antigravity harness
 
+Antigravity is a supported harness, selectable when creating an agent.
 Squid's `antigravity` harness uses the `agy` CLI's native one-shot NDJSON
 protocol. The implementation follows the official
 [headless protocol](https://antigravity.google/docs/cli/headless/) and
@@ -46,10 +47,11 @@ process exit fails the turn. Existing process registration, timeout, and
 cancellation handling apply. The CLI print timeout follows Squid's response
 timeout unless explicitly supplied through provider args.
 
-Permissions follow agy's native policy; Squid does not automatically add a
-permission-bypass flag. Configure the CLI's allowed tools if headless commands
-are denied. Interactive stdin sessions, API-provider translation, and native
-quota discovery are outside this one-shot integration.
+The runner adds `--dangerously-skip-permissions` for headless execution so
+commands and file writes can proceed without interactive confirmation. Native
+CLI authentication is still required. Interactive stdin sessions and
+API-provider translation are outside this one-shot integration. Native quota
+is supported through the `antigravity` gauge described below.
 
 Verification includes protocol fixtures, fresh-home catalog discovery, resume
 command construction, idempotent database seeding, and real subprocess
@@ -67,8 +69,15 @@ Installer shell syntax validation also passed.
 
 The `antigravity` gauge runs `agy --print /usage --output-format json` to
 retrieve quota without a model turn. It uses the existing native login and the
-shared gauge refresh flow, including snapshots before and after browser turns.
+shared gauge refresh flow, including a fresh read after each browser turn, plus opening/returning to Squid.
+Recovered turns discovered from history or another device also refresh on completion.
+Local completion callbacks retain ownership so their reads are not duplicated.
+It does not read quota before submission or poll during an active agy turn.
+Changes compare consecutive successful readings of the same model group/window
+and reset period. First readings, bucket switches, resets, and decreases establish
+a new baseline without recording a delta. Failed reads preserve the last successful baseline.
 The donut shows percent used for the most consumed model-group/window bucket;
-the tooltip lists all buckets and reset times. Per-turn deltas are observational:
+the tooltip lists all buckets and reset times. Recorded changes cover the interval since the last successful check, not exact
+per-turn consumption:
 shared account activity and backend reporting delays can affect them.
 The former default Native badge automatically upgrades; custom gauges remain intact.
