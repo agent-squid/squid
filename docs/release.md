@@ -37,6 +37,15 @@ Stable and post-release tags target production; other prereleases target
 preproduction. Publishing a browser client does not deploy the Shore Worker,
 bootstrap, or compute services.
 
+## 0.1.6 exception
+
+Stable 0.1.6 publishes only the Python package. Shore remains experimental and
+disabled by default, and production Shore is not ready. The workflow skips
+`publish-shore-client` for `v0.1.6`; no production bootstrap deployment, browser
+client publication, or stable-pointer update is required for this release.
+Verify package publication and installation, and confirm the Shore job is skipped.
+Other version tags retain the coordinated release behavior described below.
+
 ## Preparation
 
 1. Choose an unused exact version and the intended Squid source revision.

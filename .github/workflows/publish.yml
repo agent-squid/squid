@@ -40,6 +40,8 @@ jobs:
 
   publish-shore-client:
     name: Publish matching Shore browser client
+    # 0.1.6 ships with Shore disabled; production Shore is not ready.
+    if: github.ref_name != 'v0.1.6'
     needs: publish
     runs-on: ubuntu-latest
     permissions:
