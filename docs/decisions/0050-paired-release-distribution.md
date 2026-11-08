@@ -121,8 +121,11 @@ The protected Squid workflow independently builds, checks, and publishes the
 AgentSquid package to PyPI, then dispatches Shore with the same version and its
 committed Shore source pin. Prereleases target preproduction; stable and
 post-releases target production and advance the recommendation. A dispatch or
-client-publication failure marks the overall release incomplete but does not
-mutate or overwrite either immutable surface; retry is safe for identical bytes.
+client-publication failure leaves the overall release incomplete but does not
+mutate or overwrite either immutable surface. The Squid job checks dispatch
+acceptance only; operators must verify the separate Shore run. Client retry is
+safe for identical bytes; the successful PyPI upload must not be repeated.
+See [the release runbook](../release.md) for completion and recovery checks.
 
 ## Trust boundaries
 

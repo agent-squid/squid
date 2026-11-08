@@ -125,47 +125,21 @@ TestPyPI has a separate Trusted Publishing entry for the test workflow:
 - Workflow filename: `publish-testpypi.yml`
 - Environment: `testpypi`
 
-Release checklist:
+## Current release procedure
 
-1. Accumulate changes while `pyproject.toml` remains at the current
-   published version.
-2. When ready to test the next release, bump `[project].version` in
-   `pyproject.toml` to a new pre-release version for TestPyPI, e.g.
-   `0.1.2rc1`.
-3. Run `python3 -m build` and `python3 -m twine check dist/*` locally if
-   changing packaging metadata or included files.
-4. Commit the version bump and release changes.
-5. Create and push the matching TestPyPI tag, e.g. `test-v0.1.2rc1`, then
-   run `bin/install-testpypi.sh 0.1.2rc1` after the TestPyPI workflow
-   completes.
-6. If TestPyPI exposes a packaging or install problem, fix it with another
-   unused pre-release version, e.g. `0.1.2rc2` with tag `test-v0.1.2rc2`.
-   Do not reuse `0.1.2rc1`; TestPyPI rejects replacing an existing
-   distribution file for the same version, just like production PyPI.
-7. Once the TestPyPI candidate is verified, bump `[project].version` to the
-   final production version, e.g. `0.1.2`.
-8. Commit the final version bump.
-9. Create and push the matching production tag, e.g. `v0.1.2`.
-10. Let GitHub Actions run `Publish to PyPI`; the job publishes only after
-   the `pypi` environment's protection rules, if any, are satisfied.
+The operational checklist is now [the release runbook](../release.md), paired
+with ADR-0050. Coordinated RC releases use `vX.Y.ZrcN`: the package goes to
+production PyPI and the exact Shore browser client goes to preproduction.
+Stable `vX.Y.Z` releases publish the package to PyPI and the client to production.
 
-The tag and package version must match. A tag `v0.1.1` with
-`version = "0.1.0"` would try to publish `0.1.0`, and PyPI would reject it
-if that version already exists. A tag `v0.1.1` with `version = "0.1.2"`
-would publish `0.1.2`, which is misleading even though PyPI would accept it
-if unused.
+The `test-vX.Y.ZrcN` lane remains available for optional packaging-only tests
+on TestPyPI. It does not dispatch a Shore client and is not the coordinated RC
+release process. Install those packages with
+`bin/install-testpypi.sh X.Y.ZrcN`; never reuse an uploaded version.
 
-TestPyPI uses the same rule with a `test-` tag prefix: `test-v0.1.1` must
-point to a commit where `pyproject.toml` has `version = "0.1.1"`. The
-TestPyPI workflow publishes to `https://test.pypi.org/legacy/`; production
-PyPI remains tied to `vX.Y.Z` tags only.
-
-For repeated TestPyPI testing, use PEP 440 pre-release versions instead of
-burning final versions: `0.1.2rc1`, `0.1.2rc2`, and so on. The corresponding
-tags are `test-v0.1.2rc1`, `test-v0.1.2rc2`, etc., and each candidate is
-installed with the exact same version string:
-`bin/install-testpypi.sh 0.1.2rc1`. When the candidate is good, the real PyPI
-release should be the final version (`0.1.2`), not the `rcN` version.
+The tag and `pyproject.toml` version must match exactly after removing `v`
+(or `test-v`). The TestPyPI workflow enforces this; the production workflow
+currently does not, so it requires a manual preflight check.
 
 ## Verified before publishing
 

@@ -277,3 +277,8 @@ It may be overkill if:
 - You only ever use one agent in one terminal.
 - You want a hosted team chat product.
 - You want Squid to be the coding agent itself.
+
+## Releasing
+
+See the [RC and stable release runbook](docs/release.md) for release preparation,
+feature notes, publication lanes, and completion checks.
