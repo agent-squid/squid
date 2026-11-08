@@ -2305,8 +2305,9 @@ function anchorBeforeNextLiveGroup(maxId) {
 // Shared by every call site that inserts a batch of completed history items
 // reaching the "live" edge (the newest completed messages, adjacent to any
 // still-in-flight turns): loadHistory's offset-0 page, resetHistoryToLatest,
-// jumpToMessage's initial window when it has no newer cursor, and
-// loadHistoryWindow('newer')'s last page. Returns a real anchor node,
+// and jumpToMessage's initial window. Subsequent newer pages use
+// anchorBeforeNextLiveGroup directly to preserve existing history order.
+// Returns a real anchor node,
 // `null` for "no live groups newer than this batch — insert after the last
 // one", or `undefined` when there are no live groups at all so the caller
 // should fall back to its own default insertion point.
@@ -2702,15 +2703,20 @@ async function loadHistoryWindow(direction) {
   appendHistoryItems(data.items || [], fragment);
 
   if (direction === 'newer') {
-    // Once this page has no further cursor, it reaches the live edge — the
-    // same completed-vs-in-flight ordering concern loadHistory's offset-0
-    // page has — so anchor relative to any live groups instead of always
-    // inserting before bottomSentinel, which would land newer completed
-    // items after live groups that actually postdate them.
+    // Every newer page must remain before live groups that postdate it,
+    // including intermediate pages while browsing an older jump window.
     let anchor = bottomSentinel || null;
-    if (!data.has_more) {
-      const liveAnchor = anchorForLiveEdgePage(data.items || []);
-      if (liveAnchor !== undefined) anchor = liveAnchor;
+    if ((data.items || []).length) {
+      const newestCompleted = data.items.find(item => item.status !== 'pending');
+      // Keep existing history ahead of this page when every live group is older.
+      // The live-edge helper's fallback can point into already-rendered pages.
+      if (newestCompleted) anchor = anchorBeforeNextLiveGroup(newestCompleted.id);
+    }
+    // Keep the pagination edge beside the loaded window, ahead of any
+    // newer live group, rather than making users scroll past live output.
+    if (bottomSentinel && anchor !== bottomSentinel) {
+      messages.insertBefore(bottomSentinel, anchor);
+      anchor = bottomSentinel;
     }
     messages.insertBefore(fragment, anchor);
     historyNewerCursor = data.newer_cursor || historyNewerCursor;
@@ -2837,7 +2843,7 @@ function updateHistoryWindowSentinels() {
   }
 }
 
-function initHistoryWindowScroll() {
+function initHistoryWindowScroll(newerAnchor = null) {
   if (historyObserver) historyObserver.disconnect();
   if (historyBottomObserver) historyBottomObserver.disconnect();
   historyWindowEdgesArmed = false;
@@ -2855,7 +2861,7 @@ function initHistoryWindowScroll() {
 
   if (historyHasNewer) {
     bottomSentinel = createBottomSentinel();
-    messages.appendChild(bottomSentinel);
+    messages.insertBefore(bottomSentinel, newerAnchor);
     historyBottomObserver = new IntersectionObserver(
       (entries) => { if (historyWindowEdgesArmed && entries[0].isIntersecting) loadHistoryWindow('newer'); },
       { root: messages, threshold: 0 },
@@ -3007,17 +3013,15 @@ async function jumpToMessage(msgId, flowRunId = null, clearForJump = null) {
     const jumpItems = data.items || [];
     const fragment = document.createDocumentFragment();
     appendHistoryItems(jumpItems, fragment);
-    // A window with no newer cursor reaches the live edge, same as
-    // loadHistory's offset-0 page — anchor relative to live groups instead
-    // of blindly appending after them.
-    const jumpAnchor = (!data.has_newer && jumpItems.length) ? anchorForLiveEdgePage(jumpItems) : undefined;
+    // Older jump windows must also precede any preserved newer live group.
+    const jumpAnchor = jumpItems.length ? anchorForLiveEdgePage(jumpItems) : undefined;
     messages.insertBefore(fragment, jumpAnchor || null);
     historyOlderCursor = data.older_cursor || null;
     historyNewerCursor = data.newer_cursor || null;
     historyHasOlder = !!data.has_older;
     historyHasNewer = !!data.has_newer;
     historyLoading = false;
-    initHistoryWindowScroll();
+    initHistoryWindowScroll(jumpAnchor || null);
     _updateFilterBadge();
     updateInContextMarkers();
     refreshAllRevertButtons();
@@ -15898,6 +15902,33 @@ function showCtxPopup(spanEl) {
   popup.classList.add('open');
 
   if (msgId && !shell) loadCtxSources(popup, spanEl, msgId);
+
+  const messageRow = popup.querySelector('.ctx-popup-jump-row[data-jump-msg-id]');
+  if (messageRow) {
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'trace-tool-copy ctx-message-copy';
+    copy.title = 'Copy message ID';
+    copy.setAttribute('aria-label', 'Copy message ID');
+    copy.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">content_copy</span>';
+    copy.addEventListener('click', async event => {
+      event.stopPropagation();
+      const icon = copy.querySelector('.material-symbols-outlined');
+      try {
+        await navigator.clipboard.writeText(msgId);
+        icon.textContent = 'check';
+        copy.title = 'Copied';
+      } catch {
+        icon.textContent = 'error';
+        copy.title = 'Copy failed';
+      }
+      setTimeout(() => {
+        icon.textContent = 'content_copy';
+        copy.title = 'Copy message ID';
+      }, 1200);
+    });
+    messageRow.appendChild(copy);
+  }
 
   popup.querySelectorAll('.ctx-popup-jump-row .ctx-popup-link').forEach(link => {
     link.addEventListener('click', e => {

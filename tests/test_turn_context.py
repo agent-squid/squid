@@ -68,10 +68,16 @@ def test_missing_sources_preserve_existing_diff_context(continuation):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['No conversation found', 'prompt is too long'])
-async def test_worker_records_resume_and_fresh_attempts(continuation, tmp_path, failure):
+async def test_worker_records_resume_and_fresh_attempts(continuation, tmp_path, failure, monkeypatch):
     from agent.runners import CLIError
     from agent.topic_queue import QueueItem, TopicWorker
     child, _, _ = continuation
+    from agent import watch_launch, routes
+    monkeypatch.setattr(watch_launch, '_service', None)
+    monkeypatch.setattr(watch_launch, '_api_url', 'http://127.0.0.1:8000')
+    monkeypatch.setattr(routes, 'settings', lambda: {'enabled': True})
+    monkeypatch.setattr(store, 'mint', lambda *args: 'test-launch-token')
+    monkeypatch.setattr(store, 'revoke', lambda *args: None)
     calls = []
     async def runner(prompt, **kwargs):
         calls.append((prompt, kwargs))
@@ -91,6 +97,12 @@ async def test_worker_records_resume_and_fresh_attempts(continuation, tmp_path, 
     assert len(record['attempts']) == 2
     assert record['attempts'][0]['sources'][0]['delivery'] == 'session history'
     assert record['attempts'][1]['sources'][0]['delivery'] == 'injected'
+    for attempt, (sent_prompt, _) in zip(record['attempts'], calls):
+        assert all(instruction['content'] in sent_prompt for instruction in attempt['instructions'])
+    assert not any(i['source'].startswith('agent/watch_launch.py#')
+                   for i in record['attempts'][0]['instructions'])
+    assert any(i['source'] == 'agent/watch_launch.py#routes'
+               for i in record['attempts'][1]['instructions'])
 
 
 def test_instruction_snapshot_survives_template_changes(continuation, monkeypatch):
@@ -192,4 +204,44 @@ async def test_launch_records_actual_cli_tool_exposure_before_runner(monkeypatch
     assert chunks == ['done']
     assert snapshots[0]['transport'] == 'cli'
     assert snapshots[0]['operations'] == (shared_tools.catalog() if available else [])
+    assert 'secret-token' not in json.dumps(snapshots)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('resume,request_text,persistent,sequence,available,expected', [
+    (None, 'Summarize history', False, False, True, ['continuations', 'routes', 'history']),
+    ('existing-session', 'Summarize history', False, False, True, []),
+    (None, '/status', False, False, True, []),
+    (None, 'Summarize history', True, False, True, []),
+    (None, 'Continue', False, True, True, ['routes']),
+    (None, 'Summarize history', False, False, False, []),
+])
+async def test_notice_snapshot_contains_only_text_sent_this_launch(
+        monkeypatch, resume, request_text, persistent, sequence, available, expected):
+    from agent import watch_launch, continuations, routes
+    monkeypatch.setattr(watch_launch, '_service', None)
+    monkeypatch.setattr(watch_launch, '_api_url', 'http://127.0.0.1:8000' if available else None)
+    monkeypatch.setattr(continuations, 'mint', lambda *args: 'secret-token')
+    monkeypatch.setattr(continuations, 'revoke', lambda *args: None)
+    monkeypatch.setattr(continuations, 'sequence_step', lambda *args: sequence)
+    monkeypatch.setattr(routes, 'settings', lambda: {'enabled': True})
+    snapshots = []
+    sent = []
+
+    async def record(snapshot):
+        snapshots.append(snapshot)
+
+    async def runner(prompt, **kwargs):
+        sent.append(prompt)
+        yield 'done'
+
+    assert [chunk async for chunk in watch_launch.run(
+        runner, request_text, topic='test', msg_id=1, resume_session_id=resume,
+        persistent=persistent, on_launch=record)] == ['done']
+    instructions = snapshots[0]['instructions']
+    assert [i['source'].split('#')[-1] for i in instructions] == expected
+    assert all(i['delivery'] == 'injected' for i in instructions)
+    # The snapshot is the exact prefix delivered, in the same order, not a
+    # reconstruction from tool availability or current configuration.
+    assert sent == ['\n\n'.join([i['content'] for i in instructions] + [request_text])]
     assert 'secret-token' not in json.dumps(snapshots)

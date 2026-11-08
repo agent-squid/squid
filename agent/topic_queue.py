@@ -759,6 +759,8 @@ class TopicWorker:
             async def record_launch_tools(tools):
                 nonlocal run_seq
                 if delivery is not None and item.msg_id is not None:
+                    tools = dict(tools)
+                    delivery['instructions'] = tools.pop('instructions', []) + delivery['instructions']
                     delivery['tools'] = tools
                     insert_run_event(item.msg_id, run_seq, 'context', json.dumps(delivery))
                     run_seq += 1

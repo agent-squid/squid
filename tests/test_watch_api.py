@@ -1,4 +1,5 @@
 import hashlib
+import json
 
 import httpx
 import pytest
@@ -296,16 +297,31 @@ async def test_cancel_during_worker_mint_waits_and_revokes(setup, monkeypatch, s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('prompt,resume', [('/compact', None), ('  /help', None), ('normal request', 'existing-session')])
-async def test_launch_preserves_slash_and_resumed_prompts(setup, prompt, resume):
+@pytest.mark.parametrize('prompt,resume', [('/compact', None), ('  /help', None), ('normal request', 'existing-session'), ('normal request', None)])
+async def test_launch_records_only_delivered_watch_hint(setup, prompt, resume, monkeypatch):
     _, service, _, _, _ = setup
     watch_launch.configure(service, 'http://127.0.0.1:1234')
+    from agent import continuations
+    monkeypatch.setattr(continuations, 'mint', lambda *args: None)
+    snapshots = []
+
+    async def record(snapshot):
+        snapshots.append(snapshot)
+
     async def runner(actual, **kwargs):
-        assert actual == prompt
+        instructions = snapshots[0]['instructions']
+        assert actual == '\n\n'.join([i['content'] for i in instructions] + [prompt])
+        if resume or prompt.lstrip().startswith('/'):
+            assert instructions == []
+        else:
+            assert len(instructions) == 1
+            assert instructions[0]['source'] == 'agent/watch_launch.py#watch'
+            assert instructions[0]['delivery'] == 'injected'
+        assert kwargs['backend_env']['SQUID_TURN_TOKEN'] not in json.dumps(snapshots)
         assert kwargs['backend_env']['SQUID_TURN_TOKEN']
         yield 'ok'
     try:
-        assert [x async for x in watch_launch.run(runner, prompt, topic='squid', resume_session_id=resume)] == ['ok']
+        assert [x async for x in watch_launch.run(runner, prompt, topic='squid', resume_session_id=resume, on_launch=record)] == ['ok']
     finally:
         watch_launch.configure(None)
 

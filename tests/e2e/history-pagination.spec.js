@@ -323,3 +323,117 @@ test('scroll-up pagination anchors older pages at the top even with a live group
   );
   expect(ids).toEqual(['200', '201', '202']);
 });
+
+for (const clipboardFails of [false, true]) {
+  test(`ctx message ID copy ${clipboardFails ? 'reports failure' : 'copies without jumping'}`, async ({ page }) => {
+    await mockApp(page);
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: [{ id: 200, role: 'assistant', topic: 'squid', agent: 'claude',
+        content: 'reply', prompt: 'prompt', status: 'done' }], has_more: false,
+    } }));
+    await page.route('**/chat/200/context', route => route.fulfill({ json: {
+      attempts: [{ sources: [], instructions: [] }],
+    } }));
+    await page.addInitScript(fails => {
+      window.copiedMessageIds = [];
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+        writeText: async text => {
+          window.copiedMessageIds.push(text);
+          if (fails) throw new Error('Clipboard denied');
+        },
+      } });
+    }, clipboardFails);
+    await page.goto('/');
+    await page.locator('.msg[data-msg-id="200"] .user-ctx').click();
+    const copy = page.getByRole('button', { name: 'Copy message ID', exact: true });
+    await copy.click();
+    await expect(copy).toHaveAttribute('title', clipboardFails ? 'Copy failed' : 'Copied');
+    expect(await page.evaluate(() => window.copiedMessageIds)).toEqual(['200']);
+    await expect(page.locator('#ctx-popup')).toHaveClass(/open/);
+    await expect(page.locator('.msg[data-msg-id="200"]')).not.toHaveClass(/msg-jump-highlight/);
+    await expect(copy).toHaveAttribute('title', 'Copy message ID');
+  });
+}
+
+for (const injected of [false, true]) {
+  test(`ctx ${injected ? 'shows recorded instruction text' : 'omits unsent instructions'}`, async ({ page }) => {
+    await mockApp(page);
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: [{ id: 200, role: 'assistant', topic: 'squid', agent: 'claude',
+        content: 'reply', prompt: 'prompt', status: 'done' }], has_more: false,
+    } }));
+    await page.route('**/chat/200/context', route => route.fulfill({ json: {
+      attempts: [{ sources: [], instructions: injected ? [{
+        source: 'agent/watch_launch.py#history', revision: 'recorded-revision',
+        delivery: 'injected', content: 'Exact hint sent for this launch.',
+      }] : [], tools: { operations: [], watch_operations: [] } }],
+    } }));
+    await page.goto('/');
+    await page.locator('.msg[data-msg-id="200"] .user-ctx').click();
+    // Wait for the recorded launch snapshot, rather than checking before fetch resolves.
+    await expect(page.locator('#ctx-sources-section')).toContainText('tools');
+    const links = page.locator('#ctx-sources-section .ctx-popup-instruction-links a');
+    await expect(links).toHaveCount(injected ? 1 : 0);
+    if (injected) {
+      await links.click();
+      await expect(page.locator('#msg-modal')).toHaveClass(/open/);
+      await expect(page.locator('#msg-modal-body pre')).toHaveText(
+        'Revision: recorded-revision\n\nExact hint sent for this launch.');
+    }
+  });
+}
+
+
+for (const liveId of [50, 101, 300]) {
+  test(`jump pagination preserves history order with live turn ${liveId}`, async ({ page }) => {
+    await mockApp(page);
+    const item = id => ({
+      id, role: 'assistant', topic: 'squid', agent: 'claude',
+      content: 'old response', status: 'done', prompt: 'old prompt',
+      timestamp: '2026-11-06T10:00:00Z', completed_at: '2026-11-06T10:01:00Z',
+    });
+    await page.route('**/history**', route => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith('/around')) {
+        return route.fulfill({ json: { items: [], has_more: false } });
+      }
+      const paging = url.searchParams.has('direction');
+      return route.fulfill({ json: {
+        found: true, target_id: 100, items: [item(paging ? 102 : 100)],
+        has_older: false, has_newer: true, has_more: true,
+        newer_cursor: { id: paging ? 102 : 100, completed_at: '2026-11-06T10:01:00Z' },
+      } });
+    });
+    await page.goto('/');
+    await page.waitForFunction(() => typeof messages !== 'undefined' && typeof jumpToMessage === 'function');
+    await page.evaluate(async liveId => {
+      const prompt = document.createElement('div');
+      prompt.className = 'msg user';
+      prompt.textContent = 'new live prompt';
+      const thinking = document.createElement('div');
+      thinking.className = 'msg-thinking';
+      thinking.dataset.msgId = String(liveId);
+      messages.append(prompt, thinking);
+      await jumpToMessage(100);
+      historyWindowEdgesArmed = false;
+    }, liveId);
+    const order = () => page.locator('#messages > .msg, #messages > .msg-thinking, #history-bottom-sentinel').evaluateAll(
+      rows => rows.map(row => row.dataset.msgId || row.id || row.textContent)
+    );
+    let rows = await order();
+    expect(rows).toContain('100');
+    expect(rows).toContain('new live prompt');
+    expect(rows.indexOf('100') < rows.indexOf('new live prompt')).toBe(liveId > 100);
+    expect(rows).toContain('history-bottom-sentinel');
+    expect(rows.indexOf('100')).toBeLessThan(rows.indexOf('history-bottom-sentinel'));
+    expect(rows.indexOf('history-bottom-sentinel') < rows.indexOf('new live prompt')).toBe(liveId > 100);
+    await page.evaluate(async () => { await loadHistoryWindow('newer'); });
+    rows = await order();
+    expect(rows).toContain('102');
+    expect(rows.indexOf('100')).toBeLessThan(rows.indexOf('102'));
+    expect(rows.indexOf('102') < rows.indexOf('new live prompt')).toBe(liveId > 102);
+    expect(rows.indexOf('102')).toBeLessThan(rows.indexOf('history-bottom-sentinel'));
+    expect(rows.indexOf('history-bottom-sentinel') < rows.indexOf('new live prompt')).toBe(liveId > 102);
+  });
+
+}
