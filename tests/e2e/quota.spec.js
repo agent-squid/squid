@@ -46,7 +46,7 @@ test('credential popups describe their auth source', async ({ page }) => {
   await expect(page.locator('#quota-creds-popup')).toContainText('remote phone/tablet browsers cannot share their cookies');
 
   await page.evaluate(() => document.getElementById('codex-creds-popup').classList.add('open'));
-  await expect(page.locator('#codex-creds-popup')).toContainText('Run codex in the terminal to authenticate');
+  await expect(page.locator('#codex-creds-popup')).toContainText('Run codex in the terminal to authenticate on the Squid host');
   await expect(page.locator('#codex-creds-popup')).toContainText('~/.codex/auth.json');
   await expect(page.locator('#codex-creds-popup')).not.toContainText('browser detect');
   await expect(page.locator('#codex-creds-auto')).toHaveCount(0);
@@ -332,6 +332,7 @@ test('codex quota keeps background retrying after repeated visible errors', asyn
     };
   });
   await page.goto('/');
+  await page.waitForFunction(() => typeof setVisibleQuotaBackend === 'function');
   quotaCalls = 0;
 
   const result = await page.evaluate(async () => {
@@ -859,4 +860,88 @@ test('kimi balance gauge shows balance, budget pct, and saves max budget', async
   await page.locator('#balance-max-clear').click();
   await expect.poll(() => budgetCalls.length).toBe(2);
   expect(budgetCalls[1]).toEqual({ method: 'DELETE', body: null });
+});
+
+
+test('remote setup remains available without credentials and imports a Codex workspace', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/health', route => route.fulfill({ json: {
+    status: 'ok', harnesses: [], providers: {
+      anthropic: { label: 'Claude', gauge: { type: 'claude' }, gauge_authed: false },
+      openai: { label: 'Codex', gauge: { type: 'codex' }, gauge_authed: false },
+    },
+  } }));
+  await page.route('**/config/creds/capabilities', route => route.fulfill({ json: { host_browser_detection: false } }));
+  await page.route('**/quota/provider/*', route => route.fulfill({ json: { status: 'ok', used_percent: 12 } }));
+  let imported;
+  await page.route('**/config/creds/codex', route => {
+    imported = route.request().postDataJSON();
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Status', exact: true }).click();
+  const rows = page.locator('#proc-status-popup .quota-status-row');
+  await expect(rows).toHaveCount(2);
+  await rows.filter({ hasText: 'Claude' }).getByRole('button', { name: 'Set up usage' }).click();
+  await expect(page.locator('#creds-auto')).toBeDisabled();
+  await expect(page.locator('#claude-remote-guide')).toHaveAttribute('open', '');
+  await expect(page.locator('#quota-creds-popup')).toContainText('lastActiveOrg');
+  await page.getByRole('button', { name: 'Status', exact: true }).click();
+  await rows.filter({ hasText: 'Codex' }).getByRole('button', { name: 'Set up usage' }).click();
+  await page.locator('#codex-remote-guide summary').click();
+  await expect(page.locator('#codex-remote-guide')).toContainText('ChatGPT-Account-ID');
+  await page.locator('#codex-creds-token').fill('Bearer example-token');
+  await page.locator('#codex-creds-account').fill('workspace-123');
+  await page.locator('#codex-creds-save').click();
+  await expect(page.locator('#codex-creds-status')).toContainText('saved');
+  expect(imported).toEqual({ token: 'Bearer example-token', account_id: 'workspace-123' });
+  await expect(page.locator('#codex-creds-token')).toHaveValue('');
+  await page.getByRole('button', { name: 'Status', exact: true }).click();
+  await expect(rows.filter({ hasText: 'Codex' })).toContainText('12%');
+  await expect(rows.filter({ hasText: 'Codex' }).getByRole('button', { name: 'Usage settings' })).toBeVisible();
+});
+
+
+test('browser import verifies fresh usage for a custom provider after an older read finishes', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/health', route => route.fulfill({ json: {
+    status: 'ok', harnesses: [], providers: {
+      office: { label: 'Office Codex', gauge: { type: 'codex' }, gauge_authed: true },
+    },
+  } }));
+  let holdNext = false;
+  let oldRead;
+  let imported = false;
+  let freshReads = 0;
+  await page.route('**/quota/provider/office', route => {
+    if (holdNext) {
+      holdNext = false;
+      oldRead = route;
+      return;
+    }
+    if (imported) {
+      freshReads++;
+      return route.fulfill({ status: 401, json: { error: 'expired' } });
+    }
+    return route.fulfill({ json: { status: 'ok', raw: 88, used_percent: 88 } });
+  });
+  await page.route('**/config/creds/codex', route => {
+    imported = true;
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Status', exact: true }).click();
+  const row = page.locator('.quota-status-row').filter({ hasText: 'Office Codex' });
+  await expect(row).toContainText('88%');
+  await row.getByRole('button', { name: 'Usage settings' }).click();
+  holdNext = true;
+  await page.evaluate(() => { void fetchQuotaForBackend('office'); });
+  await expect.poll(() => Boolean(oldRead)).toBe(true);
+  await page.locator('#codex-creds-token').fill('Bearer replacement-token');
+  await page.locator('#codex-creds-save').click();
+  await expect(page.locator('#codex-creds-status')).toContainText('saved');
+  await expect(page.locator('#codex-creds-status')).not.toContainText('usage connected');
+  await oldRead.fulfill({ json: { status: 'ok', raw: 88, used_percent: 88 } });
+  await expect(page.locator('#codex-creds-status')).toContainText('usage unavailable');
+  expect(freshReads).toBeGreaterThan(0);
 });

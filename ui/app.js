@@ -10157,6 +10157,26 @@ function markGaugeAuthenticated(gaugeType) {
   }
 }
 
+async function refreshQuotaAfterCredentialSave(gaugeType) {
+  await ensureQuotaMetadata();
+  markGaugeAuthenticated(gaugeType);
+  const providers = Object.keys(_providerMetadata).filter(id => gaugeTypeFor(id) === gaugeType);
+  const results = await Promise.all(providers.map(async provider => {
+    const state = quotaStateFor(provider);
+    // Finish any read started with the previous credentials, then require a
+    // fresh read for this import rather than reporting cached usage as success.
+    await state.requestDone;
+    clearQuotaRetry(state);
+    if (state.timer) clearTimeout(state.timer);
+    state.raw = null;
+    state.pct = null;
+    state.sevenDay = null;
+    delete quotaSnapshots[provider];
+    return fetchQuotaForBackend(provider);
+  }));
+  return results.length > 0 && results.every(Boolean);
+}
+
 async function ensureQuotaMetadata() {
   if (Object.keys(_providerMetadata).length) return;
   try {
@@ -10500,6 +10520,8 @@ async function fetchQuotaForBackend(backend) {
   const state = quotaStateFor(provider);
   if (state.inFlight) return state.raw == null ? null : { backend: provider, ...state };
   state.inFlight = true;
+  let finishRequest;
+  state.requestDone = new Promise(resolve => { finishRequest = resolve; });
   const label = backendDisplayName(provider);
   try {
     const url = `/quota/provider/${encodeURIComponent(provider)}`;
@@ -10552,6 +10574,7 @@ async function fetchQuotaForBackend(backend) {
     return null;
   } finally {
     state.inFlight = false;
+    finishRequest();
   }
 }
 
@@ -10734,12 +10757,13 @@ function initCodexCreds() {
       const res = await fetch('/config/creds/codex', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
+        body: JSON.stringify({ token, account_id: document.getElementById('codex-creds-account').value.trim() }),
       });
       if (res.ok) {
         status.textContent = 'saved ✓';
         tokenInput.value = '';
-        fetchCodexQuota();
+        const usage = await refreshQuotaAfterCredentialSave('codex');
+        status.textContent = usage ? 'saved ✓ · usage connected' : 'saved · usage unavailable; check token and workspace';
       } else {
         status.textContent = 'failed';
       }
@@ -10756,12 +10780,16 @@ function initCreds() {
   const autoBtn    = document.getElementById('creds-auto');
   const autoStatus = document.getElementById('creds-auto-status');
 
-  // Whether this actually works isn't something the client can infer from
-  // location.hostname anymore — Tailscale (IP or MagicDNS name) reaches this
-  // same machine too, so a hostname guess would wrongly hide the button for
-  // a local user on that path. The server knows the real connection type
-  // (see _request_is_loopback in agent/server.py), so always show the
-  // button and surface its verdict inline instead.
+  // The server evaluates connection and host capabilities; hostnames cannot
+  // distinguish remote browsers from local clients using Tailscale or a proxy.
+  fetch('/config/creds/capabilities').then(r => r.ok ? r.json() : null).then(data => {
+    if (data?.host_browser_detection === false) {
+      autoBtn.disabled = true;
+      autoBtn.title = 'Use browser import for this connection or host.';
+      autoStatus.textContent = 'Use “Set up from this browser” below for this connection or host.';
+      document.getElementById('claude-remote-guide').open = true;
+    }
+  }).catch(() => { /* Older hosts can still return an actionable detection error. */ });
   autoBtn.addEventListener('click', async () => {
     autoBtn.disabled = true;
     autoStatus.textContent = 'detecting…';
@@ -10771,16 +10799,15 @@ function initCreds() {
       const data = await res.json();
       if (res.ok) {
         autoStatus.textContent = `saved ✓ (org: ${(data.claude_org_id || '').slice(0, 8)}…)`;
-        markGaugeAuthenticated('claude');
-        fetchQuota();
+        await refreshQuotaAfterCredentialSave('claude');
       } else {
         isError = true;
-        // data.local_url is set when the server rejected this as non-loopback
-        // (Tailscale IP/MagicDNS or another proxy) — link straight to the
-        // one URL that will actually work instead of just naming it.
-        autoStatus.innerHTML = data.local_url
-          ? `${escapeHtml(data.error || 'failed')} <a class="creds-auto-link" href="${escapeHtml(data.local_url)}">${escapeHtml(data.local_url)}</a>`
-          : escapeHtml(data.error || 'failed');
+        if (data.local_url) {
+          autoStatus.textContent = 'Host detection requires a direct loopback connection. Use “Set up from this browser” below for a remote or headless host.';
+          document.getElementById('claude-remote-guide').open = true;
+        } else {
+          autoStatus.textContent = data.error || 'Detection failed. Use “Set up from this browser” below.';
+        }
       }
     } catch { isError = true; autoStatus.textContent = 'error'; }
     autoBtn.disabled = false;
@@ -10800,8 +10827,8 @@ function initCreds() {
       if (res.ok) {
         status.textContent = 'saved ✓';
         keyInput.value = '';
-        markGaugeAuthenticated('claude');
-        fetchQuota();
+        const usage = await refreshQuotaAfterCredentialSave('claude');
+        status.textContent = usage ? 'saved ✓ · usage connected' : 'saved · usage unavailable; check organization and session';
       } else {
         status.textContent = 'failed';
       }
@@ -12492,7 +12519,11 @@ function shouldShowQuotaStatusProvider(provider) {
   const snapshotGaugeType = snapshot ? gaugeTypeFor(snapshot.backend) : 'none';
   const gaugeType = info?.gauge?.type || 'none';
   if (gaugeType === 'none' && snapshotGaugeType === 'none') return false;
-  return info?.gauge_authed !== false;
+  return true;
+}
+
+function quotaNeedsSetup(provider) {
+  return (_providerMetadata[provider] || _backendMetadata[provider])?.gauge_authed === false;
 }
 
 function renderQuotaStatus() {
@@ -12525,10 +12556,13 @@ function renderQuotaStatus() {
       value = '...';
       detail = 'loading';
     }
+    const popupId = quotaConfigFor(provider)?.credsPopupId;
+    const setup = popupId && ['claude', 'codex', 'cursor'].includes(gaugeTypeFor(provider));
+    if (quotaNeedsSetup(provider)) { value = 'setup'; detail = 'credentials required'; }
     return `<div class="quota-status-row">
       <span class="quota-status-name"><span class="quota-status-dot" style="background:${accent}"></span>${escapeHtml(backendDisplayName(provider))}</span>
       <span class="quota-status-value">${value}</span>
-      <span class="quota-status-detail">${detail}</span>
+      <span class="quota-status-detail">${escapeHtml(detail)}${setup ? ` <button type="button" class="btn-ghost quota-setup-btn" data-popup="${popupId}">${quotaNeedsSetup(provider) ? 'Set up usage' : 'Usage settings'}</button>` : ''}</span>
     </div>`;
   }).join('');
 
@@ -12611,6 +12645,13 @@ function renderProcPopup(processes, queued) {
     body += `<div class="proc-section-label">Watches (${cachedWatchRows.length})</div><table><thead><tr><th>Route</th><th>Target / prompt</th><th>Status</th><th>Last job</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   procStatusPopup.innerHTML = header + body;
+  procStatusPopup.querySelectorAll('.quota-setup-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      procStatusPopup.classList.remove('open');
+      document.getElementById(btn.dataset.popup)?.classList.add('open');
+    });
+  });
   procStatusPopup.querySelectorAll('.proc-watch-control').forEach(btn => {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
@@ -12706,6 +12747,7 @@ function renderProcPopup(processes, queued) {
 let procPopupOpenedAt = 0;
 
 function toggleProcPopup() {
+  document.querySelectorAll('#quota-creds-popup, #codex-creds-popup, #cursor-creds-popup, #balance-max-popup').forEach(popup => popup.classList.remove('open'));
   const open = procStatusPopup.classList.toggle('open');
   if (open) {
     procPopupOpenedAt = Date.now();

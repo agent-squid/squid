@@ -627,6 +627,7 @@ class CredsRequest(BaseModel):
 
 class CodexCredsRequest(BaseModel):
     token: str = Field(..., min_length=1)
+    account_id: str = ""
 
 
 class ShoreRevokeDeviceRequest(BaseModel):
@@ -3164,6 +3165,14 @@ async def save_creds(req: CredsRequest):
     return JSONResponse({"ok": True})
 
 
+@app.get("/config/creds/capabilities")
+async def credential_capabilities(request: Request):
+    direct_host = request.client.host if request.client else None
+    return JSONResponse({
+        "host_browser_detection": sys.platform == "darwin" and _request_is_loopback(request.headers, direct_host),
+    })
+
+
 @app.post("/config/creds/auto")
 async def auto_detect_creds(request: Request):
     direct_host = request.client.host if request.client else None
@@ -3190,7 +3199,7 @@ async def auto_detect_creds(request: Request):
 
 @app.post("/config/creds/codex")
 async def save_codex_creds(req: CodexCredsRequest):
-    creds.save_codex(req.token.strip())
+    creds.save_codex(req.token.strip(), req.account_id.strip())
     return JSONResponse({"ok": True})
 
 
@@ -3342,7 +3351,12 @@ async def quota_claude():
 @app.get("/quota/codex")
 async def quota_codex():
     codex_auth = creds.get_codex_cli_auth()
-    token = codex_auth.get("access_token") or creds.get_codex_token()
+    saved_token = creds.get_codex_token()
+    saved_account_id = creds.get_codex_account_id()
+    # New browser imports always store an account_id key (possibly empty).
+    # Legacy fallback tokens must not displace an existing CLI login.
+    use_saved = bool(saved_token and (saved_account_id is not None or not codex_auth.get("access_token")))
+    token = saved_token if use_saved else codex_auth.get("access_token")
     if not token:
         return JSONResponse({"error": "credentials not configured"}, status_code=400)
     authorization = _codex_bearer_header(token)
@@ -3358,7 +3372,7 @@ async def quota_codex():
             "originator": "Codex Desktop",
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         }
-        account_id = codex_auth.get("account_id")
+        account_id = saved_account_id if use_saved else codex_auth.get("account_id")
         if account_id:
             common_headers["ChatGPT-Account-ID"] = account_id
         async with AsyncSession() as session:

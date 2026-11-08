@@ -6074,3 +6074,16 @@ mark.search-kw-highlight {
 .monitor-body > div { margin-bottom: 0.4rem; }
 .monitor-state { color: var(--accent); font-weight: 600; }
 .monitor-body > button { margin: 0.3rem 0.4rem 0 0; }
+
+/* Browser import remains available on narrow remote clients. */
+.creds-guide { max-width: 420px; font-size: var(--text-sm); color: var(--text-muted); }
+.creds-guide summary { cursor: pointer; color: var(--accent-light); }
+.creds-guide p { margin: 0.5rem 0; }
+.creds-guide ol { padding-left: 1.4rem; }
+.creds-guide li { margin: 0.4rem 0; }
+.creds-guide a { color: var(--accent-light); }
+#codex-creds-account { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem 0.5rem; }
+#quota-creds-popup, #codex-creds-popup { max-width: calc(100vw - 24px); min-width: min(340px, calc(100vw - 24px)); max-height: calc(100dvh - 80px); overflow-y: auto; }
+.quota-setup-btn { font-size: var(--text-xs); }
+.quota-status-detail:has(.quota-setup-btn) { white-space: normal; overflow: visible; }
+.quota-setup-btn { display: block; margin-top: 0.2rem; }

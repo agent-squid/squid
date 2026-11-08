@@ -29,8 +29,8 @@ def save(org_id: str, session_key: str) -> None:
     _save({"claude_org_id": org_id, "claude_session_key": session_key})
 
 
-def save_codex(token: str) -> None:
-    _save({"codex_token": token})
+def save_codex(token: str, account_id: str = "") -> None:
+    _save({"codex_token": token, "codex_account_id": account_id})
 
 
 def get_org_id() -> Optional[str]:
@@ -45,6 +45,10 @@ def get_session_key() -> Optional[str]:
 
 def get_codex_token() -> Optional[str]:
     return load().get("codex_token")
+
+
+def get_codex_account_id() -> Optional[str]:
+    return load().get("codex_account_id")
 
 
 def get_codex_cli_auth() -> dict:

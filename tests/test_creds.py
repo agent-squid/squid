@@ -29,3 +29,13 @@ def test_deepseek_max_budget_legacy_key_migrates(tmp_path, monkeypatch):
     data = json.loads(path.read_text())
     assert "deepseek_max_budget" not in data
     assert creds.get_max_budget("deepseek") == 30.0
+
+
+def test_codex_browser_import_replaces_account_with_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(creds, "_CREDS_PATH", tmp_path / "squid-creds.json")
+    creds.save_codex("token-one", "workspace-one")
+    assert creds.get_codex_token() == "token-one"
+    assert creds.get_codex_account_id() == "workspace-one"
+    creds.save_codex("token-two")
+    assert creds.get_codex_token() == "token-two"
+    assert not creds.get_codex_account_id()

@@ -961,9 +961,16 @@ file or (if `file_path` omitted) all files in the diff. Recorded in
 
 Save claude.ai session credentials (org ID + session key).
 
-**Request body**: `{ "org_id": "string", "session_key": "string" }`
+**Request body**: `{ "claude_org_id": "string", "claude_session_key": "string" }`
 
 **Response**: `{ "ok": true }`
+
+### GET /config/creds/capabilities
+
+Returns `{ "host_browser_detection": true | false }`. Detection is offered for
+macOS hosts over direct loopback connections. Remote/headless clients can still
+import credentials using the usage setup dialog; client hostnames are not used
+to infer host access.
 
 ### POST /config/creds/auto
 
@@ -973,9 +980,13 @@ Auto-detect Claude web credentials from local Chrome cookies. No request body.
 
 ### POST /config/creds/codex
 
-Save a Codex bearer token directly.
+Save a Codex bearer token and optional ChatGPT workspace/account ID directly.
+New browser imports take precedence over host CLI authentication. Legacy saved
+tokens remain fallbacks when host CLI authentication is available. Its account ID
+is sent with that token; the host CLI account ID is never mixed into an import.
+Omitting the account ID clears a previously imported ID.
 
-**Request body**: `{ "token": "string" }`
+**Request body**: `{ "token": "string", "account_id": "optional string" }`
 
 **Response**: `{ "ok": true }`
 

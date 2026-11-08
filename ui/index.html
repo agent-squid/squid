@@ -200,10 +200,21 @@
 
       <div id="codex-creds-popup">
         <div class="creds-help">
-          <span class="creds-help-hint">Run <code>codex</code> in the terminal to authenticate; Squid reads <code>~/.codex/auth.json</code>.</span>
+          <span class="creds-help-hint">Run <code>codex</code> in the terminal to authenticate on the Squid host; Squid reads <code>~/.codex/auth.json</code>.</span>
         </div>
+        <details class="creds-guide" id="codex-remote-guide">
+          <summary>Set up from this browser</summary>
+          <p>Use a desktop browser signed into the ChatGPT account and workspace whose usage you want to display. These credentials will be saved on the Squid host.</p>
+          <ol>
+            <li>Open <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer">ChatGPT</a>, then open Developer Tools → Network.</li>
+            <li>Reload the page and select a request to <code>backend-api</code>. Under Request Headers, copy the <code>Authorization</code> value into the token field below.</li>
+            <li>If present, copy <code>ChatGPT-Account-ID</code> into the workspace/account field. Save, then check that usage loads.</li>
+          </ol>
+          <p>On a phone or tablet, complete these steps from a desktop browser connected to this same Squid host. Browser imports override the host login for usage. Imported tokens can expire; repeat setup when needed.</p>
+        </details>
         <div class="creds-divider"></div>
         <div class="creds-inputs">
+          <input id="codex-creds-account" type="text" placeholder="Workspace/account ID (optional)" aria-label="ChatGPT workspace/account ID" spellcheck="false" />
           <input id="codex-creds-token" type="password" placeholder="Bearer eyJ…" />
           <button id="codex-creds-save" type="button" class="btn-ghost">Save</button>
           <span id="codex-creds-status"></span>
@@ -213,12 +224,22 @@
       <div id="quota-creds-popup">
         <div class="creds-auto-row">
           <div class="creds-auto-text">
-            <span class="creds-auto-label">Auto-detect from browser</span>
-            <span class="creds-auto-desc">Reads this machine's Chrome cookies directly — only works over a direct connection to 127.0.0.1/localhost, not through Tailscale or another proxy.</span>
+            <span class="creds-auto-label">Detect on Squid host</span>
+            <span class="creds-auto-desc">Runs on this Squid server machine only and requires a direct loopback connection. It reads the host's browser cookies; remote phone/tablet browsers cannot share their cookies automatically.</span>
           </div>
           <button id="creds-auto" type="button" class="creds-auto-btn">Detect</button>
         </div>
         <span id="creds-auto-status" class="creds-auto-status"></span>
+        <details class="creds-guide" id="claude-remote-guide">
+          <summary>Set up from this browser</summary>
+          <p>For a remote or headless Squid host, import credentials from your desktop browser. They will be saved on the Squid host.</p>
+          <ol>
+            <li>Open <a href="https://claude.ai" target="_blank" rel="noopener noreferrer">Claude</a> and select the organization whose usage you want to display.</li>
+            <li>Open Developer Tools → Application → Cookies → <code>https://claude.ai</code> (Safari: Storage → Cookies).</li>
+            <li>Copy <code>lastActiveOrg</code> into Org ID and <code>sessionKey</code> into Session key below. Save, then check that usage loads.</li>
+          </ol>
+          <p>On a phone or tablet, complete these steps from a desktop browser connected to this same Squid host. Repeat setup if the session expires.</p>
+        </details>
         <div class="creds-divider"></div>
         <div class="creds-inputs">
           <input id="creds-org" type="text" placeholder="Org ID" spellcheck="false" />

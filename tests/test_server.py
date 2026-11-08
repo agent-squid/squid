@@ -1770,7 +1770,13 @@ def test_claude_quota_disables_redirects(monkeypatch):
     assert captured["allow_redirects"] is False
 
 
-def test_codex_quota_prefers_cli_auth_and_account_header(monkeypatch):
+@pytest.mark.parametrize("browser_token,browser_account,expected_token,expected_account", [
+    (None, None, "header.payload.signature", "acct_123"),
+    ("browser.token", "workspace_456", "browser.token", "workspace_456"),
+    ("browser.token", "", "browser.token", None),
+    ("legacy.token", None, "header.payload.signature", "acct_123"),
+])
+def test_codex_quota_keeps_token_and_account_from_same_source(monkeypatch, browser_token, browser_account, expected_token, expected_account):
     captured = {}
 
     class FakeResponse:
@@ -1801,15 +1807,16 @@ def test_codex_quota_prefers_cli_auth_and_account_header(monkeypatch):
         "access_token": "header.payload.signature",
         "account_id": "acct_123",
     })
-    monkeypatch.setattr(creds, "get_codex_token", lambda: "stale.saved.token")
+    monkeypatch.setattr(creds, "get_codex_token", lambda: browser_token)
+    monkeypatch.setattr(creds, "get_codex_account_id", lambda: browser_account)
     monkeypatch.setattr(server, "_codex_bearer_header", lambda token: f"Bearer {token}")
 
     response = asyncio.run(server.quota_codex())
 
     assert response.status_code == 200
     assert captured["url"] == "https://chatgpt.com/backend-api/wham/usage"
-    assert captured["headers"]["Authorization"] == "Bearer header.payload.signature"
-    assert captured["headers"]["ChatGPT-Account-ID"] == "acct_123"
+    assert captured["headers"]["Authorization"] == f"Bearer {expected_token}"
+    assert captured["headers"].get("ChatGPT-Account-ID") == expected_account
     assert captured["headers"]["OpenAI-Beta"] == "codex-1"
     assert captured["headers"]["originator"] == "Codex Desktop"
     assert captured["allow_redirects"] is False
@@ -2786,3 +2793,16 @@ async def test_lifespan_releases_idle_database_connection(tmp_path, monkeypatch,
     assert len(opened) == 1
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         opened[0].execute("SELECT 1")
+
+
+@pytest.mark.parametrize("platform,host,headers,expected", [
+    ("darwin", "127.0.0.1", {}, True),
+    ("darwin", "100.64.0.2", {}, False),
+    ("linux", "127.0.0.1", {}, False),
+    ("darwin", "127.0.0.1", {"x-forwarded-for": "100.64.0.2"}, False),
+])
+def test_credential_capabilities_use_server_connection(monkeypatch, platform, host, headers, expected):
+    monkeypatch.setattr(server.sys, "platform", platform)
+    request = SimpleNamespace(client=SimpleNamespace(host=host), headers=headers)
+    response = asyncio.run(server.credential_capabilities(request))
+    assert json.loads(response.body) == {"host_browser_detection": expected}
