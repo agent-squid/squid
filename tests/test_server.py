@@ -2806,3 +2806,50 @@ def test_credential_capabilities_use_server_connection(monkeypatch, platform, ho
     request = SimpleNamespace(client=SimpleNamespace(host=host), headers=headers)
     response = asyncio.run(server.credential_capabilities(request))
     assert json.loads(response.body) == {"host_browser_detection": expected}
+
+
+@pytest.mark.parametrize("remaining, expected", [(0.25, 75), (1, 0), (0, 100)])
+def test_antigravity_quota_native_command(monkeypatch, remaining, expected):
+    payload = {"status": "SUCCESS", "command": {"data": {"groups": [
+        {"name": "Gemini", "buckets": [{"remaining_fraction": remaining,
+         "window": "weekly", "reset_time": "2026-11-15T00:00:00Z"}]},
+        {"name": "Claude", "buckets": [{"remaining_fraction": 1, "window": "weekly"}]},
+    ]}}}
+    proc = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(json.dumps(payload).encode(), None)))
+    spawn = AsyncMock(return_value=proc)
+    monkeypatch.setattr(server, "AGY_PATH", "/test/agy")
+    monkeypatch.setattr(server.asyncio, "create_subprocess_exec", spawn)
+    provider = Provider(id="antigravity", label="agy", gauge=Gauge("antigravity"))
+    response = asyncio.run(server._quota_snapshot_for_provider(provider, "antigravity"))
+    data = json.loads(response.body)
+    assert data["used_percent"] == expected
+    assert len(data["buckets"]) == 2
+    assert "Gemini weekly" in data["title"]
+    assert spawn.call_args.args[:6] == ("/test/agy", "--print", "/usage", "--output-format", "json", "--print-timeout")
+
+
+def test_antigravity_quota_missing_cli(monkeypatch):
+    monkeypatch.setattr(server, "AGY_PATH", None)
+    assert asyncio.run(server.quota_antigravity()).status_code == 503
+
+
+@pytest.mark.parametrize("payload", [
+    {"status": "ERROR"}, {"status": "SUCCESS"}, {}, [], None,
+    {"status": "SUCCESS", "command": None},
+    {"status": "SUCCESS", "command": {"data": {"groups": [None]}}},
+    {"status": "SUCCESS", "command": {"data": {"groups": [{"buckets": [None]}]}}},
+])
+def test_antigravity_quota_invalid_response(monkeypatch, payload):
+    proc = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(json.dumps(payload).encode(), None)))
+    monkeypatch.setattr(server, "AGY_PATH", "/test/agy")
+    monkeypatch.setattr(server.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
+    assert asyncio.run(server.quota_antigravity()).status_code == 502
+
+
+def test_antigravity_quota_timeout_reaps_process(monkeypatch):
+    proc = SimpleNamespace(returncode=None, communicate=AsyncMock(side_effect=asyncio.TimeoutError),
+                           kill=lambda: None, wait=AsyncMock())
+    monkeypatch.setattr(server, "AGY_PATH", "/test/agy")
+    monkeypatch.setattr(server.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
+    assert asyncio.run(server.quota_antigravity()).status_code == 502
+    proc.wait.assert_awaited_once()

@@ -505,6 +505,9 @@ function populateModelPicker(pickerId, inputId, backend) {
   // marked v5+ passes a token object; override href while forwarding everything else.
   marked.use({
     renderer: {
+      table(token) {
+        return `<div class="md-table-wrap markdown-table-scroll" tabindex="0" role="region" aria-label="Scrollable table">${marked.Renderer.prototype.table.call(this, token)}</div>`;
+      },
       link({ href, title, tokens }) {
         return marked.Renderer.prototype.link.call(this, { href: fileToLocal(href), title, tokens });
       },
@@ -878,14 +881,8 @@ async function rejectPairingPrompt() {
   _closePairingPrompt('Pairing request rejected.');
 }
 
-/** Unified "Connect" modal for both remote-access methods: Tailscale
- * (LAN/tailnet-scoped, needs the Tailscale app on the far end, no far-end
- * login) and AgentSquid.AI (relay-routed, needs no app install anywhere,
- * but needs the far end already logged into agentsquid.ai). Shows both as
- * tabs when both are available, whichever one is available directly when
- * only one is, and an install/login prompt when neither is. `preferredTab`
- * ('tailscale' | 'agentsquid') only matters when both are available --
- * it's which chat command opened this (`/remote` vs `/pair`). */
+/** Remote access through Tailscale, AgentSquid.AI, or an SSH tunnel.
+ * SSH instructions are always available, including on standalone hosts. */
 async function openConnectModal(preferredTab) {
   if (document.getElementById('connect-modal')) return;
 
@@ -925,6 +922,7 @@ async function openConnectModal(preferredTab) {
   box.appendChild(closeBtn);
   box.appendChild(title);
 
+  let unavailablePanel = null;
   if (!tailscaleUrl && !shoreConfigured) {
     const msgs = {
       not_installed: 'Tailscale is not installed.\nInstall from tailscale.com, then restart squid to configure remote access automatically.',
@@ -944,9 +942,7 @@ async function openConnectModal(preferredTab) {
     neither.appendChild(tsOption);
     if (shoreEnabled) neither.appendChild(asOption);
     box.appendChild(neither);
-    modal.appendChild(box);
-    document.body.appendChild(modal);
-    return;
+    unavailablePanel = neither;
   }
 
   const copyRow = url => {
@@ -1088,30 +1084,50 @@ async function openConnectModal(preferredTab) {
   }
   if (shoreConfigured || shoreHostOnly) box.appendChild(agentsquidPanel);
 
-  if (tailscaleUrl && (shoreConfigured || shoreHostOnly)) {
-    const tabs = document.createElement('div');
-    tabs.id = 'connect-tabs';
-    const tsTab = document.createElement('button');
-    tsTab.type = 'button'; tsTab.className = 'connect-tab'; tsTab.textContent = 'Tailscale';
-    const asTab = document.createElement('button');
-    asTab.type = 'button'; asTab.className = 'connect-tab'; asTab.textContent = 'AgentSquid.AI';
-    const activate = which => {
-      tsTab.classList.toggle('active', which === 'tailscale');
-      asTab.classList.toggle('active', which === 'agentsquid');
-      tailscalePanel.style.display = which === 'tailscale' ? '' : 'none';
-      agentsquidPanel.style.display = which === 'agentsquid' ? '' : 'none';
-      shoreDetails.style.display = which === 'agentsquid' ? '' : 'none';
-      if (which === 'agentsquid' && shoreConfigured) startAgentSquid();
-    };
-    tsTab.addEventListener('click', () => activate('tailscale'));
-    asTab.addEventListener('click', () => activate('agentsquid'));
-    tabs.appendChild(tsTab);
-    tabs.appendChild(asTab);
-    box.insertBefore(tabs, tailscalePanel);
-    activate(preferredTab === 'agentsquid' ? 'agentsquid' : 'tailscale');
-  } else if (shoreConfigured) {
-    startAgentSquid();
+  const sshPanel = document.createElement('div');
+  sshPanel.id = 'connect-ssh-panel';
+  sshPanel.className = 'connect-neither-option';
+  const sshDescription = document.createElement('p');
+  sshDescription.textContent = 'Connect through an encrypted SSH tunnel to your Squid host. No Shore account or Tailscale required; you need SSH access to the host.';
+  const sshCommand = document.createElement('code');
+  sshCommand.textContent = 'ssh -N -L 127.0.0.1:8000:127.0.0.1:8000 user@host';
+  const sshInstructions = document.createElement('p');
+  sshInstructions.textContent = 'Run this on your other computer, replacing user@host with your SSH login. Keep it running, then open http://127.0.0.1:8000 there. Replace the final 8000 if Squid uses a different port.';
+  const sshGuide = document.createElement('a');
+  sshGuide.href = '/ssh-port-forwarding.html';
+  sshGuide.target = '_blank';
+  sshGuide.rel = 'noopener noreferrer';
+  sshGuide.textContent = 'Full SSH port-forwarding guide ↗';
+  sshPanel.append(sshDescription, sshCommand, sshInstructions, sshGuide);
+  box.appendChild(sshPanel);
+
+  const tabs = document.createElement('div');
+  tabs.id = 'connect-tabs';
+  const panels = new Map([['ssh', sshPanel]]);
+  if (tailscaleUrl) panels.set('tailscale', tailscalePanel);
+  if (shoreConfigured || shoreHostOnly) panels.set('agentsquid', agentsquidPanel);
+  const tabButtons = new Map();
+  const activate = which => {
+    for (const [name, panel] of panels) {
+      panel.style.display = name === which ? '' : 'none';
+      tabButtons.get(name).classList.toggle('active', name === which);
+      tabButtons.get(name).setAttribute('aria-pressed', String(name === which));
+    }
+    if (unavailablePanel) unavailablePanel.style.display = which === 'ssh' ? 'none' : '';
+    shoreDetails.style.display = which === 'agentsquid' ? '' : 'none';
+    if (which === 'agentsquid' && shoreConfigured) startAgentSquid();
+  };
+  for (const [name, label] of [['tailscale', 'Tailscale'], ['agentsquid', 'AgentSquid.AI'], ['ssh', 'SSH']]) {
+    if (!panels.has(name)) continue;
+    const tab = document.createElement('button');
+    tab.type = 'button'; tab.className = 'connect-tab'; tab.textContent = label;
+    tab.addEventListener('click', () => activate(name));
+    tabButtons.set(name, tab);
+    tabs.appendChild(tab);
   }
+  box.insertBefore(tabs, title.nextSibling);
+  activate(panels.has(preferredTab) ? preferredTab
+    : tailscaleUrl ? 'tailscale' : shoreConfigured ? 'agentsquid' : 'ssh');
 
   if (shoreConfigured) {
     box.appendChild(shoreDetails);
@@ -1846,7 +1862,7 @@ function openHistoryPanel() {
   closeSearchScopes();
   document.getElementById('search-bar-scope').value = searchScopeText(historyFilter) || '#all';
   document.getElementById('search-bar-keywords').value = searchActive ? searchState.keywords : '';
-  document.getElementById('search-bar-operator').value = searchState?.operator || 'and';
+  setSearchOperator(searchState?.operator);
   updateHistoryToggleButtons();
   document.getElementById('search-bar').classList.add('active');
   updateSearchButton();
@@ -3095,7 +3111,7 @@ function _updateSearchBar() {
   searchPanelOpen = true;
   updateHistoryToggleButtons();
   kwEl.value = searchState.keywords;
-  document.getElementById('search-bar-operator').value = searchState.operator || 'and';
+  setSearchOperator(searchState.operator);
   _updateSearchScopeInput();
   bar.classList.add('active');
   updateSearchButton();
@@ -5771,7 +5787,7 @@ async function sendMessage(text, opts = {}) {
   let firstDataReceived = false;
 
   let quotaBackend = nativeShell ? null : await resolveQuotaProvider(topic, agent);
-  let quotaBeforeSnapshot = nativeShell ? null : await fetchQuotaForBackend(quotaBackend);
+  let quotaBeforeSnapshot = nativeShell ? null : await fetchQuotaForBackend(quotaBackend, true);
   // fetchQuotaForBackend's null return conflates "this backend has no quota
   // concept at all" with "the read failed" — resolve that once here (after
   // fetchQuotaForBackend's own call already ensured quota metadata is
@@ -5819,7 +5835,7 @@ async function sendMessage(text, opts = {}) {
     // a later turn. Do not treat or aggregate it as exact per-prompt attribution.
     // See ADR-0023.
     await new Promise(r => setTimeout(r, 1000));
-    const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend);
+    const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend, true);
     // Balance-based gauges (DeepSeek/Kimi) with a max budget: use the computed
     // percentage so the delta represents budget-% change, not raw dollars.
     const usePct = isBalanceGauge(quotaBackend)
@@ -10053,6 +10069,14 @@ const quotaDisplay = document.getElementById('quota-display');
 // Presentation details for coded gauge adapters. Backend-to-gauge routing comes
 // from /health, never from backend or model naming conventions.
 const QUOTA_CONFIG = {
+  antigravity: {
+    displayId: 'antigravity-quota-display',
+    pieArcId: 'antigravity-pie-arc',
+    labelId: 'antigravity-quota-label',
+    fiveHourPctId: 'antigravity-pct',
+    pieC: 2 * Math.PI * 6,
+    errorTitle: 'Antigravity usage unavailable · check agy login',
+  },
   claude: {
     endpoint:     '/quota/claude',
     displayId:    'quota-display',
@@ -10509,7 +10533,7 @@ function showRecoverableQuotaError(backend, text) {
   }, QUOTA_ERROR_BACKGROUND_RETRY_DELAY);
 }
 
-async function fetchQuotaForBackend(backend) {
+async function fetchQuotaForBackend(backend, requireFresh = false) {
   const provider = quotaStatusProviderKey(backend);
   let cfg = quotaConfigFor(provider);
   if (!cfg && !Object.keys(_providerMetadata).length) {
@@ -10518,6 +10542,12 @@ async function fetchQuotaForBackend(backend) {
   }
   if (!cfg) return null;
   const state = quotaStateFor(provider);
+  // Turn boundaries need a new native read after any existing poll. Ordinary
+  // polls coalesce below so slow CLI reads cannot build an unbounded queue.
+  if (state.inFlight && requireFresh && gaugeTypeFor(provider) === 'antigravity') {
+    await state.requestDone;
+    return fetchQuotaForBackend(provider, true);
+  }
   if (state.inFlight) return state.raw == null ? null : { backend: provider, ...state };
   state.inFlight = true;
   let finishRequest;
@@ -10867,6 +10897,29 @@ function initCursorQuota() {
       credsPopup.classList.remove('open');
   });
   fetchCursorQuota();
+}
+
+function initAntigravityQuota() {
+  const cfg = QUOTA_CONFIG.antigravity;
+  const display = document.getElementById('antigravity-quota-display');
+  display.style.setProperty('--quota-accent', agentThemeColor('antigravity'));
+  display.innerHTML = `
+    <span style="display:inline-flex;align-items:center">
+      <svg id="antigravity-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+        <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+        <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('antigravity')}"
+                stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
+                transform="rotate(-90 9 9)"/>
+        <text id="${cfg.fiveHourPctId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+      </svg>
+      <span id="${cfg.labelId}"></span>
+    </span>`;
+
+  display.addEventListener('click', () => {
+    if (activeQuotaBackend && gaugeTypeFor(activeQuotaBackend) === 'antigravity') {
+      fetchQuotaForBackend(activeQuotaBackend);
+    }
+  });
 }
 
 // ── Static (text-only) gauge ───────────────────────────────────────────────────
@@ -13830,6 +13883,7 @@ async function confirmTopicDelete() {
 // ── runtime catalogs ──────────────────────────────────────────────────────────
 
 const GAUGE_CATALOG = Object.freeze({
+  antigravity: 'native agy quota · run agy in a terminal to sign in',
   claude: 'click gauge in header -> Detect',
   codex: 'uses codex CLI auth',
   cursor: 'automatic via cursor-agent',
@@ -15799,11 +15853,14 @@ function showCtxPopup(spanEl) {
       <span class="ctx-popup-val ctx-popup-link">thoughts</span>
     </div>`;
   }
+  if (msgId && !shell) html += '<div id="ctx-sources-section"></div>';
   if (topic) html += `<div id="ctx-roots-section"></div>`;
   if (!html) html = `<div class="ctx-popup-row"><span class="ctx-popup-key">${spanEl.textContent.trim()}</span></div>`;
 
   popup.innerHTML = html;
   popup.classList.add('open');
+
+  if (msgId && !shell) loadCtxSources(popup, spanEl, msgId);
 
   popup.querySelectorAll('.ctx-popup-jump-row .ctx-popup-link').forEach(link => {
     link.addEventListener('click', e => {
@@ -15921,6 +15978,61 @@ function showCtxPopup(spanEl) {
   }
 
   _positionCtxPopupNearAnchor(popup, spanEl);
+}
+
+async function loadCtxSources(popup, spanEl, msgId) {
+  const section = popup.querySelector('#ctx-sources-section');
+  try {
+    const response = await fetch(`/chat/${encodeURIComponent(msgId)}/context`);
+    if (!response.ok) throw new Error('context lookup failed');
+    const data = await response.json();
+    if (popup._forSpanEl !== spanEl || !section?.isConnected) return;
+    const attempts = data.attempts?.length ? data.attempts : [data];
+    for (const [index, attempt] of attempts.entries()) {
+      if (!attempt.sources?.length && !attempt.instructions?.length) continue;
+      const divider = document.createElement('div');
+      divider.className = 'ctx-popup-divider';
+      section.appendChild(divider);
+      if (attempts.length > 1) {
+        const label = document.createElement('div');
+        label.className = 'ctx-popup-row';
+        label.textContent = `Launch ${index + 1}${attempt.resume_session_id ? ' · resume' : ' · fresh'}`;
+        section.appendChild(label);
+      }
+      for (const source of attempt.sources || []) {
+        const row = document.createElement('div');
+        row.className = 'ctx-popup-row ctx-popup-jump-row';
+        row.innerHTML = `<span class="ctx-popup-key">${escapeHtml(source.label)}</span><span class="ctx-popup-val ctx-popup-link">#${escapeHtml(String(source.message_id))} · ${escapeHtml(source.delivery)}</span>`;
+        row.querySelector('.ctx-popup-link').title = `#${source.message_id} · ${source.delivery}`;
+        row.querySelector('.ctx-popup-link').addEventListener('click', () => {
+          _closeCtxPopup(popup);
+          jumpToMessage(source.message_id);
+        });
+        section.appendChild(row);
+      }
+      for (const instruction of attempt.instructions || []) {
+        const row = document.createElement('div');
+        row.className = 'ctx-popup-row ctx-popup-jump-row';
+        row.innerHTML = `<span class="ctx-popup-key">instructions</span><span class="ctx-popup-val ctx-popup-link">${escapeHtml(instruction.source)} · ${escapeHtml(instruction.delivery)}</span>`;
+        row.querySelector('.ctx-popup-link').title = `${instruction.source} · ${instruction.delivery}`;
+        row.querySelector('.ctx-popup-link').addEventListener('click', () => {
+          _closeCtxPopup(popup);
+          const modal = document.getElementById('msg-modal');
+          document.getElementById('msg-modal-title').textContent = instruction.source;
+          const body = document.getElementById('msg-modal-body');
+          const pre = document.createElement('pre');
+          pre.className = 'trace-tool-pre';
+          pre.textContent = `Revision: ${instruction.revision}\n\n${instruction.content}`;
+          body.replaceChildren(pre);
+          modal.classList.add('open');
+        });
+        section.appendChild(row);
+      }
+    }
+    _positionCtxPopupNearAnchor(popup, spanEl);
+  } catch {
+    if (popup._forSpanEl === spanEl && section?.isConnected) section.textContent = 'Context sources unavailable';
+  }
 }
 
 async function openMsgModal(msgId) {
@@ -17668,15 +17780,56 @@ initPin();
 initBookmark();
 _loadBadResponses();
 const compactHistoryOperator = window.matchMedia('(max-width: 600px)');
-function updateHistoryOperatorLabels() {
-  const options = document.getElementById('search-bar-operator').options;
-  options[0].textContent = compactHistoryOperator.matches ? '&&' : 'AND';
-  options[1].textContent = compactHistoryOperator.matches ? '||' : 'OR';
-  options[0].setAttribute('aria-label', 'AND — all keywords');
-  options[1].setAttribute('aria-label', 'OR — any keyword');
+function setSearchOperator(value) {
+  const button = document.getElementById('search-bar-operator');
+  button.value = value === 'or' ? 'or' : 'and';
+  button.textContent = compactHistoryOperator.matches ? (button.value === 'or' ? '||' : '&&') : button.value.toUpperCase();
+  for (const option of document.querySelectorAll('#search-operator-options [role="option"]')) {
+    option.setAttribute('aria-selected', String(option.dataset.operator === button.value));
+  }
 }
-compactHistoryOperator.addEventListener('change', updateHistoryOperatorLabels);
-updateHistoryOperatorLabels();
+function closeSearchOperators() {
+  document.getElementById('search-operator-options').hidden = true;
+  document.getElementById('search-bar-operator').setAttribute('aria-expanded', 'false');
+}
+compactHistoryOperator.addEventListener('change', () => setSearchOperator(document.getElementById('search-bar-operator').value));
+setSearchOperator('and');
+document.getElementById('search-bar-operator').addEventListener('click', () => {
+  const list = document.getElementById('search-operator-options');
+  if (!list.hidden) return closeSearchOperators();
+  list.hidden = false;
+  document.getElementById('search-bar-operator').setAttribute('aria-expanded', 'true');
+  list.querySelector('[aria-selected="true"]')?.focus();
+});
+for (const option of document.querySelectorAll('#search-operator-options [role="option"]')) {
+  option.addEventListener('click', () => {
+    setSearchOperator(option.dataset.operator);
+    closeSearchOperators();
+    document.getElementById('search-bar-keywords').focus();
+  });
+}
+document.getElementById('search-operator-picker').addEventListener('keydown', e => {
+  const list = document.getElementById('search-operator-options');
+  if (e.key === 'Escape' && !list.hidden) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeSearchOperators();
+    document.getElementById('search-bar-operator').focus();
+  } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    list.hidden = false;
+    document.getElementById('search-bar-operator').setAttribute('aria-expanded', 'true');
+    const options = [...list.querySelectorAll('[role="option"]')];
+    const index = options.indexOf(document.activeElement);
+    options[(index + (e.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length].focus();
+  }
+});
+document.getElementById('search-operator-picker').addEventListener('focusout', e => {
+  if (!e.currentTarget.contains(e.relatedTarget)) closeSearchOperators();
+});
+document.addEventListener('click', e => {
+  if (!document.getElementById('search-operator-picker').contains(e.target)) closeSearchOperators();
+});
 document.getElementById('search-bar-bookmarks').addEventListener('click', toggleBookmarkOnlyHistory);
 document.getElementById('search-bar-bad').addEventListener('click', toggleBadOnlyHistory);
 document.getElementById('search-bar-clear').addEventListener('click', closeHistoryPanel);
@@ -19690,6 +19843,7 @@ initCreds();
 initCodexQuota();
 initCodexCreds();
 initCursorQuota();
+initAntigravityQuota();
 updateComposerActionTitles();
 updateActiveQuotaGauge();
 initMobileViewNavigation();

@@ -896,3 +896,50 @@ def test_effort_change_invalidates_watch_execution_grant(setup, monkeypatch, cha
     assert not watch_runs.begin(service, run_id)
     assert rows('watch_runs')[0]['started_at'] is None
     assert rows('watch_events')[0]['disposition'] == 'pending'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('resume_failure', ['No conversation found', 'prompt is too long'])
+@pytest.mark.parametrize('revoke', [False, True])
+async def test_watch_session_retry_rechecks_grant_without_consuming_another_run(setup, monkeypatch, resume_failure, revoke):
+    from agent.runners import CLIError
+    service, _, _, watch, grant, _ = setup
+    configuration = stats_db.get_agent('watch-agent')
+    session = f'retry-{resume_failure.replace(" ", "-")}-{revoke}'
+    stats_db.set_topic_session('squid', 'watch-agent', session, configuration['cwd'], None)
+    attempts = []
+    async def runner(prompt, **kwargs):
+        attempts.append(kwargs.get('resume_session_id'))
+        if len(attempts) == 1:
+            if revoke:
+                watch_runs.revoke_execution(service, topic='squid', watch_id=watch['id'], grant_id=grant['id'])
+            raise CLIError(resume_failure)
+        yield 'Completed local work in a fresh session'
+    monkeypatch.setattr('agent.runners.run_codex', runner)
+    runtime = WatchDispatch(service, TopicDispatcher())
+    service.dispatch_runtime = runtime
+    run_id = claimed(setup)
+    try:
+        await asyncio.wait_for(runtime.dispatch(run_id), 5)
+        assert attempts == ([session] if revoke else [session, None])
+        runs = rows('watch_runs')
+        assert len(runs) == 1 and runs[0]['started_at'] is not None
+        assert runs[0]['state'] == ('failed' if revoke else 'succeeded')
+        assert rows('watch_events')[0]['disposition'] == ('pending' if revoke else 'handled')
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize('context', ['{', '{}', 'null', '"invalid tool evidence"', '[null]'])
+@pytest.mark.parametrize('interrupted', [False, True])
+def test_watch_settlement_quarantines_invalid_completion_context(setup, context, interrupted):
+    run_id, (_, assistant) = queued(setup)
+    assert watch_runs.begin(setup[0], run_id)
+    stats_db.update_assistant_message(assistant, 'Local output', None, 'done', context=context)
+    stats_db.insert_run_event(assistant, 4, 'done', None)
+    watch_runs.settle(setup[0], run_id, interrupted=interrupted)
+    run = watch_runs.details(run_id)[0]
+    assert (run['state'], run['outcome']) == ('ambiguous', 'completion_unverified')
+    assert rows('watch_events')[0]['disposition'] == 'pending'
+    assert rows('watches')[0]['status'] == 'paused'
+    assert claimed(setup) is None

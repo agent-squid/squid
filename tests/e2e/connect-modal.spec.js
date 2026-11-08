@@ -5,6 +5,7 @@ const { test, expect } = require('@playwright/test');
 test.use({ serviceWorkers: 'block' });
 
 async function mockApp(page) {
+  await page.route('**/config/features', r => r.fulfill({ json: { shore: true } }));
   await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));
   await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
@@ -35,7 +36,7 @@ async function typeCommand(page, command) {
 }
 
 test.describe('Connect modal (Shore/AgentSquid.AI + Tailscale)', () => {
-  test('/pair with only Shore configured shows its QR directly, no tab bar', async ({ page }) => {
+  test('/pair with only Shore configured shows its QR with an SSH tab', async ({ page }) => {
     await mockApp(page);
     await page.route('**/remote', r => r.fulfill({ json: { reason: 'not_installed' } }));
     await page.route('**/shore/devices', r => r.fulfill({ json: { devices: [] } }));
@@ -47,7 +48,7 @@ test.describe('Connect modal (Shore/AgentSquid.AI + Tailscale)', () => {
     await typeCommand(page, '/pair');
     const modal = page.locator('#connect-modal');
     await expect(modal).toBeVisible();
-    await expect(page.locator('#connect-tabs')).toHaveCount(0);
+    await expect(page.locator('.connect-tab', { hasText: 'SSH' })).toBeVisible();
     // qrcode.js renders both a hidden <canvas> and a visible <img> fallback
     // simultaneously -- assert on the one actually shown, not the raw count.
     const qr = page.locator('#connect-agentsquid-panel .connect-qr img');
@@ -84,6 +85,12 @@ test.describe('Connect modal (Shore/AgentSquid.AI + Tailscale)', () => {
     await expect(page.locator('#connect-tailscale-panel .connect-qr img')).toBeVisible();
     await expect(page.locator('.connect-link-url').first()).toHaveText('https://example.ts.net/');
 
+    await page.locator('.connect-tab', { hasText: 'SSH' }).click();
+    await expect(page.locator('#connect-ssh-panel')).toBeVisible();
+    await expect(page.locator('#connect-tailscale-panel')).toBeHidden();
+    await expect(page.locator('#connect-agentsquid-details')).toBeHidden();
+    await page.locator('.connect-tab', { hasText: 'Tailscale' }).click();
+
     const copyBtn = page.locator('#connect-tailscale-panel .connect-copy-btn');
     await copyBtn.click();
     await expect(copyBtn).toHaveText('Copied');
@@ -117,15 +124,21 @@ test.describe('Connect modal (Shore/AgentSquid.AI + Tailscale)', () => {
     expect(beginCount).toBe(2);
   });
 
-  test('neither configured shows the install/login prompt, no QR', async ({ page }) => {
+  test('neither configured opens SSH instructions without a QR', async ({ page }) => {
     await mockApp(page);
     await page.route('**/remote', r => r.fulfill({ json: { reason: 'not_installed' } }));
     await page.route('**/shore/devices', r => r.fulfill({ status: 400, json: { error: 'shore_not_configured' } }));
     await page.goto('/');
 
     await typeCommand(page, '/pair');
-    await expect(page.locator('#connect-neither')).toBeVisible();
-    await expect(page.locator('#connect-tabs')).toHaveCount(0);
+    await expect(page.locator('#connect-ssh-panel')).toBeVisible();
+    await expect(page.locator('.connect-tab.active')).toHaveText('SSH');
+    await expect(page.locator('#connect-ssh-panel')).toContainText('No Shore account or Tailscale required');
+    await expect(page.getByRole('link', { name: 'Full SSH port-forwarding guide' })).toHaveAttribute('href', '/ssh-port-forwarding.html');
+    const response = await page.request.get('/ssh-port-forwarding.html');
+    expect(response.ok()).toBeTruthy();
+    expect(await response.text()).toContain('ssh -N -o ExitOnForwardFailure=yes');
+    await expect(page.locator('.connect-tab', { hasText: 'SSH' })).toBeVisible();
     await expect(page.locator('.connect-qr')).toHaveCount(0);
     await expect(page.locator('#connect-neither')).toContainText('Tailscale is not installed');
     await expect(page.locator('#connect-neither')).toContainText('agentsquid login');
@@ -164,4 +177,19 @@ test.describe('Connect modal (Shore/AgentSquid.AI + Tailscale)', () => {
     await expect(page.locator('#connect-neither')).toContainText('only available on the host computer');
     await expect(page.locator('#connect-neither')).not.toContainText('agentsquid login');
   });
+});
+
+
+test('SSH is available with the Shore feature disabled and no Tailscale', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/config/features', r => r.fulfill({ json: { shore: false } }));
+  await page.route('**/remote', r => r.fulfill({ json: { reason: 'not_installed' } }));
+  let pairingCalls = 0;
+  await page.route('**/shore/pairing/begin', r => { pairingCalls++; r.fulfill({ json: {} }); });
+  await page.goto('/');
+  await typeCommand(page, '/remote');
+  await expect(page.locator('.connect-tab.active')).toHaveText('SSH');
+  await expect(page.locator('#connect-ssh-panel')).toBeVisible();
+  await expect(page.locator('#connect-ssh-panel code')).toContainText('ssh -N -L 127.0.0.1:8000:127.0.0.1:8000 user@host');
+  expect(pairingCalls).toBe(0);
 });

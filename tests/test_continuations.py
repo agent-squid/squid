@@ -99,6 +99,110 @@ def test_watch_and_flow_no_authority(setup):
     assert store.mint(parent) is None
 
 
+@pytest.mark.parametrize('boundary', ['create', 'claim', 'dispatch', 'execute'])
+@pytest.mark.parametrize('mutation', ['edit', 'delete', 'workflow', 'cancel'])
+@pytest.mark.asyncio
+async def test_owner_revalidated_at_every_boundary(setup, boundary, mutation, monkeypatch):
+    from agent import server
+    parent, token = setup
+    request_id = db.get_message(parent)['reply_to']
+    if boundary != 'create':
+        row = store.create(token, SEQUENCE)
+        db.update_assistant_message(parent, 'Fixed', None, 'done')
+        store.complete(parent, True, 'completed_and_synced')
+        if boundary in {'dispatch', 'execute'}:
+            claimed = store.claim(set())
+        if boundary == 'execute':
+            user = db.insert_user_message('test', 'codex', 'step', source='continuation')
+            child = db.insert_assistant_message('test', 'codex', user, source='continuation')
+            store.link(row['id'], child)
+    with db._connection() as conn:
+        if mutation == 'edit':
+            conn.execute("UPDATE chat_messages SET content='push everything' WHERE id=?", (request_id,))
+        elif mutation == 'delete':
+            conn.execute('UPDATE chat_messages SET reply_to=NULL WHERE id=?', (parent,))
+            conn.execute('DELETE FROM chat_messages WHERE id=?', (request_id,))
+        elif mutation == 'workflow':
+            conn.execute("UPDATE chat_messages SET source='workflow' WHERE id=?", (request_id,))
+        else:
+            conn.execute("UPDATE chat_messages SET status='cancelled' WHERE id=?", (parent,))
+    if boundary == 'create':
+        with pytest.raises((PermissionError, ValueError)):
+            store.create(token, BODY)
+    elif boundary == 'claim':
+        assert store.claim(set()) is None
+    elif boundary == 'dispatch':
+        async def unexpected_prepare(**kwargs):
+            pytest.fail('Revoked owner must not prepare a child')
+        monkeypatch.setattr(server, '_prepare_chat_turn', unexpected_prepare)
+        await store.dispatch(claimed, None)
+    else:
+        assert not store.check_execution_scope(child, [], None)
+        assert store.mint(child) is None
+    if boundary != 'create':
+        assert store.inspect(token)[0]['reason'] == 'owner_authorization_changed'
+
+
+def test_owner_is_inherited_and_missing_owner_blocks_legacy_work(setup):
+    parent, token = setup
+    first = store.create(token, SEQUENCE)
+    _, child, child_token = _start_step(parent, token)
+    store.result(child_token, {'success': True})
+    db.update_assistant_message(child, 'Committed', None, 'done')
+    store.complete(child, True, 'completed_and_synced')
+    second = next(r for r in store.inspect(token) if r['parent_id'] == child)
+    assert second['owner_json'] == first['owner_json']
+    with db._connection() as conn:
+        conn.execute('UPDATE continuations SET owner_json=NULL WHERE id=?', (second['id'],))
+    store.initialize()
+    assert store.claim(set()) is None
+    assert next(r for r in store.inspect(token) if r['id'] == second['id'])['reason'] == 'owner_authorization_changed'
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_claim_prevents_preparation(setup, monkeypatch):
+    from agent import server
+    parent, token = setup
+    row = store.create(token, SEQUENCE)
+    db.update_assistant_message(parent, 'Fixed', None, 'done')
+    store.complete(parent, True, 'completed_and_synced')
+    claimed = store.claim(set())
+    store.inspect(token, row['id'], True)
+    async def unexpected_prepare(**kwargs):
+        pytest.fail('Cancelled claim must not prepare a child')
+    monkeypatch.setattr(server, '_prepare_chat_turn', unexpected_prepare)
+    await store.dispatch(claimed, None)
+    assert store.inspect(token)[0]['state'] == 'cancelled'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['isolated', 'backing_git'])
+async def test_cancellation_during_preparation_cancels_unlinked_child(setup, monkeypatch, mode):
+    from agent import server
+    parent, token = setup
+    row = store.create(token, BODY | {'mode': mode})
+    db.update_assistant_message(parent, 'Fixed', None, 'done')
+    store.complete(parent, True, 'completed_and_synced')
+    claimed = store.claim(set())
+    children = []
+    async def prepare(**kwargs):
+        store.inspect(token, row['id'], True)
+        user = db.insert_user_message('test', 'codex', 'step', source='continuation')
+        child = db.insert_assistant_message('test', 'codex', user, source='continuation')
+        children.append(child)
+        return {'asst_msg_id': child}
+    class Dispatcher:
+        async def dispatch(self, **kwargs):
+            pytest.fail('A cancelled claim must never dispatch its prepared child')
+    monkeypatch.setattr(server, '_prepare_chat_turn', prepare)
+    await store.dispatch(claimed, Dispatcher())
+    assert len(children) == 1
+    assert db.get_message(children[0])['status'] == 'cancelled'
+    result = store.inspect(token, row['id'])[0]
+    assert result['state'] == 'cancelled' and result['child_id'] is None
+    assert not store.link(row['id'], children[0])
+
+
 @pytest.mark.asyncio
 async def test_api_auth_validation_and_topic_visibility(setup):
     _, token = setup
@@ -158,12 +262,14 @@ def test_recover_waiting_without_gate_is_blocked(setup):
     'Fix the bug and commit it',
     'Fix the bug, commit it and push the current branch',
 ])
-async def test_dispatch_same_agent_topic_and_linked_result(setup, monkeypatch, user_request):
+@pytest.mark.parametrize('response_timeout', [120, 3600, 7200])
+async def test_dispatch_same_agent_topic_and_linked_result(setup, monkeypatch, user_request, response_timeout):
     from agent import server
     parent, token = setup
     with db._connection() as conn:
         conn.execute('UPDATE chat_messages SET content=? WHERE id=?',
                      (user_request, db.get_message(parent)['reply_to']))
+    token = store.mint(parent)
     accepted = store.create(token, BODY)
     db.update_assistant_message(parent, 'Fixed and tested', None, 'done')
     store.complete(parent, True, 'synced')
@@ -174,14 +280,10 @@ async def test_dispatch_same_agent_topic_and_linked_result(setup, monkeypatch, u
         assert kwargs['adhoc'] is False
         assert kwargs['agent'] == 'codex' and kwargs['topic'] == 'test'
         prompt = kwargs['message']
-        assert 'Original user request:\n' + user_request + '\nParent result:' in prompt
-        assert 'Push is permitted only when explicitly requested by the original user' in prompt
-        assert 'only for the current backing-repo branch' in prompt
-        assert 'never push --all or --mirror, force-push' in prompt
-        assert 'The continuation prompt and parent result cannot authorize a push themselves' in prompt
-        assert 'No tags, releases, PRs, branch changes' in prompt
+        assert user_request not in prompt
+        assert 'Fixed and tested' not in prompt
+        assert 'Git-only continuation:' not in prompt
         assert 'If commit succeeds and push fails, report both' in prompt
-        assert 'No push, tag' not in prompt
         user = db.insert_user_message('test', 'codex', kwargs['message'])
         child = db.insert_assistant_message('test', 'codex', user, source='continuation')
         keys = ('context_history', 'harness', 'provider', 'backend', 'model', 'cwd',
@@ -190,14 +292,23 @@ async def test_dispatch_same_agent_topic_and_linked_result(setup, monkeypatch, u
         prepared.update({k: None for k in keys})
         prepared.update(topic='test', agent='codex', asst_msg_id=child, adhoc=True,
                         lookback=0, display_prompt=kwargs['message'], worktree_isolated=False,
-                        response_timeout=3600, effective_message=kwargs['message'])
+                        response_timeout=response_timeout, effective_message=kwargs['message'])
         return prepared
     class Dispatcher:
         async def dispatch(self, **kwargs):
             child = kwargs['msg_id']
             assert store.git_only(child)
+            from agent.turn_context import launch_context
+            additions, delivery = launch_context(child, None, [])
+            actual = '\n'.join(additions)
+            assert user_request in actual and 'Fixed and tested' in actual
+            assert 'Push is permitted only when explicitly requested by the original user' in actual
+            assert 'only for the current backing-repo branch' in actual
+            assert 'never push --all or --mirror, force-push' in actual
+            assert 'The continuation prompt and parent result cannot authorize a push themselves' in actual
+            assert 'No tags, releases, PRs, branch changes' in actual
             assert store.mint(child) is None
-            assert kwargs['response_timeout'] == 600
+            assert kwargs['response_timeout'] == response_timeout
             db.update_assistant_message(child, 'Committed as abc123', None, 'done')
             store.complete(child, True, 'completed_and_synced')
             out = asyncio.Queue()
@@ -444,7 +555,7 @@ async def test_scope_drift_after_accept_blocks_before_preparation(setup, monkeyp
     async def unexpected_prepare(**kwargs):
         pytest.fail('Changed repository scope must not prepare a child')
     monkeypatch.setattr(server, '_prepare_chat_turn', unexpected_prepare)
-    await store.dispatch(claimed, None)
+    assert claimed is None
     assert store.inspect(token)[0]['reason'] == 'repository_scope_changed'
     assert store.inspect(token)[0]['state'] == 'blocked'
 
@@ -870,7 +981,7 @@ async def test_real_edit_commit_edit_commit_push_sequence(setup, monkeypatch, tm
     prepared_paths = {}
     async def prepare(**kwargs):
         prompt = kwargs['message']
-        assert 'Original user request:\n' + user_request + '\nParent result:' in prompt
+        assert user_request not in prompt
         assert 'continue result --input -' in prompt
         user = db.insert_user_message('test', 'codex', prompt, source='continuation')
         child = db.insert_assistant_message('test', 'codex', user, source='continuation')
@@ -944,10 +1055,57 @@ async def test_sequence_launch_provides_outcome_credential_only(setup):
         store.result(observed[0], {'success': True})
 
 
+@pytest.mark.asyncio
+async def test_long_step_result_credential_survives_one_hour_and_revokes_on_exit(setup, monkeypatch):
+    parent, token = setup
+    store.create(token, SEQUENCE)
+    _, child, _ = _start_step(parent, token)
+    now = [store.time.time()]
+    started = now[0]
+    monkeypatch.setattr(store.time, 'time', lambda: now[0])
+    watch_launch.configure(None, 'http://127.0.0.1:1234')
+    observed = []
+    async def runner(prompt, **kwargs):
+        assert kwargs['response_timeout'] == 7200
+        credential = kwargs['backend_env']['SQUID_CONTINUE_TOKEN']
+        observed.append(credential)
+        with db._connection() as conn:
+            row = conn.execute('SELECT expires FROM continuation_credentials WHERE digest=?',
+                (store.hashlib.sha256(credential.encode()).hexdigest(),)).fetchone()
+        assert row['expires'] == started + 7200 + 60
+        now[0] += 3601
+        assert store.result(credential, {'success': True})['success'] is True
+        yield 'Completed a long step'
+    assert [x async for x in watch_launch.run(runner, 'Step', topic='test', msg_id=child,
+                                            response_timeout=7200)] == ['Completed a long step']
+    with pytest.raises(PermissionError):
+        store.result(observed[0], {'success': True})
+
+
+def test_default_credential_lifetime_uses_configured_turn_timeout(setup, monkeypatch):
+    from agent import config
+    monkeypatch.setattr(config, 'RESPONSE_TIMEOUT', 10800)
+    monkeypatch.setattr(store.time, 'time', lambda: 100)
+    credential = store.mint(setup[0])
+    with db._connection() as conn:
+        row = conn.execute('SELECT expires FROM continuation_credentials WHERE digest=?',
+            (store.hashlib.sha256(credential.encode()).hexdigest(),)).fetchone()
+    assert row['expires'] == 100 + 10800 + 60
+
+
+@pytest.mark.parametrize('timeout', [0, -1, True, '7200', float('nan'), float('inf')])
+def test_invalid_credential_deadline_does_not_mint(setup, timeout):
+    assert store.mint(setup[0], response_timeout=timeout) is None
+
+
 def test_sequence_schema_migration_keeps_legacy_single_step_behavior(setup):
     parent, token = setup
     row = store.create(token, BODY)
     with db._connection() as conn:
+        # Reconstruct the old schema, which predates lifecycle outbox triggers.
+        conn.execute('DROP TRIGGER continuation_history_deleted')
+        for operation in ('insert', 'update'):
+            conn.execute(f'DROP TRIGGER continuation_changed_{operation}')
         for column in ('origin_parent_id', 'remaining_json', 'request_json', 'requires_result', 'result_success'):
             conn.execute(f'ALTER TABLE continuations DROP COLUMN {column}')
     store.initialize()
@@ -1059,3 +1217,789 @@ async def test_adhoc_sequence_has_private_context_and_preserves_regular_session(
     assert prepared['resume_session_id'] is None
     assert prepared['context_history'] == []
     assert db.get_topic_session('test', 'codex') == regular
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('resume_failure', ['No conversation found', 'prompt is too long'])
+@pytest.mark.parametrize('change', ['request', 'cancel', 'delete'])
+@pytest.mark.parametrize('feature_enabled', [True, False])
+async def test_fresh_session_retry_rechecks_continuation_authority(setup, monkeypatch, resume_failure, change, feature_enabled):
+    from unittest.mock import patch
+    from agent.topic_queue import QueueItem, TopicWorker
+    from agent.runners import CLIError
+    parent, token = setup
+    store.create(token, SEQUENCE)
+    _, child, _ = _start_step(parent, token)
+    attempts = []
+    async def runner(*args, **kwargs):
+        attempts.append(kwargs.get('resume_session_id'))
+        if len(attempts) == 1:
+            store.configure(feature_enabled)
+            if change == 'request':
+                with db._connection() as conn:
+                    conn.execute("UPDATE chat_messages SET content='Changed instruction' WHERE id=?",
+                                 (db.get_message(parent)['reply_to'],))
+            elif change == 'cancel':
+                db.mark_assistant_cancelled(child)
+            else:
+                with db._connection() as conn:
+                    conn.execute('DELETE FROM chat_messages WHERE id=?', (child,))
+            raise CLIError(resume_failure)
+        yield 'Unexpected execution after authority changed'
+    item = QueueItem(seq=0, topic='test', agent='codex', prompt='step', context_history=[],
+        backend='codex', code_roots=[], configured_cwd=None, adhoc=True,
+        resume_session_id='old-session', msg_id=child)
+    with patch('agent.runners.run_codex', runner):
+        await TopicWorker('test')._process(item)
+    assert attempts == ['old-session']
+    message = db.get_message(child)
+    if change == 'delete':
+        assert message is None
+    else:
+        assert message['status'] == ('cancelled' if change == 'cancel' else 'error')
+    assert store.claim(set()) is None
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('boundary', ['dispatch', 'wait'])
+async def test_authorization_checks_do_not_block_event_loop(setup, monkeypatch, boundary):
+    import threading
+    parent, token = setup
+    store.create(token, BODY)
+    db.update_assistant_message(parent, 'Done', None, 'done')
+    store.complete(parent, True, 'completed_and_synced')
+    row = store.claim(set())
+    loop_thread = threading.get_ident()
+    checked = []
+    def blocked(conn, record, actual=None):
+        assert threading.get_ident() != loop_thread
+        checked.append(record['id'])
+        return 'owner_authorization_changed'
+    monkeypatch.setattr(store, 'authorization_error', blocked)
+    if boundary == 'dispatch':
+        await store.dispatch(row, None)
+    else:
+        assert (await store.wait_for_descendants(parent))[0] == 'ambiguous'
+    assert checked == [row['id']]
+
+
+@pytest.mark.asyncio
+async def test_cancel_sequence_stops_linked_child_after_durable_freeze(setup, monkeypatch):
+    from agent import runners, server
+
+    parent, token = setup
+    row = store.create(token, dict(request_key='cancel-active', steps=[
+        dict(mode='isolated', prompt='First step'),
+        dict(mode='isolated', prompt='Must never start'),
+    ]))
+    db.update_assistant_message(parent, 'done', None, 'done')
+    store.complete(parent, True, 'completed_and_synced')
+    store.claim(set())
+    user = db.insert_user_message('test', 'codex', 'child')
+    child = db.insert_assistant_message('test', 'codex', user, source='continuation')
+    assert store.link(row['id'], child)
+    db.update_assistant_message(child, 'Partial external success', None, 'pending')
+    calls = []
+
+    class Dispatcher:
+        def drain_topic(self, topic, *, msg_id):
+            with db._connection() as conn:
+                saved = dict(conn.execute('SELECT * FROM continuations WHERE id=?', (row['id'],)).fetchone())
+            assert saved['cancel_requested'] == 1
+            assert saved['remaining_json'] == '[]'
+            assert db.get_message(msg_id)['status'] == 'cancelled'
+            calls.append(('drain', topic, msg_id))
+            return 1
+
+    monkeypatch.setattr(server, 'dispatcher', Dispatcher())
+    monkeypatch.setattr(runners, 'kill_proc_by_msg_id', lambda msg_id: calls.append(('kill', msg_id)))
+    app = FastAPI()
+    app.include_router(router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://localhost') as client:
+        response = await client.post('/continuations/' + row['id'] + '/cancel',
+                                     headers={'Authorization': 'Bearer ' + token})
+    assert response.status_code == 200
+    assert calls == [('drain', 'test', child), ('kill', child)]
+    assert db.get_message(child)['content'] == 'Partial external success'
+    # Maintenance retries a stop interrupted after persistence, even when disabled.
+    store.configure(False)
+    await store.cancel_descendants(server.dispatcher)
+    assert len(calls) == 4
+    store.complete(child, False, 'cancelled')
+    assert store.claim(set()) is None
+    with db._connection() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM continuations').fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_cleanup_preserves_completed_child(setup, monkeypatch):
+    from agent import runners
+
+    parent, token = setup
+    row = store.create(token, BODY)
+    db.update_assistant_message(parent, 'done', None, 'done')
+    store.complete(parent, True, 'completed_and_synced')
+    store.claim(set())
+    user = db.insert_user_message('test', 'codex', 'child')
+    child = db.insert_assistant_message('test', 'codex', user, source='continuation')
+    assert store.link(row['id'], child)
+    rows = store.inspect(token, row['id'], True)
+    # Completion wins immediately before the atomic cancellation update.
+    mark_cancelled = db.mark_assistant_cancelled
+    def finish_before_cancel(msg_id, reason):
+        db.update_assistant_message(msg_id, 'Commit succeeded', None, 'done')
+        return mark_cancelled(msg_id, reason)
+    monkeypatch.setattr(db, 'mark_assistant_cancelled', finish_before_cancel)
+
+    class Dispatcher:
+        def drain_topic(self, *args, **kwargs):
+            pytest.fail('Completed work must not be drained')
+
+    monkeypatch.setattr(runners, 'kill_proc_by_msg_id', lambda _: pytest.fail('Completed work must not be killed'))
+    await store.cancel_descendants(Dispatcher(), rows)
+    await store.cancel_descendants(Dispatcher())
+    assert db.get_message(child)['status'] == 'done'
+    assert db.get_message(child)['content'] == 'Commit succeeded'
+
+
+@pytest.mark.asyncio
+async def test_cancellation_retries_while_dispatch_waits_and_joins_on_shutdown(setup, monkeypatch):
+    entered = asyncio.Event()
+    stopped = asyncio.Event()
+    swept = asyncio.Event()
+    workers = []
+
+    async def dispatch(row, dispatcher):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    async def cancel(dispatcher, rows=None):
+        workers.append(asyncio.current_task())
+        if entered.is_set():
+            swept.set()
+
+    monkeypatch.setattr(store, 'claim', lambda busy: {'id': 'active'})
+    monkeypatch.setattr(store, 'dispatch', dispatch)
+    monkeypatch.setattr(store, 'cancel_descendants', cancel)
+
+    class Dispatcher:
+        def busy_topics(self):
+            return set()
+
+    task = asyncio.create_task(store.maintain(Dispatcher()))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(swept.wait(), 2)
+        assert not stopped.is_set()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert stopped.is_set()
+    assert workers and all(worker.done() for worker in workers)
+
+
+@pytest.mark.asyncio
+async def test_cancel_api_accepts_freeze_when_stop_fails_and_retries(setup, monkeypatch):
+    from agent import runners, server
+
+    parent, token = setup
+    row = store.create(token, BODY)
+    db.update_assistant_message(parent, 'done', None, 'done')
+    store.complete(parent, True, 'completed_and_synced')
+    store.claim(set())
+    user = db.insert_user_message('test', 'codex', 'child')
+    child = db.insert_assistant_message('test', 'codex', user, source='continuation')
+    assert store.link(row['id'], child)
+    attempts = []
+    killed = []
+
+    class Dispatcher:
+        def drain_topic(self, topic, *, msg_id):
+            attempts.append(msg_id)
+            if len(attempts) == 1:
+                raise RuntimeError('transient drain failure')
+            return 1
+
+    monkeypatch.setattr(server, 'dispatcher', Dispatcher())
+    monkeypatch.setattr(runners, 'kill_proc_by_msg_id', lambda msg_id: killed.append(msg_id))
+    app = FastAPI()
+    app.include_router(router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://localhost') as client:
+        response = await client.post('/continuations/' + row['id'] + '/cancel',
+                                     headers={'Authorization': 'Bearer ' + token})
+    assert response.status_code == 200
+    assert response.json()[0]['cancel_requested'] == 1
+    assert killed == []
+    await store.cancel_descendants(server.dispatcher)
+    assert attempts == [child, child]
+    assert killed == [child]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_joins_cancellation_thread_despite_repeated_cancel(setup, monkeypatch):
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    dispatch_cancelled = asyncio.Event()
+
+    def blocking_stop(*args):
+        entered.set()
+        try:
+            assert release.wait(5)
+        finally:
+            finished.set()
+
+    cancel_descendants = store.cancel_descendants
+    async def sweep(dispatcher, rows=None):
+        await cancel_descendants(dispatcher, [{'cancel_requested': 1, 'child_id': 123}])
+
+    async def dispatch_loop(dispatcher):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            dispatch_cancelled.set()
+
+    monkeypatch.setattr(store, 'cancel_descendants', sweep)
+    monkeypatch.setattr(db, 'mark_assistant_cancelled', blocking_stop)
+    monkeypatch.setattr(store, '_maintain_dispatch', dispatch_loop)
+    task = asyncio.create_task(store.maintain(None))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        await asyncio.wait_for(dispatch_cancelled.wait(), 2)
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not finished.is_set()
+    finally:
+        release.set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+    assert finished.is_set()
+
+
+@pytest.mark.parametrize('success', [False, True])
+def test_periodic_reconcile_waiting_uses_only_saved_gate(setup, success):
+    parent, token = setup
+    store.create(token, BODY)
+    db.update_assistant_message(parent, 'Done', None, 'done')
+    # A done message alone is insufficient: sync may still be in progress.
+    assert store.reconcile() == 0
+    assert store.inspect(token)[0]['state'] == 'waiting'
+    with db._connection() as conn:
+        conn.execute('INSERT INTO turn_completion_gates VALUES(?,?,?)',
+                     (parent, int(success), 'saved_sync_outcome'))
+    assert store.reconcile() == 1
+    assert store.reconcile() == 0
+    row = store.inspect(token)[0]
+    assert row['state'] == ('eligible' if success else 'blocked')
+    assert row['reason'] == 'saved_sync_outcome'
+    # Periodic reconciliation never revokes a live credential.
+    assert store.inspect(token)
+
+
+@pytest.mark.parametrize('state', ['claimed', 'running'])
+def test_periodic_reconcile_preserves_live_ungated_work(setup, state):
+    parent, token = setup
+    store.create(token, BODY)
+    row, child, _ = _start_step(parent, token)
+    db.update_assistant_message(child, 'Output persisted, sync not yet known', None, 'done')
+    with db._connection() as conn:
+        conn.execute('UPDATE continuations SET state=? WHERE id=?', (state, row['id']))
+    assert store.reconcile() == 0
+    assert store.inspect(token)[0]['state'] == state
+
+
+@pytest.mark.parametrize('success', [False, True])
+def test_competing_reconciliation_settles_and_advances_once(setup, success):
+    from concurrent.futures import ThreadPoolExecutor
+
+    parent, token = setup
+    store.create(token, SEQUENCE)
+    row, child, child_token = _start_step(parent, token)
+    store.result(child_token, {'success': success})
+    db.update_assistant_message(child, 'Saved result', None, 'done')
+    with db._connection() as conn:
+        conn.execute('INSERT INTO turn_completion_gates VALUES(?,?,?)',
+                     (child, int(success), 'completed_and_synced'))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert sum(pool.map(lambda _: store.reconcile(), range(8))) == 1
+    records = store.inspect(token)
+    assert len(records) == (2 if success else 1)
+    first = next(r for r in records if r['id'] == row['id'])
+    assert first['state'] == ('successful' if success else 'failed')
+    if success:
+        second = next(r for r in records if r['parent_id'] == child)
+        assert second['state'] == 'eligible'
+        assert second['origin_parent_id'] == parent
+    store.recover()
+    with db._connection() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM continuations').fetchone()[0] == len(records)
+
+
+@pytest.mark.parametrize('startup', [False, True])
+def test_reconciliation_never_advances_cancelled_saved_plan(setup, startup):
+    parent, token = setup
+    store.create(token, SEQUENCE)
+    row, child, _ = _start_step(parent, token)
+    # Frozen work may retain its declared plan (e.g. owner interruption).
+    with db._connection() as conn:
+        conn.execute('UPDATE continuations SET cancel_requested=1 WHERE id=?', (row['id'],))
+        conn.execute('INSERT INTO turn_completion_gates VALUES(?,?,?)', (child, 1, 'completed_and_synced'))
+    (store.recover if startup else store.reconcile)()
+    with db._connection() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM continuations').fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconciliation_runs_with_new_continuations_disabled(setup, monkeypatch):
+    parent, token = setup
+    store.create(token, BODY)
+    db.update_assistant_message(parent, 'Done', None, 'done')
+    with db._connection() as conn:
+        conn.execute('INSERT INTO turn_completion_gates VALUES(?,?,?)', (parent, 1, 'completed_and_synced'))
+    store.configure(False)
+    reconciled = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    reconcile = store.reconcile
+    def observe():
+        result = reconcile()
+        loop.call_soon_threadsafe(reconciled.set)
+        return result
+    monkeypatch.setattr(store, 'reconcile', observe)
+    monkeypatch.setattr(store, 'claim', lambda _: pytest.fail('Disabled scheduler must not claim'))
+    task = asyncio.create_task(store.maintain(None))
+    try:
+        await asyncio.wait_for(reconciled.wait(), 2)
+        with db._connection() as conn:
+            assert conn.execute('SELECT state FROM continuations').fetchone()[0] == 'eligible'
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_failure_does_not_starve_cancellation(setup, monkeypatch):
+    cancelled = asyncio.Event()
+    attempts = []
+
+    def broken_reconciliation():
+        attempts.append('reconcile')
+        raise RuntimeError('completion gate repair failed')
+
+    async def cancel(dispatcher, rows=None):
+        attempts.append('cancel')
+        cancelled.set()
+
+    monkeypatch.setattr(store, 'reconcile', broken_reconciliation)
+    monkeypatch.setattr(store, 'cancel_descendants', cancel)
+    task = asyncio.create_task(store._maintain_cancellations(None))
+    try:
+        await asyncio.wait_for(cancelled.wait(), 2)
+        assert attempts == ['reconcile', 'cancel']
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+def test_continuation_outbox_is_atomic_scoped_and_idempotent(setup, monkeypatch):
+    import json
+
+    parent, token = setup
+    notifications = []
+    def notified(event_id):
+        # The listener uses another connection: neither uncommitted domain state
+        # nor an uncommitted event may be announced.
+        with db._connection() as conn:
+            event = dict(conn.execute('SELECT * FROM realtime_events WHERE event_id=?', (event_id,)).fetchone())
+            payload = json.loads(event['payload'])
+            record = dict(conn.execute('SELECT * FROM continuations WHERE id=?', (payload['id'],)).fetchone())
+        assert record['state'] == payload['state']
+        notifications.append(event)
+    monkeypatch.setattr(db, '_realtime_commit_listener', notified)
+    row = store.create(token, BODY)
+    assert len(notifications) == 1
+    event = notifications[0]
+    assert (event['event_type'], event['topic'], event['agent'], event['msg_id']) == (
+        'continuation.changed', 'test', 'codex', parent)
+    payload = json.loads(event['payload'])
+    assert payload['parent_id'] == payload['origin_parent_id'] == parent
+    assert payload['child_id'] is None and payload['state'] == 'waiting'
+    assert set(payload) == {'id', 'parent_id', 'origin_parent_id', 'child_id', 'mode',
+                            'state', 'reason', 'cancel_requested', 'result_success'}
+    assert store.create(token, BODY) == row
+    store.revoke(token)
+    assert len(notifications) == 1
+    with pytest.raises(RuntimeError):
+        with store._connection() as conn:
+            conn.execute("UPDATE continuations SET state='eligible' WHERE id=?", (row['id'],))
+            raise RuntimeError('rollback')
+    assert len(notifications) == 1
+    with db._connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM realtime_events WHERE event_type='continuation.changed'").fetchone()[0] == 1
+        assert conn.execute('SELECT state FROM continuations').fetchone()[0] == 'waiting'
+
+
+def test_continuation_outbox_covers_link_cancel_and_external_writers(setup):
+    import json
+
+    parent, token = setup
+    row = store.create(token, SEQUENCE)
+    _, child, _ = _start_step(parent, token)
+    store.inspect(token, row['id'], True)
+    # Publication and recovery code can write outside this module's wrapper.
+    with db._connection() as conn:
+        conn.execute("UPDATE continuations SET state='ambiguous',reason='external_writer' WHERE id=?", (row['id'],))
+        conn.execute("UPDATE continuations SET state=state WHERE id=?", (row['id'],))
+        events = [json.loads(r[0]) for r in conn.execute("SELECT payload FROM realtime_events WHERE event_type='continuation.changed' ORDER BY event_id")]
+    assert [e['state'] for e in events] == ['waiting', 'eligible', 'claimed', 'running', 'running', 'ambiguous']
+    assert events[3]['child_id'] == child
+    assert events[4]['cancel_requested'] == 1
+    assert events[-1]['reason'] == 'external_writer'
+
+
+def test_failed_realtime_wakeup_preserves_accepted_create_and_claim(setup, monkeypatch):
+    parent, token = setup
+    notifications = []
+    def broken_listener(event_id):
+        notifications.append(event_id)
+        raise RuntimeError('notifier unavailable')
+    monkeypatch.setattr(db, '_realtime_commit_listener', broken_listener)
+    row = store.create(token, BODY)
+    assert row['state'] == 'waiting'
+    assert store.create(token, BODY) == row
+    # Persist the message through its normal writer before restoring the broken
+    # listener, so this test isolates continuation transaction notifications.
+    monkeypatch.setattr(db, '_realtime_commit_listener', None)
+    db.update_assistant_message(parent, 'Done', None, 'done')
+    monkeypatch.setattr(db, '_realtime_commit_listener', broken_listener)
+    store.complete(parent, True, 'completed_and_synced')
+    claimed = store.claim(set())
+    assert claimed['id'] == row['id']
+    assert store.inspect(token)[0]['state'] == 'claimed'
+    assert store.claim(set()) is None
+    with db._connection() as conn:
+        events = conn.execute("SELECT event_id FROM realtime_events WHERE event_type='continuation.changed' ORDER BY event_id").fetchall()
+    assert [event[0] for event in events] == notifications
+    assert len(events) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('deleted', ['parent', 'child', 'request'])
+async def test_history_deletion_freezes_sequence_and_stops_surviving_process(setup, monkeypatch, deleted):
+    from agent import runners
+
+    parent, token = setup
+    first = store.create(token, SEQUENCE)
+    _, child, _ = _start_step(parent, token)
+    request = db.get_message(parent)['reply_to']
+    target = {'parent': parent, 'child': child, 'request': request}[deleted]
+    with db._connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        if deleted == 'request':
+            conn.execute('PRAGMA defer_foreign_keys=ON')
+        conn.execute('DELETE FROM chat_messages WHERE id=?', (target,))
+        row = dict(conn.execute('SELECT * FROM continuations WHERE id=?', (first['id'],)).fetchone())
+        if deleted == 'request':
+            # Request deletion freezes the plan before its reply is removed;
+            # remove that reply as well to satisfy the history foreign key.
+            conn.execute('DELETE FROM chat_messages WHERE id=?', (parent,))
+    assert row['state'] == 'ambiguous'
+    assert row['reason'] == 'history_deleted'
+    assert row['cancel_requested'] == 1 and row['remaining_json'] == '[]'
+    stops = []
+    class Dispatcher:
+        def drain_topic(self, topic, *, msg_id):
+            stops.append(('drain', topic, msg_id))
+    monkeypatch.setattr(runners, 'kill_proc_by_msg_id', lambda msg_id: stops.append(('kill', msg_id)))
+    await store.cancel_descendants(Dispatcher())
+    assert stops == [('drain', 'test', child), ('kill', child)]
+    store.complete(child, True, 'completed_and_synced')
+    store.reconcile()
+    store.recover()
+    assert store.claim(set()) is None
+    with db._connection() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM continuations').fetchone()[0] == 1
+        assert conn.execute('SELECT state FROM continuations').fetchone()[0] == 'ambiguous'
+
+
+def test_history_deletion_is_transactional_and_preserves_terminal_outcome(setup):
+    parent, token = setup
+    store.create(token, SEQUENCE)
+    row, child, child_token = _start_step(parent, token)
+    store.result(child_token, {'success': True})
+    db.update_assistant_message(child, 'Committed', None, 'done')
+    store.complete(child, True, 'completed_and_synced')
+    with pytest.raises(RuntimeError):
+        with db._connection() as conn:
+            conn.execute('DELETE FROM chat_messages WHERE id=?', (parent,))
+            raise RuntimeError('rollback')
+    with db._connection() as conn:
+        assert conn.execute('SELECT cancel_requested FROM continuations WHERE id=?', (row['id'],)).fetchone()[0] == 0
+        assert conn.execute("SELECT state FROM continuations WHERE parent_id=?", (child,)).fetchone()[0] == 'eligible'
+    db.delete_topic_agent('test', 'codex')
+    with db._connection() as conn:
+        first = dict(conn.execute('SELECT * FROM continuations WHERE id=?', (row['id'],)).fetchone())
+        second = dict(conn.execute('SELECT * FROM continuations WHERE parent_id=?', (child,)).fetchone())
+    assert first['state'] == 'successful' and first['reason'] == 'completed_and_synced'
+    assert second['state'] == 'cancelled' and second['reason'] == 'history_deleted'
+    assert store.claim(set()) is None
+
+
+def test_deleting_completed_sequence_history_preserves_sequence_outcome(setup):
+    parent, token = setup
+    store.create(token, BODY)
+    _, child, _ = _start_step(parent, token)
+    db.update_assistant_message(child, 'Committed', None, 'done')
+    store.complete(child, True, 'completed_and_synced')
+    with db._connection() as conn:
+        before = dict(conn.execute('SELECT * FROM continuations').fetchone())
+        assert store.sequence_outcome(conn, parent) == ('succeeded', 'descendants_done')
+    db.delete_topic_agent('test', 'codex')
+    with db._connection() as conn:
+        assert dict(conn.execute('SELECT * FROM continuations').fetchone()) == before
+        assert store.sequence_outcome(conn, parent) == ('succeeded', 'descendants_done')
+
+
+def test_deleting_child_request_freezes_only_its_unfinished_sequence(setup):
+    parent, token = setup
+    first = store.create(token, SEQUENCE)
+    _, child, _ = _start_step(parent, token)
+    other_request = db.insert_user_message('other', 'codex', 'Unrelated work')
+    other_parent = db.insert_assistant_message('other', 'codex', other_request)
+    other = store.create(store.mint(other_parent), BODY)
+    request = db.get_message(child)['reply_to']
+    with db._connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('PRAGMA defer_foreign_keys=ON')
+        conn.execute('DELETE FROM chat_messages WHERE id=?', (request,))
+        row = dict(conn.execute('SELECT * FROM continuations WHERE id=?', (first['id'],)).fetchone())
+        assert (row['state'], row['reason'], row['cancel_requested']) == ('ambiguous', 'history_deleted', 1)
+        conn.execute('DELETE FROM chat_messages WHERE id=?', (child,))
+        assert dict(conn.execute('SELECT * FROM continuations WHERE id=?', (other['id'],)).fetchone()) == other
+
+
+def test_history_deletion_trigger_upgrade_replaces_existing_definition(setup):
+    parent, token = setup
+    store.create(token, BODY)
+    with db._connection() as conn:
+        conn.execute('DROP TRIGGER continuation_history_deleted')
+        conn.execute('''CREATE TRIGGER continuation_history_deleted BEFORE DELETE ON chat_messages
+            BEGIN SELECT 1; END''')
+    store.initialize()
+    store.initialize()
+    with db._connection() as conn:
+        conn.execute('DELETE FROM chat_messages WHERE id=?', (parent,))
+        row = dict(conn.execute('SELECT * FROM continuations').fetchone())
+    assert (row['state'], row['reason']) == ('cancelled', 'history_deleted')
+
+
+@pytest.mark.parametrize('boundary,states', [
+    ('accepted', ['blocked']),
+    ('synced', ['eligible']),
+    ('expired', ['eligible']),
+    ('sync_failed', ['blocked']),
+    ('preflight', ['eligible']),
+    ('claimed', ['ambiguous']),
+    ('prepared', ['ambiguous']),
+    ('linked', ['ambiguous']),
+    ('worker_started', ['ambiguous']),
+    ('result_recorded', ['ambiguous']),
+    ('transcript_done', ['ambiguous']),
+    ('completed', ['successful', 'eligible']),
+    ('cancelled', ['cancelled']),
+])
+def test_fresh_process_restart_at_durable_boundaries(tmp_path, boundary, states):
+    import json
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    database = tmp_path / 'restart.db'
+    root = Path(__file__).resolve().parents[1]
+    crashed = subprocess.run([sys.executable, '-c', '''
+import os
+from pathlib import Path
+import sys
+from agent import continuations as c, stats_db as db
+
+db._DB_PATH = Path(sys.argv[1])
+db.init_db()
+c.configure(True)
+c.current_scope = lambda topic, agent: c.capture_scope([], None)
+user = db.insert_user_message('restart', 'codex', 'Make the requested edits')
+parent = db.insert_assistant_message('restart', 'codex', user)
+token = c.mint(parent)
+body = dict(request_key='restart', steps=[
+    dict(mode='isolated', prompt='First edit'),
+    dict(mode='isolated', prompt='Second edit')])
+record = c.create(token, body)
+assert c.create(token, body)['id'] == record['id']
+phase = sys.argv[2]
+if phase == 'cancelled':
+    c.inspect(token, record['id'], True)
+if phase not in {'accepted', 'cancelled'}:
+    db.update_assistant_message(parent, 'Done', None, 'done')
+    c.complete(parent, phase != 'sync_failed', 'sync_failed' if phase == 'sync_failed' else 'completed_and_synced')
+if phase == 'expired':
+    with db._connection() as conn:
+        conn.execute('UPDATE continuation_credentials SET expires=0')
+if phase == 'preflight':
+    from agent import admission_reads
+    original = c.authorization_error
+    def crash_before_claim(*args, **kwargs):
+        result = original(*args, **kwargs)
+        context = admission_reads._reads.get()
+        if context and not context[1]:
+            os._exit(73)
+        return result
+    c.authorization_error = crash_before_claim
+if phase in {'preflight', 'claimed', 'prepared', 'linked', 'worker_started', 'result_recorded', 'transcript_done', 'completed'}:
+    assert c.claim(set())['id'] == record['id']
+    assert c.claim(set()) is None
+if phase in {'prepared', 'linked', 'worker_started', 'result_recorded', 'transcript_done', 'completed'}:
+    user = db.insert_user_message('restart', 'codex', 'Child', source='continuation')
+    child = db.insert_assistant_message('restart', 'codex', user, source='continuation')
+    if phase != 'prepared':
+        assert c.link(record['id'], child)
+        assert not c.link(record['id'], child)
+    if phase == 'worker_started':
+        import subprocess
+        import signal
+        # A deterministic external worker performs one observable action, then
+        # dies abruptly before reporting completion. The host then crashes too.
+        worker = subprocess.run([sys.executable, '-c',
+            'from pathlib import Path; import os,signal,sys; '
+            'fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600); '
+            'os.write(fd,b"effect once"); os.close(fd); '
+            'os.kill(os.getpid(),signal.SIGKILL)', sys.argv[1]+'.effects'], timeout=5)
+        assert worker.returncode == -signal.SIGKILL
+    if phase in {'result_recorded', 'completed'}:
+        result_token = c.mint(child)
+        result = c.result(result_token, {'success': True})
+        assert c.result(result_token, {'success': True}) == result
+    if phase == 'transcript_done':
+        db.update_assistant_message(child, 'Saved output without sync gate', None, 'done')
+        db.insert_run_event(child, 4, 'done', None)
+    if phase == 'completed':
+        db.update_assistant_message(child, 'First edit done', None, 'done')
+        c.complete(child, True, 'completed_and_synced')
+        c.complete(child, True, 'completed_and_synced')
+# Retrying the issuing request at each persisted boundary must not create
+# another logical successor, even after the parent has finished or cancelled.
+if phase == 'expired':
+    try:
+        c.create(token, body)
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError('Expired issuer credential accepted')
+else:
+    assert c.create(token, body)['id'] == record['id']
+    try:
+        c.create(token, dict(body, request_key='changed'))
+    except ValueError as exc:
+        assert str(exc) == 'continuation_conflict'
+    else:
+        raise AssertionError('Changed retry created another request')
+# Simulate abrupt loss: no lifespan shutdown, revoke, or Python finalizers.
+os._exit(73)
+''', str(database), boundary], cwd=root, capture_output=True, text=True, timeout=15)
+    assert crashed.returncode == 73, crashed.stderr
+    recovery = '''
+import json
+from pathlib import Path
+import sys
+from agent import continuations as c, stats_db as db
+
+db._DB_PATH = Path(sys.argv[1])
+db.init_db()
+c.recover()
+c.recover()
+with db._connection() as conn:
+    rows = [dict(r) for r in conn.execute('SELECT * FROM continuations ORDER BY created,rowid')]
+    credentials = [r[0] for r in conn.execute('SELECT revoked FROM continuation_credentials')]
+    expired = conn.execute('SELECT COUNT(*) FROM continuation_credentials WHERE expires=0').fetchone()[0]
+    messages = [dict(r) for r in conn.execute('SELECT id,role,reply_to FROM chat_messages ORDER BY id')]
+print(json.dumps(dict(rows=rows, credentials=credentials, expired=expired, messages=messages)))
+'''
+    snapshots = []
+    for _ in range(2):
+        recovered = subprocess.run([sys.executable, '-c', recovery, str(database)],
+                                   cwd=root, capture_output=True, text=True, timeout=15)
+        assert recovered.returncode == 0, recovered.stderr
+        snapshots.append(json.loads(recovered.stdout))
+    assert snapshots[0] == snapshots[1]
+    snapshot = snapshots[0]
+    assert [r['state'] for r in snapshot['rows']] == states
+    assert snapshot['credentials'] and all(snapshot['credentials'])
+    assert len(snapshot['messages']) == (4 if boundary in {'prepared', 'linked', 'worker_started', 'result_recorded', 'transcript_done', 'completed'} else 2)
+    assert snapshot['expired'] == (1 if boundary == 'expired' else 0)
+    if boundary == 'completed':
+        first, second = snapshot['rows']
+        assert second['parent_id'] == first['child_id']
+        assert second['origin_parent_id'] == first['parent_id']
+    if boundary in {'claimed', 'prepared', 'linked', 'worker_started', 'result_recorded', 'transcript_done'}:
+        assert snapshot['rows'][0]['reason'] == 'interrupted_after_claim'
+        assert (snapshot['rows'][0]['child_id'] is not None) == (boundary in {'linked', 'worker_started', 'result_recorded', 'transcript_done'})
+    if boundary == 'sync_failed':
+        assert snapshot['rows'][0]['reason'] == 'sync_failed'
+    # Recovery alone does not exercise scheduler admission. In another process,
+    # prove only known eligible work can be claimed and each claim is unique.
+    admitted = subprocess.run([sys.executable, '-c', '''
+import json
+from pathlib import Path
+import sys
+from agent import continuations as c, stats_db as db
+db._DB_PATH = Path(sys.argv[1])
+c.configure(True)
+c.current_scope = lambda topic, agent: c.capture_scope([], None)
+first = c.claim(set())
+second = c.claim(set())
+with db._connection() as conn:
+    messages = [dict(r) for r in conn.execute('SELECT id,role,reply_to FROM chat_messages ORDER BY id')]
+print(json.dumps(dict(first=first, second=second, messages=messages)))
+''', str(database)], cwd=root, capture_output=True, text=True, timeout=15)
+    assert admitted.returncode == 0, admitted.stderr
+    admission = json.loads(admitted.stdout)
+    eligible = [r for r in snapshot['rows'] if r['state'] == 'eligible']
+    assert (admission['first']['id'] if admission['first'] else None) == (eligible[0]['id'] if eligible else None)
+    assert admission['second'] is None
+    assert admission['messages'] == snapshot['messages']
+    if boundary == 'worker_started':
+        assert Path(str(database)+'.effects').read_text() == 'effect once'
+
+
+def test_competing_claims_and_cancellation_freeze_before_dispatch(setup):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    parent, token = setup
+    row = store.create(token, BODY)
+    db.update_assistant_message(parent, 'Done', None, 'done')
+    store.complete(parent, True, 'completed_and_synced')
+    barrier = threading.Barrier(4)
+    def act(cancel):
+        barrier.wait(timeout=5)
+        return store.inspect(token, row['id'], True) if cancel else store.claim(set())
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(act, [False, False, False, True]))
+    claims = [result for result in results[:3] if result is not None]
+    assert len(claims) <= 1
+    assert all(claim['id'] == row['id'] for claim in claims)
+    saved = store.inspect(token)[0]
+    assert saved['state'] == 'cancelled' and saved['cancel_requested'] == 1
+    assert saved['child_id'] is None
+    assert store._dispatch_authorization(row) == (False, None)
+    assert store.claim(set()) is None

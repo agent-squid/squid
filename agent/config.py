@@ -253,3 +253,7 @@ if _proxy_cfg.get("enabled"):
         "HTTPS_PROXY": _proxy_url,
         "SSL_CERT_FILE": _cert,
     }
+
+# Agent-callable route launch is an explicit, independent opt-in.
+from .route_policy import configuration as _route_configuration
+ROUTES = _route_configuration(_cfg)

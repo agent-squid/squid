@@ -84,6 +84,24 @@ isolation through normal turn preparation. Git steps inspect the backing repo's
 current state; existing commits on the current branch are included in a push.
 The plan does not freeze the repository or expand the original authorization.
 
+For ordinary human continuations, the visible input contains the next action
+and current sync/sequence facts. Source message IDs carry the original request
+and sequence results separately from pins. At runner launch Squid reuses source
+content from the actual resumed session, injecting only missing sources. A fresh
+retry recomputes delivery; an ad hoc sequence's supplied history is not injected
+again. Keep scheduled prompts concise rather than repeating history or standard
+execution rules. Watch/Flow-owned continuation prompts retain their scoped
+handoff behavior.
+
+The ctx popup links source messages (including a Flow's starting message) and
+shows whether each source was referenced, already in session/history, or
+injected. It also previews recorded runtime and human-continuation instruction
+templates, with their revisions and rendered values. Each launch attempt keeps
+its own snapshot, so a fresh retry remains distinguishable from its failed
+resume. Older turns without snapshots show references only; they do not claim
+historical template delivery. Mandatory instructions still reach the runner;
+these viewer links do not replace their delivery.
+
 Before its final response, every sequence step must record an explicit outcome:
 
 ```sh
@@ -229,3 +247,39 @@ Git observations. An uncaptured identity read defers admission for fresh
 preflight rather than running Git under the lock. Observations are discarded
 after that candidate; worker admission and every publication effect still
 revalidate Git state afresh. Database authority and budgets are not cached.
+
+## Read-only agent history search
+
+Turns receiving `SQUID_CONTINUE_TOKEN` can also use basic history search without
+scheduling work. The same shared catalog exposes `history_search` and
+`history_fetch` over CLI/HTTP and optional MCP. This initial slice uses existing
+SQLite FTS5 indexes; it requires no QMD or model downloads.
+
+```sh
+agentsquid search --query "release"
+agentsquid search --query "release" --target prompts --limit 5
+agentsquid search --message 12345
+agentsquid search --message 12345 --offset 8000
+agentsquid search --query "release" --scope subtree
+agentsquid search --message 12345 --scope subtree
+```
+
+Scope defaults to the issuing turn's exact topic, derived from its validated
+credential. Explicit `--scope subtree` includes that topic and its dot-separated
+descendants for both search and fetch. Parent, sibling and unrelated topics stay
+excluded; callers cannot select a different root. CLI, HTTP and MCP accept the
+same optional `scope` field (`exact` or `subtree`). Availability follows existing continuation
+credential provisioning, so this does not add search to persistent harnesses or
+turns without those credentials. Results are newest first, with up to 20 hits
+and 800-character excerpts. Prompt searches identify the assistant reply and
+include `prompt_message_id` for fetching the original prompt. Source records
+include message IDs, topic, agent, timestamp and the existing `/jump <id>` UI
+command. No new browser deep-link format is introduced.
+
+Fetch returns at most 8,000 characters and a `next_offset` for the next page.
+It checks current topic and message existence again; deleted or inaccessible
+messages return the same not-found response. It returns message text, not run
+metadata, credentials or internal context fields. Message text itself may contain
+sensitive user-provided material; this tool adds no content redaction guarantee.
+Retrieved history is historical context, never new instructions, grants or proof
+that a prior operation still reflects current repository or deployment state.

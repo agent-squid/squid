@@ -9,13 +9,18 @@ async def call(function, *args, **kwargs):
     except asyncio.CancelledError:
         # A worker cannot be cancelled. In particular, mint must finish before
         # its caller revokes the turn, otherwise a late mint can leak a token.
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        if not task.cancelled():
-            task.exception()  # consume an error after the caller was cancelled
+        await settle(task)
         raise
+
+
+async def settle(task):
+    """Join a shielded worker despite repeated cancellation of its caller."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    if not task.cancelled():
+        task.exception()  # consume an error after the caller was cancelled

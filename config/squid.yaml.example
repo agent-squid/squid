@@ -17,6 +17,7 @@ server:
 
 agent:
   first_byte_timeout: 600
+  # Total response deadline for both ordinary turns and continuation steps.
   response_timeout: 3600
   # How long a native `!` shell command may run before Squid stops it (ADR-0038).
   shell_timeout: 120
@@ -50,10 +51,23 @@ auth:
   # tailnet.
   allow_remote_keychain_unlock: false
 
-# ADR-0054: worktree.enabled also enables one durable successor per human
-# one-shot CLI turn; no separate continuation setting is required.
-# Parent completion and all repo syncs must succeed. Same agent/topic, maximum
-# successor timeout 600 seconds, no grandchildren, watch/Flow or publication.
+# ADR-0054: worktree.enabled also enables bounded continuation sequences.
+# Parent completion and all repo syncs must succeed. See docs/continuations.md.
+# Agent-callable routes additionally require the explicit routes opt-in below.
+# Bounded local-work routes; restart required. No implicit harness setup.
+# Same-topic immediate Flow subset only; watch/task origins remain excluded.
+# Route fan-out, nested routes and continuations share these finite root limits.
+# See docs/routes.md for supported inputs, accounting and recovery semantics.
+routes:
+  enabled: false
+  max_turns: 16
+  max_depth: 4
+  max_seconds: 1800
+  turn_seconds: 300
+  concurrency: 4
+  topic_concurrency: 8
+  global_concurrency: 32
+
 worktree:
   # Per-turn code-root isolation. Opt in with enabled: true; otherwise use direct writes.
   enabled: false
@@ -158,7 +172,7 @@ providers:
     label: agy
     color: "#4285F4"
     auth: {type: subscription}
-    gauge: {type: static, text: Native, title: Managed by Antigravity CLI}
+    gauge: antigravity
     supported_apis: [/native/antigravity]
 
   # Native Claude Code. Uses the local `claude` CLI subscription/login.

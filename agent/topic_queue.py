@@ -427,6 +427,13 @@ class TopicWorker:
                 await item.out_q.put(None)
             finally:
                 self._processing_seq = None
+                if item.msg_id is not None:
+                    from .routes import worker_finished
+                    from .watch_async import call
+                    try:
+                        await call(worker_finished, item.msg_id)
+                    except Exception:
+                        log.exception('Route worker accounting failed msg_id=%s', item.msg_id)
             self.q.task_done()
 
     def _trigger_chain_continuation(self, msg_id: int, error: Optional[str] = None) -> None:
@@ -451,7 +458,9 @@ class TopicWorker:
         completion_reason = "turn_failed_or_cancelled"
         from .runners import CLIError, CLIAuthRequired, effective_protocol, runner_for_agent
         from .config import SQUID_HOME, WORKTREE_ISOLATION_ENABLED
-        if item.watch_run_id:
+        from .continuations import child_owner
+        continuation_owner = await asyncio.to_thread(child_owner, item.msg_id)
+        if item.watch_run_id and not continuation_owner:
             from .watch_dispatch import refresh_run
             refreshed = await refresh_run(item.watch_run_id)
             if refreshed is None:
@@ -477,6 +486,22 @@ class TopicWorker:
             get_worktrees,
         )
         from .git_changes import prepare_trackers
+        from . import task_workspaces
+        try:
+            task = await asyncio.to_thread(task_workspaces.for_turn, item.msg_id)
+            if task:
+                if not WORKTREE_ISOLATION_ENABLED or item.native_shell:
+                    raise RuntimeError('task workspace requires isolated editing')
+                if item.worktree_isolated:
+                    raise RuntimeError('task turn isolation must be prepared by worker')
+                item.code_roots = [task['worktree_path']]
+                item.cwd = item.source_cwd = task['worktree_path']
+                item.adhoc, item.resume_session_id = True, None
+        except RuntimeError as exc:
+            update_assistant_message(item.msg_id, str(exc), None, 'error', only_if_pending=True)
+            await item.out_q.put({'_error': str(exc)})
+            await item.out_q.put(None)
+            return
 
         try:
             harness, provider = split_agent_ref(item.harness or item.backend, item.provider)
@@ -585,6 +610,14 @@ class TopicWorker:
             )
             item.worktree_setup_elapsed_ms = (time.perf_counter() - setup_started_at) * 1000
             display_cwd = item.source_cwd or (item.cwd or SQUID_HOME)
+        if task:
+            if not item.worktree_isolated:
+                error = 'task workspace isolation failed; execution blocked'
+                update_assistant_message(item.msg_id, error, None, 'error', only_if_pending=True)
+                await item.out_q.put({'_error': error})
+                await item.out_q.put(None)
+                return
+            proc_cwd = tracking_roots[0]
 
         worktree_sources: dict[str, str] = {}
         if item.msg_id:
@@ -683,16 +716,56 @@ class TopicWorker:
             if not emitted and no_change_tool:
                 await _emit_tool(no_change_tool)
 
+        async def _check_launch_scope():
+            from . import continuations, flow
+            if not await asyncio.to_thread(flow.execution_allowed, item.msg_id):
+                raise RuntimeError('Flow execution no longer authorized')
+            await asyncio.to_thread(task_workspaces.for_turn, item.msg_id)
+            await asyncio.to_thread(task_workspaces.check_recovery, item.msg_id, effective_cwd)
+            if not await asyncio.to_thread(continuations.check_execution_scope, item.msg_id,
+                                           execution_scope['code_roots'], execution_scope['configured_cwd']):
+                raise RuntimeError('Continuation repository scope changed; execution blocked.')
+            if item.watch_run_id:
+                from .watch_dispatch import authorized_run
+                if not await authorized_run(item.watch_run_id):
+                    raise RuntimeError('Watch authorization changed before execution')
+
         async def _stream(prompt, **kw):
             nonlocal run_seq, session_id, raw, status_raw, stream_error
+            delivery = None
+            # Every launch, including fresh-session fallback, needs current
+            # authority. A failed resume may have yielded to a stop or revoke.
+            await _check_launch_scope()
+            if not item.native_shell:
+                from .turn_context import launch_context
+                additions, delivery = await asyncio.to_thread(
+                    launch_context, item.msg_id, kw.get('resume_session_id'), runtime_blocks, kw.get('history'))
+                if additions:
+                    prompt = '\n\n'.join(additions + [prompt])
+            if item.msg_id is not None:
+                message = await asyncio.to_thread(get_message, item.msg_id)
+                if message and message['status'] != 'pending':
+                    raise RuntimeError('Cancelled before start')
+            if not item.native_shell:
+                from .continuations import launch_timeout
+                now = None
+                if item.watch_run_id:
+                    from .server import app
+                    now = app.state.watch_service.clock()
+                kw['response_timeout'] = await asyncio.to_thread(launch_timeout, item.msg_id,
+                    kw['response_timeout'], item.watch_run_id, now)
+            # Record after cancellation/timeout checks, immediately before the
+            # attempt. Fresh retries get their own source delivery snapshot.
+            if delivery is not None and item.msg_id is not None:
+                insert_run_event(item.msg_id, run_seq, 'context', json.dumps(delivery))
+                run_seq += 1
             from .watch_launch import run as run_with_watch_credentials
-            from .continuations import capture_scope
             from contextlib import aclosing
             async with aclosing(run_with_watch_credentials(
                 runner, prompt,
                 persistent=not item.native_shell and effective_protocol(resolved, adhoc=item.adhoc) != "oneshot-cli",
                 shell=item.native_shell,
-                continuation_scope=capture_scope(source_roots, item.configured_cwd),
+                continuation_scope=execution_scope,
                 request_text=item.display_prompt if item.display_prompt is not None else item.prompt,
                 **kw,
             )) as stream:
@@ -747,9 +820,10 @@ class TopicWorker:
 
         try:
             from . import continuations
-            if not await asyncio.to_thread(continuations.check_execution_scope, item.msg_id,
-                                           source_roots, item.configured_cwd):
-                raise RuntimeError('Continuation repository scope changed; execution blocked.')
+            execution_scope = await asyncio.to_thread(task_workspaces.execution_scope, item.msg_id,
+                                                      source_roots, item.configured_cwd)
+            # Revalidate the immutable destination after filesystem/tracker setup.
+            await _check_launch_scope()
             # prepare_trackers may perform filesystem and git work after the
             # earlier cancellation check. Recheck at the final async boundary
             # before asking the runner to create its process.
@@ -761,7 +835,7 @@ class TopicWorker:
                     await item.out_q.put({"_error": "Cancelled before start"})
                     await item.out_q.put(None)
                     return
-            if item.watch_run_id:
+            if item.watch_run_id and not continuation_owner:
                 from .watch_dispatch import confirm_run
                 if not await confirm_run(item.watch_run_id):
                     for tracker in git_trackers:
@@ -809,7 +883,7 @@ class TopicWorker:
 
             await _emit_git_diff()
             from . import continuations
-            if continuations.git_only(item.msg_id) and any(
+            if continuations.read_only(item.msg_id) and any(
                     tool.get('name') == 'GitDiff' and tool.get('files') for tool in tool_events):
                 # Reuse the existing manual-attention status so both cleanup and
                 # admission settlement retain these edits without promoting them.
@@ -920,10 +994,13 @@ class TopicWorker:
                     worktree_sync_repo_count > 0 and
                     all(status == 'synced' for status in worktree_sync_statuses)))
             completion_reason = 'completed_and_synced' if completion_success else 'completion_or_sync_failed'
+            if not completion_success:
+                insert_run_event(item.msg_id, run_seq, "error", completion_reason)
+                run_seq += 1
             insert_run_event(item.msg_id, run_seq, "done", None)
             if item.msg_id:
                 self._trigger_chain_continuation(
-                    item.msg_id, None if content else "agent returned no output",
+                    item.msg_id, None if completion_success else completion_reason if content else "agent returned no output",
                 )
 
         except Exception as exc:
@@ -957,13 +1034,12 @@ class TopicWorker:
             except Exception:
                 pass
             if item.msg_id:
-                terminal_error = None if raw or recovered_content else err_text
-                self._trigger_chain_continuation(item.msg_id, terminal_error)
+                self._trigger_chain_continuation(item.msg_id, err_text)
             await item.out_q.put({"_error": err_text})
 
         finally:
             from . import continuations
-            if continuations._enabled and item.msg_id:
+            if item.msg_id:
                 await asyncio.to_thread(continuations.complete, item.msg_id,
                                         completion_success, completion_reason)
             await item.out_q.put(None)

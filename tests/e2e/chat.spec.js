@@ -1004,6 +1004,42 @@ test.describe('response bubble', () => {
     await look(page);  // pause — observe: top of the long response visible, not its tail
   });
 
+  for (const width of [390, 1280]) {
+    test(`Markdown tables remain readable and scroll within the bubble at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      const markdown = '| What children inherit | Requests per briefing | Exegesis time | Exegesis cost |\n'
+        + '| --- | --- | --- | --- |\n'
+        + '| Today | 44 | ~106 min | ~$196 |\n'
+        + '| Playbooks + shared contract investigation (definitions, cross-references, closing conditions and remedies) | ~25–30 if most reading is shared | ~60–75 min | ~$120–150 if the shared opening stays small |';
+      await page.route('**/chat', r => r.fulfill({
+        status: 200, headers: SSE_HEADERS, body: sse(META) + 'data: ' + markdown.replaceAll('\n', '\ndata: ') + '\n\n' + sse(DONE),
+      }));
+      await sendMsg(page);
+      const scroller = page.locator(`${RESPONSE} .markdown-table-scroll`);
+      await expect(scroller.locator('table')).toBeVisible();
+      const sizes = await scroller.evaluate(el => {
+        const headers = [...el.querySelectorAll('th')];
+        const bubble = el.closest('.msg');
+        const messages = document.getElementById('messages');
+        el.scrollLeft = el.scrollWidth;
+        return {
+          scrollLeft: el.scrollLeft,
+          headerWidths: headers.map(th => th.getBoundingClientRect().width),
+          bubbleRight: bubble.getBoundingClientRect().right,
+          messagesRight: messages.getBoundingClientRect().right,
+          pageWidth: document.documentElement.scrollWidth,
+          viewport: innerWidth,
+        };
+      });
+      expect(Math.min(...sizes.headerWidths)).toBeGreaterThan(70);
+      expect(sizes.bubbleRight).toBeLessThanOrEqual(sizes.messagesRight + 1);
+      expect(sizes.pageWidth).toBeLessThanOrEqual(sizes.viewport);
+      if (width === 390) expect(sizes.scrollLeft).toBeGreaterThan(0);
+      await scroller.evaluate(el => { el.scrollLeft = 0; });
+      await page.screenshot({ path: test.info().outputPath('table.png') });
+    });
+  }
+
   test('renders response tildes literally instead of strikethrough', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200,
@@ -1337,6 +1373,45 @@ test.describe('response bubble', () => {
     await expect(page.locator('#ctx-popup')).toContainText('flow-test-123');
   });
 
+  test('context sources distinguish session reuse and fresh retry and preview saved instructions', async ({ page }) => {
+    const instruction = {
+      source: 'agent/runtime/worktree.md', revision: 'saved-revision',
+      content: 'Saved instruction for /isolated/original <literal>', delivery: 'injected',
+    };
+    await page.route('**/chat/42/context', r => r.fulfill({ json: { attempts: [
+      { resume_session_id: 'same-session', sources: [{ message_id: 7, label: 'Flow starting message', delivery: 'session history' }], instructions: [instruction] },
+      { resume_session_id: null, sources: [{ message_id: 7, label: 'Flow starting message', delivery: 'injected' }], instructions: [instruction] },
+    ] } }));
+    await page.evaluate(() => {
+      const anchor = document.createElement('span');
+      anchor.className = 'user-ctx';
+      anchor.dataset.msgId = '42';
+      anchor.textContent = 'ctx';
+      document.getElementById('messages').appendChild(anchor);
+      showCtxPopup(anchor);
+      window._sourceJump = null;
+      jumpToMessage = id => { window._sourceJump = id; };
+    });
+    const section = page.locator('#ctx-sources-section');
+    await expect(section).toContainText('Launch 1 · resume');
+    await expect(section).toContainText('Launch 2 · fresh');
+    await expect(section).toContainText('#7 · session history');
+    await expect(section).toContainText('#7 · injected');
+    await expect(page.locator('#ctx-popup .ctx-popup-pin')).toHaveCount(0);
+    await section.locator('.ctx-popup-link').filter({ hasText: 'agent/runtime/worktree.md' }).first().click();
+    await expect(page.locator('#msg-modal')).toHaveClass(/open/);
+    await expect(page.locator('#msg-modal-title')).toHaveText('agent/runtime/worktree.md');
+    await expect(page.locator('#msg-modal-body')).toContainText('saved-revision');
+    await expect(page.locator('#msg-modal-body')).toContainText('/isolated/original <literal>');
+    await expect(page.locator('#msg-modal-body literal')).toHaveCount(0);
+    await page.evaluate(() => {
+      document.getElementById('msg-modal').classList.remove('open');
+      showCtxPopup(document.querySelector('#messages > .user-ctx'));
+    });
+    await page.locator('#ctx-sources-section .ctx-popup-link').filter({ hasText: '#7 · session history' }).click();
+    await expect.poll(() => page.evaluate(() => window._sourceJump)).toBe(7);
+  });
+
   test('ctx popup near the top stays below the topbar on desktop and mobile', async ({ page }) => {
     for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 700 }]) {
       await page.setViewportSize(viewport);
@@ -1458,6 +1533,48 @@ test.describe('response bubble', () => {
     await expect(bubble.locator('strong')).toHaveText('bold');
     await expect(bubble.locator('code')).toHaveText('code');
     await look(page);  // pause — observe: bold and inline code rendered in bubble
+  });
+
+  test('wide markdown tables scroll horizontally with readable columns on mobile', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 800 });
+    const table = [
+      '| What children inherit | Requests per briefing | Exegesis time | Exegesis cost |',
+      '|---|---|---|---|',
+      '| Today | 44 | ~106 min | ~$196 |',
+      '| **Playbooks only** (≈6.8K tokens) | ~37 (−7 playbook reads) | ~90 min | ~$170–180 |',
+      '| Large shared opening (e.g. 50K+ tokens of findings) | fewer requests, but each one bigger | could be slower | could go up |',
+    ].join('\n');
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      // Multi-line content arrives as consecutive data: fields, like the server sends it.
+      body: sse(META) + `Estimates:\n\n${table}`.split('\n').map(l => `data: ${l}\n`).join('') + '\n' + sse(DONE),
+    }));
+
+    await sendMsg(page);
+    const wrap = page.locator(`${RESPONSE} .md-table-wrap`);
+    await expect(wrap.locator('table')).toBeVisible();
+
+    const m = await wrap.evaluate(el => ({
+      scroll: el.scrollWidth,
+      client: el.clientWidth,
+      bubbleRight: el.closest('.msg').getBoundingClientRect().right,
+      wrapRight: el.getBoundingClientRect().right,
+      minCell: Math.min(...[...el.querySelectorAll('th, td')].map(c => c.getBoundingClientRect().width)),
+      timeHeaderHeight: el.querySelectorAll('th')[2].getBoundingClientRect().height,
+      bodyHeight: el.querySelector('td').getBoundingClientRect().height,
+      firstCellWidth: el.querySelector('td').getBoundingClientRect().width,
+    }));
+    expect(m.scroll).toBeGreaterThan(m.client);          // table scrolls instead of squeezing
+    expect(m.wrapRight).toBeLessThanOrEqual(m.bubbleRight + 1);  // never overflows the bubble
+    expect(m.firstCellWidth).toBeLessThan(m.client * 0.65);  // pinned labels leave room for data
+    expect(m.minCell).toBeGreaterThanOrEqual(90);         // columns keep a readable width
+    expect(m.timeHeaderHeight).toBeLessThan(m.bodyHeight * 2.5);  // "Exegesis" is not split per letter
+
+    const firstCell = wrap.locator('td').first();
+    const before = (await firstCell.boundingBox()).x;
+    await wrap.evaluate(el => { el.scrollLeft = el.scrollWidth; });
+    expect(Math.abs((await firstCell.boundingBox()).x - before)).toBeLessThanOrEqual(1);  // first column pinned
+    await look(page);  // pause — observe: table scrolls sideways, row labels stay visible
   });
 
   test('local file links with line suffix route through /localfile', async ({ page }) => {
@@ -2675,14 +2792,20 @@ test.describe('response bubble', () => {
   });
 
   test('interrupted stream without headers recovers message id from process tracker', async ({ page }) => {
-    await page.route('**/chat', r => r.fulfill({
-      status: 200,
-      headers: SSE_HEADERS,
-      body: '',
-    }));
-    await page.route('**/processes', r => r.fulfill({ json: [
+    let submitted = false;
+    await page.route('**/chat', r => {
+      submitted = true;
+      return r.fulfill({
+        status: 200,
+        headers: SSE_HEADERS,
+        body: '',
+      });
+    });
+    // A matching process already in the pre-submission baseline belongs to
+    // older work and must not be adopted by this new command.
+    await page.route('**/processes', r => r.fulfill({ json: submitted ? [
       { topic: 'default', agent: 'claude', adhoc: true, msg_id: 89, state: 'running' },
-    ] }));
+    ] : [] }));
     await page.route('**/chat/89/status', r => r.fulfill({ json: {
       id: 89,
       status: 'pending',
@@ -4285,10 +4408,16 @@ test('completing the unlock (exit 0) auto-retries the original cursor login', as
         if (frame.type === 'subscribe') {
           setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
         } else if (frame.type === 'auth.start') {
-          window.__authFrames.push(frame);
+          // Reconnection replays the same request_id. Match the server's
+          // idempotency instead of inventing another session for that replay.
+          let index = window.__authFrames.findIndex(item => item.request_id === frame.request_id);
+          if (index < 0) {
+            index = window.__authFrames.length;
+            window.__authFrames.push(frame);
+          }
           const command = frame.payload.mode === 'unlock' ? 'security unlock-keychain' : 'cursor login';
           setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
-            payload: { ok: true, session_id: `sess-${window.__authFrames.length}`, harness: frame.payload.harness, command } }));
+            payload: { ok: true, session_id: `sess-${index + 1}`, harness: frame.payload.harness, command } }));
         }
       }
       receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }

@@ -131,11 +131,11 @@ def active_msg_ids_by_topic(topic: str, agent: Optional[str] = None,
 
 
 def kill_proc_by_msg_id(msg_id: int) -> int:
-    """Send SIGTERM to the process registered with msg_id. Returns 1 if killed, 0 if not found."""
+    """Send SIGTERM; return 1 on success, retaining failed signals for retry."""
     for pid, info in list(_proc_registry.items()):
         if info.get("msg_id") == msg_id:
-            _deregister_proc(pid)
             if _signal_process_group(pid, signal.SIGTERM):
+                _deregister_proc(pid)
                 return 1
             return 0
     return 0
@@ -1947,6 +1947,10 @@ async def run_antigravity(
         )
 
     cmd = [AGY_PATH, *backend_args, "--output-format", "stream-json"]
+    # Print mode soft-denies every tool confirmation (commands, file writes), so
+    # auto-approve like the other harnesses do.
+    if "--dangerously-skip-permissions" not in backend_args:
+        cmd.append("--dangerously-skip-permissions")
     if not any(arg == "--print-timeout" or arg.startswith("--print-timeout=") for arg in backend_args):
         timeout = response_timeout if response_timeout is not None else RESPONSE_TIMEOUT
         cmd += ["--print-timeout", f"{timeout}s"]
@@ -1960,6 +1964,7 @@ async def run_antigravity(
     session_id = resume_session_id
     streamed_text = False
     completed_tools = set()
+    tool_error = None
     result = None
     async for line in _stream_lines(
         cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc,
@@ -1985,6 +1990,11 @@ async def run_antigravity(
                 if isinstance(text, str) and text:
                     streamed_text = True
                     yield text
+            elif step.get("step_type") == "tool" and step.get("state") == "ERROR":
+                info = step.get("tool_info") if isinstance(step.get("tool_info"), dict) else {}
+                error = info.get("error") if isinstance(info.get("error"), dict) else {}
+                name = info.get("name") or step.get("tool_name") or "tool"
+                tool_error = f"{name}: {(error.get('message') or 'failed').splitlines()[0]}"
             elif step.get("step_type") == "tool" and step.get("state") == "DONE":
                 index = step.get("step_index")
                 if index is not None and index in completed_tools:
@@ -2014,6 +2024,9 @@ async def run_antigravity(
             _attach_session(msg_id, session_id)
             if not streamed_text and result.get("response"):
                 yield result["response"]
+            elif not streamed_text and tool_error:
+                # agy reports SUCCESS with no reply when a tool call fails and it gives up.
+                raise CLIError(f"Antigravity stopped without a reply after a tool error ({tool_error})")
     # Drain to EOF so the shared runner checks the exit code and owns cleanup.
     if result is None:
         raise CLIError("Antigravity stream ended without a result")

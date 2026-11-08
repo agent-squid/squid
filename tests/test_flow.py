@@ -59,6 +59,9 @@ def test_durable_flow_cutover_links_origin_and_claims_next_step(tmp_path, monkey
     assert steps["origin:0"]["assistant_msg_id"] == assistant_id
     assert stats_db.get_message(assistant_id)["flow_step_id"] == "origin:0"
 
+    stats_db.update_assistant_message(assistant_id, "finished", None, "done")
+    stats_db.insert_run_event(assistant_id, 4, "done", None)
+
     async def run_completion():
         with patch.object(
             flow, "_dispatch_claimed_durable_step", new=AsyncMock(return_value=True),
@@ -153,6 +156,9 @@ def test_dispatcher_never_preempts_delayed_client_origin(tmp_path, monkeypatch):
         "topic": "squid", "agent": "qwen",
         "user_msg_id": first_user, "asst_msg_id": first_assistant,
     }) is None
+
+    stats_db.update_assistant_message(first_assistant, "finished", None, "done")
+    stats_db.insert_run_event(first_assistant, 4, "done", None)
 
     async def finish_first():
         with patch.object(
@@ -252,6 +258,7 @@ def test_startup_recovery_finishes_persisted_output_and_advances_flow(tmp_path, 
         "run-1", "origin:0", "claimed", "running", "2026-08-15T10:00:01Z",
     )
     stats_db.update_assistant_message(assistant_id, "finished", None, "done")
+    stats_db.insert_run_event(assistant_id, 4, "done", None)
 
     async def run():
         with patch.object(
@@ -286,6 +293,7 @@ def test_startup_recovery_adopts_turn_prepared_before_step_link(tmp_path, monkey
         flow_route=route, flow_step_id=target_id,
     )
     stats_db.update_assistant_message(assistant_id, "finished", None, "done")
+    stats_db.insert_run_event(assistant_id, 4, "done", None)
 
     assert asyncio.run(flow.recover_durable_flows(startup=True)) == {
         "reconciled": 1, "dispatched": 0,

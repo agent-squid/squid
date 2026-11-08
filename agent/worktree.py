@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import config
+from .admission_reads import local_git_read
 
 log = logging.getLogger(__name__)
 
@@ -380,6 +381,7 @@ def _restore_tree(repo_root: Path, from_tree: str, to_tree: str) -> Optional[str
     return None
 
 
+@local_git_read
 def repo_root_for(path: str) -> Optional[Path]:
     """Return the main git repo root for path, or None if not in a git repo."""
     try:
@@ -417,13 +419,15 @@ def ensure_worktree(repo_root: Path, topic: str, agent: str) -> Path:
     for an agent to `git branch`/`push`/`gh pr create` against, regardless of
     what name it tries (see ADR-0025, "Revised design").
     """
+    from .task_workspaces import check_destination
+    task = check_destination(repo_root, topic, agent)
     wt = worktree_path(repo_root, topic, agent)
     if wt.exists():
         return wt
 
     wt.parent.mkdir(parents=True, exist_ok=True)
     head = _run_git(repo_root, "rev-parse", "HEAD").stdout.strip()
-    if config.WORKTREE_TRACK_DIRTY_CHANGES:
+    if config.WORKTREE_TRACK_DIRTY_CHANGES or task:
         seed_tree = _snapshot_tree(repo_root)
         base_commit = _commit_tree(repo_root, seed_tree, f"squid: hidden base for {topic}/{agent}", [head])
     else:
@@ -452,6 +456,8 @@ def remove_worktree(repo_root: Path, topic: str, agent: str) -> None:
     `git worktree remove`. The integration worktree used for conflict
     resolution is still a real, disposable, Squid-internal git worktree.
     """
+    from .task_workspaces import check_destination
+    check_destination(repo_root, topic, agent)
     wt = worktree_path(repo_root, topic, agent)
     integration_wt = integration_worktree_path(repo_root, topic, agent)
     _run_git(repo_root, "worktree", "remove", "--force", str(integration_wt), check=False)
@@ -485,16 +491,26 @@ def sync_after_turn(
     ordinary local changes. Returns conflict file paths (empty = success).
     """
     del request_text, response_text
+    from .task_workspaces import check_destination
+    task = check_destination(repo_root, topic, agent)
     wt = worktree_path(repo_root, topic, agent)
-    if not wt.exists():
+    if not task and not wt.exists():
         return []
 
     with _lock_for(repo_root):
+        check_destination(repo_root, topic, agent)
+        integration_wt = integration_worktree_path(repo_root, topic, agent)
+        if task:
+            from .stats_db import get_worktrees
+            if integration_wt.exists() or any(r['status'] in {'conflict', 'promotion_failed'} for r in get_worktrees(topic, agent)):
+                raise RuntimeError('task conflict recovery requires retained integration worktree')
+        if not wt.exists():
+            return []
         base_commit = _base_commit_from_registry(repo_root, topic, agent) or base_commit_for(repo_root, topic, agent)
         if not base_commit:
             raise RuntimeError(f"missing base commit for worktree {wt}")
-        from .continuations import git_only
-        git_only_turn = git_only(agent, durable=True)
+        from .continuations import read_only
+        git_only_turn = read_only(agent, durable=True)
         # Check before ANY promotion, including opted-in ignored files. Recovery
         # reaches this path even if the runner never reached its completion guard.
         if not git_only_turn:
@@ -513,6 +529,9 @@ def sync_after_turn(
                 raise RuntimeError('Git-only continuation changed files; automatic promotion blocked.')
         if turn_tree == base_tree:
             return []
+        if task:
+            from .task_workspaces import require_review
+            require_review(task['id'])
 
         current_tree = _snapshot_tree(repo_root)
         current_commit = _commit_tree(
@@ -521,7 +540,8 @@ def sync_after_turn(
         turn_commit = _commit_tree(
             repo_root, turn_tree, f"squid: hidden turn for turn {msg_id}", [base_commit]
         )
-        integration_wt = integration_worktree_path(repo_root, topic, agent)
+        if task:
+            check_destination(repo_root, topic, agent)
         _run_git(repo_root, "worktree", "remove", "--force", str(integration_wt), check=False)
         result = _run_git(
             repo_root, "worktree", "add", "--detach", str(integration_wt), current_commit,
@@ -532,6 +552,9 @@ def sync_after_turn(
 
         keep_integration_wt = False
         try:
+            if task:
+                from .task_workspaces import save_integration
+                save_integration(task, topic, agent, integration_wt, current_commit)
             result = _run_git(integration_wt, "merge", "--no-commit", "--no-ff", turn_commit, check=False)
             if result.returncode != 0:
                 conflicts = [
@@ -552,6 +575,7 @@ def sync_after_turn(
                 )
 
             merged_tree = _run_git(integration_wt, "write-tree").stdout.strip()
+            check_destination(repo_root, topic, agent)
             if _snapshot_tree(repo_root) != current_tree:
                 raise RuntimeError("code root changed during worktree promotion; retry on next cleanup")
             patch = _run_git(repo_root, "diff", "--binary", current_tree, merged_tree).stdout
@@ -572,6 +596,10 @@ def sync_after_turn(
                         + (f", {rollback_error}" if rollback_error else ", rolled back partial changes")
                         + ")"
                     )
+        except Exception:
+            if task:
+                keep_integration_wt = True
+            raise
         finally:
             if not keep_integration_wt:
                 _run_git(repo_root, "worktree", "remove", "--force", str(integration_wt), check=False)
@@ -620,9 +648,14 @@ def promote_resolved_integration_worktree(repo_root: Path, topic: str, agent: st
     still considers unmerged also still contains literal conflict-marker text,
     unless `force` is set.
     """
+    from .task_workspaces import check_destination
+    task = check_destination(repo_root, topic, agent)
     integration_wt = integration_worktree_path(repo_root, topic, agent)
     if not integration_wt.exists():
         raise RuntimeError(f"integration worktree not found: {integration_wt}")
+    if task:
+        from .task_workspaces import check_integration
+        check_integration(task, topic, agent, integration_wt)
 
     with _lock_for(repo_root):
         pre_add_conflicts = [
@@ -652,6 +685,7 @@ def promote_resolved_integration_worktree(repo_root: Path, topic: str, agent: st
 
         integration_base = _run_git(integration_wt, "rev-parse", "HEAD").stdout.strip()
         resolved_tree = _run_git(integration_wt, "write-tree").stdout.strip()
+        check_destination(repo_root, topic, agent)
         current_tree = _snapshot_tree(repo_root)
         patch = _run_git(repo_root, "diff", "--binary", integration_base, resolved_tree).stdout
         if patch:
@@ -672,6 +706,9 @@ def promote_resolved_integration_worktree(repo_root: Path, topic: str, agent: st
                     + ")"
                 )
 
+        if task:
+            from .task_workspaces import require_review
+            require_review(task['id'])
         remove_worktree(repo_root, topic, agent)
 
 

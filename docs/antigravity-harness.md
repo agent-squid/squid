@@ -26,7 +26,7 @@ providers:
     label: agy
     color: "#4285F4"
     auth: {type: subscription}
-    gauge: {type: static, text: Native, title: Managed by Antigravity CLI}
+    gauge: antigravity
     supported_apis: [/native/antigravity]
 ```
 
@@ -62,3 +62,13 @@ Checks: the full Python 3.11 suite passed 977 tests before two additional
 login/cancellation checks; the resulting harness suite passed all 15 checks.
 Python 3.10 focused harness/runner/database coverage passed 229 tests.
 Installer shell syntax validation also passed.
+
+## Live quota
+
+The `antigravity` gauge runs `agy --print /usage --output-format json` to
+retrieve quota without a model turn. It uses the existing native login and the
+shared gauge refresh flow, including snapshots before and after browser turns.
+The donut shows percent used for the most consumed model-group/window bucket;
+the tooltip lists all buckets and reset times. Per-turn deltas are observational:
+shared account activity and backend reporting delays can affect them.
+The former default Native badge automatically upgrades; custom gauges remain intact.

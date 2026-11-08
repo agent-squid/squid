@@ -165,14 +165,18 @@ def test_reconnect_preserves_durable_cursor_and_pending_events(tmp_path, monkeyp
                                request_key='test', poll_interval=30, now=100)
     watches.transition_watch(row['id'], topic='test', version=0, action='activate', now=100)
 
-    async def tick(now):
+    async def tick(now, expected=1):
         async with connect(path, transport) as session:
             loop = watches.WatchLoop({'fixture': adapter(session)}, clock=lambda: now)
-            assert await loop.tick() == 1
+            assert await loop.tick() == expected
 
     asyncio.run(tick(100))
     stats_db.init_db()
-    asyncio.run(tick(131))  # New server/client; same source event.
+    with stats_db._connection() as conn:
+        next_poll = conn.execute('SELECT next_poll FROM watches WHERE id=?', (row['id'],)).fetchone()[0]
+    # Reconnect honors the durable adaptive deadline, including its jitter.
+    asyncio.run(tick(next_poll - 1, expected=0))
+    asyncio.run(tick(next_poll))  # New server/client; same source event.
     conn = stats_db._connect()
     try:
         assert conn.execute('SELECT COUNT(*) FROM watch_events').fetchone()[0] == 1

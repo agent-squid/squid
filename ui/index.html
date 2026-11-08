@@ -28,7 +28,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
   <link rel="stylesheet" href="/vendor/xterm.css" />
-  <link rel="stylesheet" href="style.css?v=20261105-028" />
+  <link rel="stylesheet" href="style.css?v=20261107-009" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -140,6 +140,7 @@
       <button id="proc-status" type="button" title="Status · click to view" aria-label="Status"></button>
 
       <div id="right-rail">
+        <div id="antigravity-quota-display" title="Antigravity usage"></div>
         <div id="cursor-quota-display" title="Cursor usage"></div>
 
         <div id="codex-quota-display" title="Codex usage · click for credentials"></div>
@@ -421,7 +422,13 @@
             <button id="search-scope-toggle" type="button" aria-label="Show search scopes" aria-controls="search-scope-options" aria-expanded="false">▾</button>
             <div id="search-scope-options" role="listbox" aria-label="Search scopes" hidden></div>
           </div>
-          <select id="search-bar-operator" aria-label="Match keywords" title="AND: all keywords; OR: any keyword"><option value="and">AND</option><option value="or">OR</option></select>
+          <div id="search-operator-picker">
+            <button id="search-bar-operator" type="button" value="and" aria-label="Match keywords" aria-haspopup="listbox" aria-controls="search-operator-options" aria-expanded="false" title="AND: all keywords; OR: any keyword">AND</button>
+            <div id="search-operator-options" role="listbox" aria-label="Match keywords" hidden>
+              <button type="button" role="option" data-operator="and">AND — all keywords</button>
+              <button type="button" role="option" data-operator="or">OR — any keyword</button>
+            </div>
+          </div>
           <input id="search-bar-keywords" type="text" inputmode="search" enterkeyhint="search" aria-label="Search keywords" placeholder="Optional keywords…" autocomplete="off" />
           <button id="search-bar-submit" type="button" aria-label="Run search" title="Search (Enter)"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6.8 1.8a5 5 0 1 0 0 10a5 5 0 0 0 0-10zM3.1 6.8a3.7 3.7 0 1 1 7.4 0a3.7 3.7 0 0 1-7.4 0zm7.1 4.3l1-1l3.3 3.3l-1 1l-3.3-3.3z"/></svg></button>
           <button id="search-bar-reset" type="button" aria-label="Clear all history filters" title="Clear route, keywords, bookmarks, and bad responses"><span class="material-symbols-outlined" aria-hidden="true">restart_alt</span></button>
@@ -883,7 +890,7 @@
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="flow-lang.js?v=20261105-028"></script>
-  <script src="app.js?v=20261105-028"></script>
+  <script src="flow-lang.js?v=20261107-009"></script>
+  <script src="app.js?v=20261107-009"></script>
 </body>
 </html>

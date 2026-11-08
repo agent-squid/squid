@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSH port forwarding — AgentSquid</title>
+<style>
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { max-width: 48rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; }
+pre { overflow-x: auto; padding: 1rem; background: light-dark(#eee, #222); border-radius: 6px; }
+a { color: light-dark(#244c85, #9ac4ff); }
+</style>
+</head>
+<body><main>
+<h1>Remote access with SSH</h1>
+<p>Use Squid through an encrypted SSH tunnel without Shore or Tailscale. Squid runs on your host computer; your other device opens its browser UI through the tunnel.</p>
+<h2>1. Prepare the host</h2>
+<p>Start Squid normally and confirm it opens locally. These examples assume Squid listens on <code>127.0.0.1:8000</code>. Enable your host's SSH server (Remote Login on macOS). Confirm you can connect from your other computer with <code>ssh user@host</code>, using your actual username and reachable hostname or IP address.</p>
+<p>SSH must already be reachable from your client network. This method does not bypass a firewall or NAT: outside your home network, you may need router configuration or an existing SSH jump host. Keep Squid bound to loopback; do not forward its HTTP port on your router.</p>
+<h2>2. Open the tunnel on your other computer</h2>
+<pre><code>ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:8000:127.0.0.1:8000 user@host</code></pre>
+<p>Authenticate with your SSH credentials and leave this terminal open. <code>-N</code> opens the tunnel without a remote shell. The first address and port belong to your client; the second address and port refer to Squid on the SSH host.</p>
+<h2>3. Open Squid</h2>
+<p>On that same client device, open <a href="http://127.0.0.1:8000">http://127.0.0.1:8000</a>. Traffic between the devices is encrypted by SSH. Close the tunnel with Ctrl+C when finished.</p>
+<h2>Other ports and devices</h2>
+<p>If port 8000 is already in use on the client, change the first port to 18000:</p>
+<pre><code>ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:18000:127.0.0.1:8000 user@host</code></pre>
+<p>Then open <code>http://127.0.0.1:18000</code>. If Squid uses a different port on the host, change the final port instead. For a custom SSH port, add <code>-p PORT</code>.</p>
+<p>On a phone or tablet, use an SSH client that supports local port forwarding. Forward a loopback port on that device to <code>127.0.0.1:8000</code> on the host, keep the SSH session active, and open that local port in the device's browser. Mobile operating systems may suspend the tunnel when the SSH app is in the background.</p>
+<h2>Troubleshooting</h2>
+<ul>
+<li>SSH times out: check the hostname, SSH server, network route, and firewall.</li>
+<li>Authentication fails: check your SSH username and key or password.</li>
+<li>Address already in use: choose a different client port, as shown above.</li>
+<li>The browser cannot connect: keep the tunnel open, verify Squid is running on the host, and check the final port. SSH may report a destination error only when the browser connects.</li>
+</ul>
+<p>For other connection methods, see the <a href="https://agentsquid.ai/docs/remote-access.html" target="_blank" rel="noopener noreferrer">Remote Access guide linked from the AgentSquid homepage</a>.</p>
+</main></body>
+</html>

@@ -14,14 +14,18 @@ from .watch_auth import file_token
 
 def main(argv):
     parser = argparse.ArgumentParser(prog='agentsquid ' + argv[0],
-        description='Watch monitoring and explicitly granted local work. Publication is unavailable.',
-        epilog='Use agentsquid watch --help for commands. SQUID_API_URL must name the issuing instance. '
+        description='Watch monitoring and explicitly granted local work and task publication.',
+        epilog='With SQUID_CONTINUE_TOKEN, tools reports shared history/route/continuation capabilities. Use agentsquid search --help for read-only current-topic history. '
+               'Use agentsquid watch --help for commands. SQUID_API_URL must name the issuing instance. '
                'Agent calls use SQUID_TURN_TOKEN; --human-topic uses SQUID_WATCH_CONTROL_TOKEN or ~/.squid/watch-control.token. '
                'Mutation input is a JSON object: create needs target, request_key and plan (or legacy adapter); '
                'validate needs target and plan; tools --discover lists durable MCP read tools; '
                'lifecycle actions need version and optionally operation_key/grant_id; '
                'grant needs expires_at; revoke needs grant_id; execution-grant needs exactly one of agent/flow_route, instructions, '
-               'max_runs, max_attempts, request_key; execution-revoke needs grant_id. runs lists durable outcomes.')
+               'max_runs, max_attempts, request_key; optional publication records repo scope with '
+               'repository (canonical code-root repo path), remote, base_branch, push:true and pull_request:true. '
+               'enable_publication:true explicitly activates host task publication; existing intent-only grants stay disabled. '
+               'execution-revoke needs grant_id. runs lists durable outcomes.')
     parser.add_argument('--api-url', help='Explicit Squid instance URL (overrides SQUID_API_URL)')
     if argv[0] == 'tools':
         parser.add_argument('--discover', action='store_true', help='Discover durable read tools and input schemas for observation plans')
@@ -54,6 +58,8 @@ def main(argv):
                             'self-restart preserves the existing verifier. Do not generate a replacement client key.'}),
                     file=sys.stderr)
                 return 1
+        if action == 'tools' and not human and os.environ.get('SQUID_CONTINUE_TOKEN'):
+            token = os.environ['SQUID_CONTINUE_TOKEN']
         if not token or len(token) > 512:
             raise ValueError()
         path = '/watch-tools' if action == 'observation-tools' else '/tools' if action == 'tools' else '/watches'
@@ -77,6 +83,11 @@ def main(argv):
             body = json.loads(sys.stdin.read() if args.input == '-' else Path(args.input).read_text())
             if not isinstance(body, dict):
                 raise ValueError()
+        if action == 'tools' and not human and os.environ.get('SQUID_CONTINUE_TOKEN'):
+            from .shared_tools import request
+            result = request('capabilities', {}, api_url=url)
+            print(json.dumps(result))
+            return int('error' in result)
         with httpx.Client(timeout=30, follow_redirects=False, trust_env=False) as client:
             response = client.request(method, url.rstrip('/') + path,
                 headers={'Authorization': 'Bearer ' + token}, json=body,

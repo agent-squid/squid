@@ -419,8 +419,9 @@ def durable_flow_plan(route: Optional[str]) -> list[dict]:
     return steps
 
 
-def chain_handoff_prompt(route: str, previous_agent: str, next_agent: str, next_fresh: bool, original_prompt: str) -> str:
-    """Port of the UI's chainHandoffPrompt (ui/app.js) — must stay in sync with it."""
+def chain_handoff_prompt(route: str, previous_agent: str, next_agent: str, next_fresh: bool, original_prompt: str,
+                         original_prompt_msg_id: Optional[int] = None) -> str:
+    """Legacy UI handoff wording, with source-ID references for durable steps."""
     target_suffix = "!" if next_fresh else ""
     previous_label = previous_agent if previous_agent.startswith("@") else f"@{previous_agent}"
     return "\n".join([
@@ -428,8 +429,10 @@ def chain_handoff_prompt(route: str, previous_agent: str, next_agent: str, next_
         f"Route: {route}",
         f"Previous step: {previous_label}",
         f"Current step: @{next_agent}{target_suffix}",
-        f"Original prompt: {original_prompt}",
-        "Previous output: injected context <previous_step_output>. Use it to continue.",
+        (f"Original prompt: message #{original_prompt_msg_id}" if original_prompt_msg_id
+         else f"Original prompt: {original_prompt}"),
+        ("Continue from the source messages supplied in context or already in this session."
+         if original_prompt_msg_id else "Previous output: injected context <previous_step_output>. Use it to continue."),
     ])
 
 
@@ -847,6 +850,7 @@ def _durable_dispatch_step(flow_run_id: str, step: dict) -> Optional[dict]:
         ),
         "previous_msg_ids": [dependency["assistant_msg_id"] for dependency in dependencies],
         "original_prompt": (original or {}).get("content", ""),
+        "original_prompt_msg_id": (original or {}).get("id"),
     }
 
 
@@ -863,10 +867,18 @@ async def _dispatch_claimed_durable_step(flow_run_id: str, step: dict) -> bool:
             error="durable Flow dependencies could not be resolved",
         )
         return False
+    from .routes import dispatch_context
+    route_prompt = dispatch_context(flow_run_id)
     prompt = chain_handoff_prompt(
         dispatch["route"], dispatch["previous_agent"], dispatch["agent"],
         dispatch["fresh"], dispatch["original_prompt"],
+        original_prompt_msg_id=dispatch['original_prompt_msg_id'],
     )
+    if route_prompt:
+        if dispatch['previous_msg_ids']:
+            prompt = route_prompt + '\n\n' + prompt
+        else:
+            prompt = route_prompt + '\nRoute: ' + dispatch['route'] + '\nCurrent origin step: @' + dispatch['agent']
     running = False
     try:
         prepared = await _prepare_chat_turn(
@@ -907,9 +919,15 @@ async def _dispatch_claimed_durable_step(flow_run_id: str, step: dict) -> bool:
             "error", _utc_now_iso(), error=str(exc),
         )
         return False
+    finally:
+        from .routes import dispatch_finished
+        await asyncio.to_thread(dispatch_finished, flow_run_id, step['step_id'], started=running)
 
 
 async def _dispatch_ready_durable_steps(flow_run_id: str) -> int:
+    from .routes import managed
+    if managed(flow_run_id):
+        return 0
     from .watch_flows import owned
     if owned(flow_run_id):
         return 0
@@ -964,6 +982,32 @@ def _schedule_durable_wakeups(flow_run_id: str) -> None:
         asyncio.create_task(wake(), name=f"squid-flow-durable-delay-{flow_run_id}-{step['step_id']}")
 
 
+def execution_allowed(msg_id: int) -> bool:
+    """Queued turns and retries must still belong to a live durable Flow step."""
+    from . import stats_db
+    with stats_db._connection() as conn:
+        from .routes import execution_allowed as route_allowed
+        if not route_allowed(conn, msg_id):
+            return False
+        row = conn.execute('''SELECT m.flow_run_id,m.flow_step_id,m.topic,m.agent,
+            r.execution_mode,r.status AS run_status,s.flow_run_id AS step_run_id,
+            s.step_id,s.status AS step_status,s.topic AS step_topic,s.agent AS step_agent
+            FROM chat_messages m LEFT JOIN flow_runs r ON r.flow_run_id=m.flow_run_id
+            LEFT JOIN flow_steps s ON s.assistant_msg_id=m.id WHERE m.id=?''', (msg_id,)).fetchone()
+    if row is None or not row['flow_run_id']:
+        return True
+    if row['execution_mode'] == 'shadow':
+        return True
+    # Older transcript-driven chains have neither a durable plan nor a step
+    # identity. A saved durable step identity must never fall back to that path.
+    if row['execution_mode'] is None and not row['flow_step_id'] and row['step_run_id'] is None:
+        return True
+    return (row['execution_mode'] == 'durable' and row['run_status'] in {'scheduled', 'running'}
+            and row['step_status'] == 'running' and row['step_run_id'] == row['flow_run_id']
+            and row['step_id'] == row['flow_step_id'] and row['step_topic'] == row['topic']
+            and row['step_agent'] == row['agent'])
+
+
 async def complete_durable_step(msg_id: int, *, error: Optional[str] = None) -> bool:
     """Persist a worker terminal outcome and dispatch newly eligible work."""
     step = get_flow_step_for_message(msg_id)
@@ -974,6 +1018,31 @@ async def complete_durable_step(msg_id: int, *, error: Optional[str] = None) -> 
         return False
     if step["status"] in {"done", "error", "cancelled"}:
         return True
+    from .continuations import sequence_outcome, sequence_owner_valid
+    from . import stats_db
+    with stats_db._connection() as conn:
+        from .routes import request_for_flow
+        if request_for_flow(conn, step['flow_run_id']):
+            gate = conn.execute('SELECT * FROM turn_completion_gates WHERE parent_id=?', (msg_id,)).fetchone()
+            # Transcript completion precedes the worker's final sync/result gate.
+            if gate is None and not error:
+                return True
+            if gate is not None and not gate['success']:
+                error = gate['reason']
+        descendant, reason = sequence_outcome(conn, msg_id)
+        if descendant == 'succeeded' and not sequence_owner_valid(conn, msg_id):
+            descendant, reason = 'failed', 'owner_authorization_changed'
+        if descendant == 'succeeded' and not error:
+            from .watch_flows import turn_outcome
+            evidence, evidence_reason = turn_outcome(conn, msg_id)
+            if evidence != 'succeeded':
+                error = evidence_reason
+    # A failed parent cannot make its waiting descendants eligible. Settle
+    # that failure even if the worker has not persisted their blocked gate yet.
+    if descendant == 'pending' and not error:
+        return True
+    if descendant not in {'succeeded', 'pending'}:
+        error = reason
     target = "error" if error else "done"
     if not transition_flow_step(
         step["flow_run_id"], step["step_id"], step["status"], target,
@@ -1005,13 +1074,47 @@ def _reconcile_durable_step(step: dict, *, startup: bool) -> bool:
 
     if (not message and startup and step["status"] == "claimed"
             and step["leg"] != "origin"):
+        from .routes import managed
+        if managed(flow_run_id):
+            return transition_flow_step(flow_run_id, step_id, 'claimed', 'error', now,
+                                        error='Route claim ambiguous after restart')
         released_status = "scheduled" if step.get("due_at") else "pending"
         return transition_flow_step(
             flow_run_id, step_id, "claimed", released_status, now,
         )
 
     message_status = (message or {}).get("status")
+    from .routes import managed
+    if managed(flow_run_id) and message_status == 'done':
+        from . import stats_db
+        with stats_db._connection() as conn:
+            gate = conn.execute('SELECT * FROM turn_completion_gates WHERE parent_id=?', (assistant_id,)).fetchone()
+        if gate is None:
+            if not startup:
+                return False
+            return transition_flow_step(flow_run_id, step_id, step['status'], 'error', now,
+                                        error='Route completion/sync unverified after restart')
+        if not gate['success']:
+            return transition_flow_step(flow_run_id, step_id, step['status'], 'error', now, error=gate['reason'])
+    from .continuations import sequence_outcome, sequence_owner_valid
+    from . import stats_db
+    with stats_db._connection() as conn:
+        descendant, descendant_reason = sequence_outcome(conn, assistant_id)
+        if descendant == 'succeeded' and not sequence_owner_valid(conn, assistant_id):
+            descendant, descendant_reason = 'failed', 'owner_authorization_changed'
+    from .routes import managed
+    if (descendant == 'pending' and message_status not in {'error', 'cancelled'}
+            and (not startup or (managed(flow_run_id) and message_status == 'done'))):
+        return False
+    if descendant != 'succeeded' and message_status not in {'error', 'cancelled'}:
+        return transition_flow_step(flow_run_id, step_id, step['status'], 'error', now,
+                                    error=descendant_reason)
     if message_status == "done":
+        from .watch_flows import outcome
+        evidence, evidence_reason = outcome(assistant_id)
+        if evidence != 'succeeded':
+            return transition_flow_step(flow_run_id, step_id, step['status'], 'error', now,
+                                        error=evidence_reason)
         target, error = "done", None
     elif message_status == "cancelled":
         target, error = "cancelled", "Cancelled before durable Flow recovery"
@@ -1031,6 +1134,8 @@ def _reconcile_durable_step(step: dict, *, startup: bool) -> bool:
 
 async def recover_durable_flows(*, startup: bool = False) -> dict[str, int]:
     """Reconcile abandoned work, dispatch due steps, and restore delay wakeups."""
+    from . import routes
+    await asyncio.to_thread(routes.reconcile, startup=startup)
     now = datetime.now(timezone.utc)
     before = (
         now + timedelta(seconds=1) if startup
@@ -1039,6 +1144,17 @@ async def recover_durable_flows(*, startup: bool = False) -> dict[str, int]:
     recoverable = get_stale_flow_claims(before)
     if startup:
         recoverable.extend(get_running_flow_steps())
+    else:
+        # A descendant can be blocked before it has a child/worker callback.
+        # Reconcile its waiting Flow owner through the existing safety scan.
+        from . import stats_db
+        for step in get_running_flow_steps():
+            message = get_message(step.get('assistant_msg_id')) if step.get('assistant_msg_id') else None
+            if message and message['status'] in {'done', 'error', 'cancelled'}:
+                with stats_db._connection() as conn:
+                    has_descendants = conn.execute('SELECT 1 FROM continuations WHERE parent_id=? UNION ALL SELECT 1 FROM route_requests WHERE parent_id=?', (message['id'], message['id'])).fetchone()
+                if has_descendants:
+                    recoverable.append(step)
 
     reconciled = 0
     for step in recoverable:

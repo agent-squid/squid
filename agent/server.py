@@ -419,7 +419,9 @@ async def _server_lifespan(_app: FastAPI):
     from .watch_service import WatchService
     _app.state.watch_service = WatchService(_app.state.watch_configuration)
     global _shore_connection
+    publication_recovery = None
     continuation_maintenance = None
+    route_maintenance = None
     durable_maintenance = None
     shore_task = None
     shore_stop = asyncio.Event()
@@ -443,6 +445,7 @@ async def _server_lifespan(_app: FastAPI):
         _publish_process_changed(list_active_procs())
         _publish_queue_changed(dispatcher.all_queued_items())
         await asyncio.to_thread(_sync_pi_agents_models_store)
+        from .task_publication import recover as recover_task_publications
         await _recover_orphaned_pending_on_startup()
         # Watch turns reconcile their own linked evidence, including ambiguous
         # interrupted work, even when execution has been disabled after restart.
@@ -452,6 +455,8 @@ async def _server_lifespan(_app: FastAPI):
         continuation_maintenance = asyncio.create_task(
             continuations.maintain(dispatcher), name='squid-continuations')
         await _resume_stalled_flows_on_startup()
+        from .routes import run as run_routes
+        route_maintenance = asyncio.create_task(run_routes(), name='squid-routes')
         from .flow import maintain_durable_flows
         durable_maintenance = asyncio.create_task(
             maintain_durable_flows(), name="squid-flow-durable-maintenance",
@@ -480,9 +485,14 @@ async def _server_lifespan(_app: FastAPI):
         _app.state.watch_service.start_monitoring()
         _app.state.watch_service.start_dispatch(dispatcher)
         continuations.configure(WORKTREE_ISOLATION_ENABLED)
+        from .watch_async import call
+        publication_recovery = asyncio.create_task(
+            call(recover_task_publications), name="squid-publication-recovery")
         yield
     finally:
         continuations.configure(False)
+        await _cancel_background_task(publication_recovery)
+        await _cancel_background_task(route_maintenance)
         await _cancel_background_task(continuation_maintenance)
         watch_launch.configure(None)
         await _app.state.watch_service.stop_dispatch()
@@ -558,6 +568,10 @@ class ChatRequest(BaseModel):
     include_topic_memory: bool = Field(False)
     flow_run_id: Optional[str] = None
     flow_route: Optional[str] = None
+    task_workspace: Optional[dict] = None
+    task_id: Optional[str] = None
+    publication: Optional[dict] = None
+    publication_expires_at: Optional[float] = None
 
 
 class TopicMemoryRequest(BaseModel):
@@ -1067,6 +1081,8 @@ async def _prepare_chat_turn(
     flow_step_id: Optional[str] = None,
     override_cwd: Optional[str] = None,
     watch_run_id: Optional[str] = None,
+    task_workspace: Optional[dict] = None,
+    task_id: Optional[str] = None,
 ) -> Union[dict, JSONResponse]:
     native_shell = message.lstrip().startswith("!")
     # 1. Resolve agent — explicit wins, else use topic sticky
@@ -1149,7 +1165,35 @@ async def _prepare_chat_turn(
         agent_cwd = override_cwd
     source_cwd = cwd
 
-    if WORKTREE_ISOLATION_ENABLED and code_roots:
+    from . import task_workspaces
+    try:
+        if task_id is not None and (not isinstance(task_id, str) or not task_id.strip()):
+            raise ValueError('invalid task workspace identity')
+        flow_task_id = await asyncio.to_thread(task_workspaces.for_flow, flow_run_id)
+        if task_id and flow_task_id and task_id != flow_task_id:
+            raise RuntimeError('task Flow destination mismatch')
+        task_id = task_id or flow_task_id
+        watch_task = await asyncio.to_thread(task_workspaces.for_watch, watch_run_id, resolved_agent,
+            service=getattr(app.state, 'watch_service', None)) if watch_run_id else None
+        if watch_task:
+            if task_id and task_id != watch_task['id']:
+                raise RuntimeError('task watch destination mismatch')
+            task_id = watch_task['id']
+        task_targeted = task_workspace is not None or task_id is not None
+        if task_targeted:
+            if not WORKTREE_ISOLATION_ENABLED or native_shell or native_backend_command or override_cwd or harness == 'echo':
+                raise ValueError('task workspace requires isolated editing turn')
+            if task_workspace is not None and (source != 'human' or task_id or
+                    set(task_workspace) != {'repository', 'base_ref'}):
+                raise ValueError('invalid task workspace request')
+            if task_id:
+                selected_task = await asyncio.to_thread(task_workspaces.get, task_id)
+                await asyncio.to_thread(task_workspaces.validate, selected_task, agent=resolved_agent)
+            adhoc, resume_session_id = True, None
+    except (RuntimeError, ValueError, PermissionError) as exc:
+        return JSONResponse({'error': str(exc)}, status_code=409)
+
+    if WORKTREE_ISOLATION_ENABLED and code_roots and not task_targeted:
         repo_roots = await _repo_roots_for_code_roots(code_roots)
         if repo_roots:
             from .worktree import settle_worktrees_before_turn
@@ -1190,7 +1234,16 @@ async def _prepare_chat_turn(
         if not native_shell and memory_data_for_prompt["content"].strip():
             memory_revision = memory_data_for_prompt.get("revision")
 
-    stored_context_ids = list({*(context_ids or []), *(pinned_ids or [])}) or None
+    # Durable Flow dependencies are source references, resolved at runner
+    # launch when the actual resumed session is known, rather than user pins.
+    effective_pinned_ids = pinned_ids
+    if source == 'workflow' and flow_run_id and flow_step_id:
+        from .stats_db import get_flow_steps
+        steps = {step['step_id']: step for step in get_flow_steps(flow_run_id)}
+        dependencies = steps.get(flow_step_id, {}).get('dependencies', [])
+        deferred_ids = {steps[dep].get('assistant_msg_id') for dep in dependencies if dep in steps}
+        effective_pinned_ids = [pid for pid in pinned_ids or [] if pid not in deferred_ids]
+    stored_context_ids = list({*(context_ids or []), *(effective_pinned_ids or [])}) or None
     if watch_run_id is not None:
         from .watch_runs import prepare_messages
         user_msg_id, asst_msg_id = await asyncio.to_thread(
@@ -1212,6 +1265,17 @@ async def _prepare_chat_turn(
             source="shell" if native_shell else source,
             flow_step_id=flow_step_id,
         )
+    if task_targeted:
+        try:
+            if task_workspace is not None:
+                task = await asyncio.to_thread(task_workspaces.create, topic=topic, agent=resolved_agent,
+                    request_id=user_msg_id, **task_workspace)
+                task_id = task['id']
+            task = await asyncio.to_thread(task_workspaces.bind, asst_msg_id, task_id)
+            cwd = source_cwd = task['worktree_path']
+        except (RuntimeError, ValueError, PermissionError) as exc:
+            update_assistant_message(asst_msg_id, str(exc), None, status='error')
+            return JSONResponse({'error': str(exc), 'msg_id': asst_msg_id}, status_code=409)
     if not native_shell:
         attach_assistant_session(asst_msg_id, resume_session_id)
 
@@ -1240,9 +1304,9 @@ async def _prepare_chat_turn(
                 "</topic_memory>",
             ]))
 
-    if not native_shell and not native_backend_command and pinned_ids:
+    if not native_shell and not native_backend_command and effective_pinned_ids:
         lookback_id_set = set(context_ids or [])
-        filtered = [pid for pid in pinned_ids if pid not in lookback_id_set]
+        filtered = [pid for pid in effective_pinned_ids if pid not in lookback_id_set]
         if filtered:
             pinned_context = get_messages_by_ids(filtered)
             if pinned_context:
@@ -1284,6 +1348,7 @@ async def _prepare_chat_turn(
         "context_history": context_history,
         "user_msg_id": user_msg_id,
         "asst_msg_id": asst_msg_id,
+        "task_id": task_id,
         "response_timeout": response_timeout,
         "resume_session_id": resume_session_id,
         "adhoc": adhoc,
@@ -1552,7 +1617,18 @@ async def stream_response(
 # ---------------------------------------------------------------------------
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request = None):
+    publication_audit = None
+    if req.publication is not None or req.publication_expires_at is not None:
+        try:
+            from .task_publication_api import human
+            from .watch_service import WatchDenied
+            if (req.source != 'human' or req.publication is None or req.publication_expires_at is None
+                    or not (req.task_workspace or req.task_id) or request is None):
+                raise WatchDenied()
+            publication_audit = human(request)
+        except (PermissionError, WatchDenied):
+            return JSONResponse({'error':'publication_not_authorized'}, status_code=403)
     if req.route:
         return JSONResponse({"error": "route chains are executed as explicit UI turns"}, status_code=400)
 
@@ -1582,6 +1658,7 @@ async def chat(req: ChatRequest):
         source=req.source,
         flow_run_id=flow_run_id,
         flow_route=flow_route,
+        task_workspace=req.task_workspace, task_id=req.task_id,
     )
     if isinstance(prepared, JSONResponse):
         return prepared
@@ -1592,6 +1669,15 @@ async def chat(req: ChatRequest):
              "msg_id": prepared["asst_msg_id"]},
             status_code=500,
         )
+    if publication_audit:
+        from . import task_publication, task_workspaces
+        try:
+            task = await asyncio.to_thread(task_workspaces.for_turn, prepared['asst_msg_id'])
+            await asyncio.to_thread(task_publication.record_grant, task['id'], request_id=prepared['user_msg_id'],
+                publication=req.publication, expires_at=req.publication_expires_at, audit=publication_audit)
+        except (RuntimeError, ValueError, TypeError, PermissionError):
+            update_assistant_message(prepared['asst_msg_id'], 'Publication grant rejected', None, status='error')
+            return JSONResponse({'error':'publication_grant_rejected'}, status_code=409)
     await maybe_sync()
     return StreamingResponse(
         stream_response(
@@ -1619,6 +1705,7 @@ async def chat(req: ChatRequest):
             "Cache-Control": "no-cache",
             "X-Squid-Msg-Id": str(prepared["asst_msg_id"]),
             "X-Squid-Flow-Run-Id": flow_run_id or "",
+            "X-Squid-Task-Id": prepared.get("task_id") or "",
         },
     )
 
@@ -2414,6 +2501,14 @@ async def context_view(topic: str, agent: str):
     })
 
 
+@app.get('/chat/{msg_id}/context')
+async def turn_context_view(msg_id: int):
+    from .turn_context import recorded_context
+    if not await asyncio.to_thread(get_message, msg_id):
+        return JSONResponse({'error': 'message not found'}, status_code=404)
+    return JSONResponse(await asyncio.to_thread(recorded_context, msg_id))
+
+
 @app.get("/config/agents/{name}/sessions")
 async def agent_sessions(name: str):
     """Return all active topic sessions for a named agent."""
@@ -2844,6 +2939,11 @@ async def auto_resolve_worktree_conflict(msg_id: int, req: WorktreeDiscardReques
         return JSONResponse({"ok": True, "already_resolved": True})
     if rec.get("status") != "conflict":
         return JSONResponse({"error": "auto-resolve is only available while conflicted"}, status_code=409)
+    from . import task_workspaces
+    try:
+        await asyncio.to_thread(task_workspaces.check_destination, repo_root, topic, wt_key)
+    except RuntimeError as exc:
+        return JSONResponse({'error': str(exc)}, status_code=409)
 
     from .runners import get_active_msg_ids
     if msg_id in get_active_msg_ids():
@@ -2880,6 +2980,12 @@ async def auto_resolve_worktree_conflict(msg_id: int, req: WorktreeDiscardReques
     )
     if isinstance(prepared, JSONResponse):
         return prepared
+
+    try:
+        await asyncio.to_thread(task_workspaces.bind_recovery, prepared['asst_msg_id'], msg_id, repo_root)
+    except RuntimeError as exc:
+        update_assistant_message(prepared['asst_msg_id'], str(exc), None, status='error')
+        return JSONResponse({'error': str(exc)}, status_code=409)
 
     async def _stream() -> AsyncGenerator[str, None]:
         # Forward every event live — the UI renders this exactly like a normal
@@ -3589,6 +3695,58 @@ def _codex_usage_windows(data: dict) -> tuple[Optional[dict], Optional[dict]]:
     return five_hour, seven_day
 
 
+async def quota_antigravity():
+    """Ask the native CLI for fresh quota, without starting a model turn."""
+    if not AGY_PATH:
+        return JSONResponse({"error": "agy CLI not installed"}, status_code=503)
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            AGY_PATH, "--print", "/usage", "--output-format", "json",
+            "--print-timeout", "30s",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=35)
+        data = json.loads(stdout)
+        if proc.returncode or data.get("status") != "SUCCESS":
+            raise ValueError("agy usage command failed; check native login")
+        buckets = []
+        for group in data.get("command", {}).get("data", {}).get("groups", []):
+            for bucket in group.get("buckets", []):
+                remaining = _quota_number(bucket.get("remaining_fraction"))
+                if remaining is None or not 0 <= remaining <= 1:
+                    continue
+                buckets.append({
+                    "group": group.get("name", ""),
+                    "window": bucket.get("window", ""),
+                    "used_percent": (1 - remaining) * 100,
+                    "reset_at": bucket.get("reset_time"),
+                })
+        if not buckets:
+            raise ValueError("agy returned no quota buckets")
+        limiting = max(buckets, key=lambda bucket: bucket["used_percent"])
+        used = limiting["used_percent"]
+        title = "Antigravity usage · " + " · ".join(
+            f"{b['group']} {b['window']}: {b['used_percent']:.1f}% used"
+            + (f" (resets {b['reset_at']})" if b['reset_at'] else "")
+            for b in buckets
+        )
+        return JSONResponse({
+            "status": "ok", "text": f"{round(used)}%", "raw": used,
+            "used_percent": used, "reset_at": limiting["reset_at"],
+            "title": title, "buckets": buckets,
+        })
+    except (OSError, ValueError, TypeError, AttributeError, asyncio.TimeoutError):
+        return JSONResponse({"error": "Antigravity quota unavailable; check agy login"}, status_code=502)
+    finally:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+
+
 async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResponse:
     """Return a normalized gauge snapshot for one provider. Quota is a provider
     attribute (ADR-0028) — this never needs to know which harness is using it."""
@@ -3610,6 +3768,9 @@ async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResp
             "used_percent": None,
             "reset_at": None,
         })
+
+    if gauge.type == "antigravity":
+        return await quota_antigravity()
 
     if gauge.type in _BALANCE_GAUGES:
         return await _balance_snapshot(provider, ref, _BALANCE_GAUGES[gauge.type])
@@ -4422,6 +4583,8 @@ async def _run_realtime_chat(prepared: dict) -> None:
 async def _realtime_chat_start(payload: dict) -> dict:
     try:
         req = ChatRequest(**payload)
+        if req.publication is not None or req.publication_expires_at is not None:
+            return {"ok":False,"error":"publication_requires_host_control_http","status":403}
     except Exception as exc:
         return {"ok": False, "error": "invalid_frame", "detail": str(exc)}
     if req.route:
@@ -4439,6 +4602,7 @@ async def _realtime_chat_start(payload: dict) -> dict:
         pinned_ids=req.pinned_ids, attached_paths=req.attached_paths,
         include_topic_memory=req.include_topic_memory, source=req.source,
         flow_run_id=flow_run_id, flow_route=flow_route,
+        task_workspace=req.task_workspace, task_id=req.task_id,
     )
     if isinstance(prepared, JSONResponse):
         body = json.loads(prepared.body)
@@ -4455,7 +4619,8 @@ async def _realtime_chat_start(payload: dict) -> dict:
     task = asyncio.create_task(_run_realtime_chat(prepared), name=f"squid-ws-chat-{prepared['asst_msg_id']}")
     _realtime_chat_tasks.add(task)
     task.add_done_callback(_realtime_chat_tasks.discard)
-    return {"ok": True, "msg_id": prepared["asst_msg_id"], "flow_run_id": flow_run_id}
+    return {"ok": True, "msg_id": prepared["asst_msg_id"], "flow_run_id": flow_run_id,
+            "task_id": prepared.get("task_id")}
 
 
 def _detach_auth_listener(session_id: Optional[str], q: Optional[asyncio.Queue]) -> None:
@@ -4894,6 +5059,10 @@ from .watch_api import router as watch_router
 app.include_router(watch_router)
 from .continuation_api import router as continuation_router
 app.include_router(continuation_router)
+from .route_api import router as route_router
+app.include_router(route_router)
+from .task_publication_api import router as task_publication_router
+app.include_router(task_publication_router)
 
 if UI_DIR.exists():
     app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")

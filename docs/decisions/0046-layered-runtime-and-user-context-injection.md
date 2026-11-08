@@ -38,9 +38,15 @@ templates. The selector supports session-start revision/reset handling and
 explicit request selection; current runtime templates all use every-turn, so
 runtime delivery requires no new session tracking.
 
-Global user-context inheritance, unified optional-layer selection, persisted
-audit manifests, the context viewer, and shared skill/tool discovery remain
-unimplemented. This runtime foundation does not mark the whole ADR complete.
+Launch attempts now record runtime instruction snapshots (source, revision and
+rendered values). The ctx popup previews these and human-continuation policy
+templates, and links generated-turn source messages separately from pins.
+Human continuations and durable Flow dependencies resolve missing source content
+against the actual resumed session, including fresh retries.
+
+Global user-context inheritance, unified optional-layer selection, a complete
+audit manifest for all optional context, and shared skill/tool discovery remain
+unimplemented. This does not mark the whole ADR complete.
 
 ## Decision Drivers
 

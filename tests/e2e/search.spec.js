@@ -1094,10 +1094,10 @@ test('operator edits apply only after explicit search submission', async ({ page
   await page.goto('/');
   await page.fill('#input', '/s #all alpha beta');
   await page.keyboard.press('Enter');
-  await expect(page.locator('#search-bar-operator')).toHaveValue('and');
+  await expect(page.locator('#search-bar-operator')).toHaveAttribute('value', 'and');
   await expect.poll(() => urls.length).toBe(1);
   const request = page.waitForRequest(r => new URL(r.url()).pathname === '/search' && new URL(r.url()).searchParams.get('operator') === 'or');
-  await page.selectOption('#search-bar-operator', 'or');
+  await page.click('#search-bar-operator'); await page.click('#search-operator-options [data-operator="or"]');
   await page.locator('#search-bar-keywords').focus();
   expect(urls).toHaveLength(1);
   await page.locator('#search-bar-submit').click();
@@ -1106,7 +1106,7 @@ test('operator edits apply only after explicit search submission', async ({ page
   expect(params.has('topic')).toBe(false);
   await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
   await expect(page.locator('#search-bar-keywords')).toHaveValue('alpha beta');
-  await expect(page.locator('#search-bar-operator')).toHaveValue('or');
+  await expect(page.locator('#search-bar-operator')).toHaveAttribute('value', 'or');
 });
 
 for (const action of ['apply operator', 'clear keywords', 'replace search']) {
@@ -1130,7 +1130,7 @@ for (const action of ['apply operator', 'clear keywords', 'replace search']) {
     await expect.poll(() => !!delayedRoute).toBe(true);
 
     if (action === 'apply operator') {
-      await page.selectOption('#search-bar-operator', 'or');
+      await page.click('#search-bar-operator'); await page.click('#search-operator-options [data-operator="or"]');
       await page.locator('#search-bar-submit').click();
     } else {
       await clearSearchKeywords(page);

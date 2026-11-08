@@ -89,6 +89,8 @@ class WatchDispatch:
                 if chunk is None:
                     break
                 queue_error |= isinstance(chunk, dict) and '_error' in chunk
+            from .continuations import wait_for_descendants
+            await wait_for_descendants(prepared['asst_msg_id'])
             await call(store.settle, self.service, run_id, interrupted=True, queue_error=queue_error and self.accepting)
         except asyncio.CancelledError:
             raise
@@ -162,13 +164,14 @@ class WatchDispatch:
                         return False
                     watch = dict(conn.execute('SELECT * FROM watches WHERE id=?', (run['watch_id'],)).fetchone())
                     grant = conn.execute('SELECT * FROM watch_execution_grants WHERE id=?', (run['grant_id'],)).fetchone()
-                    return store.authorized(self.service, conn, watch, grant, now=self.service.clock())
+                    return ((run['deadline_at'] is None or self.service.clock() < run['deadline_at'])
+                            and store.authorized(self.service, conn, watch, grant, now=self.service.clock()))
             finally:
                 conn.close()
 
     async def defer(self, run_id, reason='user_work_priority'):
         run, _, _, _ = await call(store.details, run_id)
-        if run['flow_run_id'] and run['started_at'] is not None:
+        if run['started_at'] is not None:
             await call(store.finish_dispatch, run_id, 'ambiguous', 'flow_interrupted_by_user',
                        pause_watch=True, now=self.service.clock())
         else:
@@ -183,9 +186,17 @@ class WatchDispatch:
         for run_id, task in list(self.tasks.items()):
             run, watch, _, _ = await call(store.details, run_id)
             await call(store.settle, self.service, run_id, interrupted=True)
+            await call(store.finish_dispatch, run_id)
             if run['assistant_msg_id']:
                 self.dispatcher.drain_topic(watch['topic'], msg_id=run['assistant_msg_id'])
                 kill_proc_by_msg_id(run['assistant_msg_id'])
+            from . import stats_db
+            with stats_db._connection() as conn:
+                children = conn.execute("SELECT child_id FROM continuations WHERE json_extract(owner_json,'$.run_id')=?", (run_id,)).fetchall()
+            for child in children:
+                if child['child_id']:
+                    self.dispatcher.drain_topic(watch['topic'], msg_id=child['child_id'])
+                    kill_proc_by_msg_id(child['child_id'])
             task.cancel()
         await asyncio.gather(*list(self.tasks.values()), return_exceptions=True)
 
@@ -216,3 +227,10 @@ async def confirm_run(run_id):
     else:
         await runtime.reject(run_id, 'authorization_changed')
     return False
+
+
+async def authorized_run(run_id):
+    """Recheck a launch/retry without consuming another execution-budget slot."""
+    from .server import app
+    runtime = app.state.watch_service.dispatch_runtime
+    return bool(runtime is not None and runtime.accepting and await call(runtime.authorized, run_id))

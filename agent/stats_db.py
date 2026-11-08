@@ -576,7 +576,7 @@ def create_flow_run(flow_run_id: str, route: str, original_prompt_msg_id: Option
         raise ValueError("flow_run_id, route, and at least one step are required")
     if execution_mode not in ("shadow", "durable"):
         raise ValueError("execution_mode must be shadow or durable")
-    dependency_map = _validate_flow_plan(steps)
+    _validate_flow_plan(steps)
     conn = _connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -591,27 +591,8 @@ def create_flow_run(flow_run_id: str, route: str, original_prompt_msg_id: Option
                 raise ValueError("flow_run_id already belongs to a different route or execution mode")
             conn.rollback()
             return dict(existing)
-        conn.execute(
-            """INSERT INTO flow_runs
-               (flow_run_id, route, original_prompt_msg_id, execution_mode, status, watch_owned)
-               VALUES (?, ?, ?, ?, 'scheduled', ?)""",
-            (flow_run_id, route, original_prompt_msg_id, execution_mode, int(watch_owned)),
-        )
-        for step in steps:
-            dependencies = dependency_map[str(step["step_id"])]
-            status = step.get("status", "scheduled" if step.get("due_at") else "pending")
-            due_at = _flow_timestamp(step["due_at"], "due_at") if step.get("due_at") else None
-            conn.execute(
-                """INSERT INTO flow_steps
-                   (step_id, flow_run_id, branch_index, leg, repeat_index, dependencies,
-                    topic, agent, fresh, status, delay_seconds, due_at, dispatch_key)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (str(step["step_id"]), flow_run_id, int(step.get("branch_index", 0)),
-                 step.get("leg", "origin"), int(step.get("repeat_index", 0)), json.dumps(dependencies),
-                 step["topic"], step["agent"], int(bool(step.get("fresh"))), status,
-                 max(0, int(step.get("delay_seconds", 0))),
-                 due_at, step.get("dispatch_key") or str(step["step_id"])),
-            )
+        _insert_flow_run(conn, flow_run_id, route, original_prompt_msg_id, steps,
+                         execution_mode=execution_mode, watch_owned=watch_owned)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -619,6 +600,32 @@ def create_flow_run(flow_run_id: str, route: str, original_prompt_msg_id: Option
     finally:
         conn.close()
     return get_flow_run(flow_run_id)
+
+
+def _insert_flow_run(conn, flow_run_id, route, original_prompt_msg_id, steps, *, execution_mode, watch_owned=False):
+    """Insert a validated Flow plan inside an existing admission transaction."""
+    dependency_map = _validate_flow_plan(steps)
+    conn.execute(
+        """INSERT INTO flow_runs
+           (flow_run_id, route, original_prompt_msg_id, execution_mode, status, watch_owned)
+           VALUES (?, ?, ?, ?, 'scheduled', ?)""",
+        (flow_run_id, route, original_prompt_msg_id, execution_mode, int(watch_owned)),
+    )
+    for step in steps:
+        dependencies = dependency_map[str(step["step_id"])]
+        status = step.get("status", "scheduled" if step.get("due_at") else "pending")
+        due_at = _flow_timestamp(step["due_at"], "due_at") if step.get("due_at") else None
+        conn.execute(
+            """INSERT INTO flow_steps
+               (step_id, flow_run_id, branch_index, leg, repeat_index, dependencies,
+                topic, agent, fresh, status, delay_seconds, due_at, dispatch_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(step["step_id"]), flow_run_id, int(step.get("branch_index", 0)),
+             step.get("leg", "origin"), int(step.get("repeat_index", 0)), json.dumps(dependencies),
+             step["topic"], step["agent"], int(bool(step.get("fresh"))), status,
+             max(0, int(step.get("delay_seconds", 0))),
+             due_at, step.get("dispatch_key") or str(step["step_id"])),
+        )
 
 
 def get_flow_run(flow_run_id: str) -> Optional[dict]:
@@ -726,6 +733,10 @@ def claim_flow_step(flow_run_id: str, step_id: str, now: str) -> Optional[dict]:
         if not row:
             conn.rollback()
             return None
+        from . import routes
+        if not routes.claim_flow(conn, flow_run_id, step_id):
+            conn.commit()
+            return None
         changed = conn.execute(
             f"""UPDATE flow_steps SET status='claimed', claimed_at=?, attempt=attempt+1,
                       updated_at=?
@@ -768,6 +779,8 @@ def link_flow_step_messages(flow_run_id: str, step_id: str, user_msg_id: int, as
             (user_msg_id, assistant_msg_id, flow_run_id, step_id),
         ).rowcount
         if changed:
+            from .routes import bind_flow
+            bind_flow(conn, flow_run_id, step_id, assistant_msg_id)
             conn.execute(
                 """UPDATE chat_messages SET flow_step_id=?
                    WHERE id IN (?, ?) AND flow_run_id=?
@@ -985,7 +998,8 @@ def get_due_flow_steps(now: str, flow_run_id: Optional[str] = None) -> list[dict
         rows = conn.execute(
             f"""SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
                WHERE s.status IN ({_FLOW_CLAIMABLE_STATUS_SQL})
-                 AND s.leg<>'origin'
+                 AND (s.leg<>'origin' OR EXISTS (SELECT 1 FROM route_requests q
+                      WHERE q.id=s.flow_run_id AND q.state='active'))
                  AND (s.delay_seconds=0 OR s.due_at IS NOT NULL)
                  AND (s.due_at IS NULL OR s.due_at<=?)
                  AND r.execution_mode='durable'
@@ -1047,6 +1061,10 @@ def init_db() -> None:
             conn.execute(ddl)
         from .continuations import initialize as initialize_continuations
         initialize_continuations(conn)
+        from .routes import initialize as initialize_routes
+        initialize_routes(conn)
+        from .task_workspaces import initialize as initialize_task_workspaces
+        initialize_task_workspaces(conn)
         if "pause_reason" not in _table_columns(conn, "watches"):
             conn.execute("ALTER TABLE watches ADD COLUMN pause_reason TEXT")
             conn.execute("""UPDATE watches SET pause_reason=
@@ -1058,8 +1076,14 @@ def init_db() -> None:
             conn.execute("ALTER TABLE watches ADD COLUMN observation_plan TEXT")
         if "flow_route" not in _table_columns(conn, "watch_execution_grants"):
             conn.execute("ALTER TABLE watch_execution_grants ADD COLUMN flow_route TEXT")
+        if "publication_json" not in _table_columns(conn, "watch_execution_grants"):
+            conn.execute("ALTER TABLE watch_execution_grants ADD COLUMN publication_json TEXT")
+        if "publication_enabled" not in _table_columns(conn, "watch_execution_grants"):
+            conn.execute("ALTER TABLE watch_execution_grants ADD COLUMN publication_enabled INTEGER NOT NULL DEFAULT 0")
         if "flow_run_id" not in _table_columns(conn, "watch_runs"):
             conn.execute("ALTER TABLE watch_runs ADD COLUMN flow_run_id TEXT")
+        if "deadline_at" not in _table_columns(conn, "watch_runs"):
+            conn.execute("ALTER TABLE watch_runs ADD COLUMN deadline_at REAL")
         flow_run_columns = _table_columns(conn, "flow_runs")
         if "execution_mode" not in flow_run_columns:
             # All pre-cutover plans were executed by the transcript scheduler.

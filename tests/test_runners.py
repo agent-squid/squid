@@ -2365,3 +2365,17 @@ def test_codex_file_change_event_yields_diff_tool():
         chunks = asyncio.run(collect())
 
     assert chunks[0] == {"_tool": {"name": "Diff", "file": "ui/app.js", "diff": "@@ -1 +1 @@\n-old\n+new"}}
+
+
+def test_failed_message_stop_retains_process_for_retry():
+    _clear()
+    _register_proc(901, 'codex', 'work', 'codex', adhoc=True, msg_id=301)
+    try:
+        with patch('agent.runners._signal_process_group', side_effect=[False, True]) as send:
+            assert kill_proc_by_msg_id(301) == 0
+            assert 901 in _proc_registry
+            assert kill_proc_by_msg_id(301) == 1
+            assert 901 not in _proc_registry
+            assert send.call_count == 2
+    finally:
+        _clear()

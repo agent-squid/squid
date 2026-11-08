@@ -177,15 +177,17 @@ async def invoke(request, operation, watch_id=None, *, human_topic=None):
             fields(body, ('adapter', 'target', 'request_key'), ('poll_interval', 'expires_at'))
             return await call(service.create, token, **body)
         if operation == 'execution-grant' and human_topic is not None:
-            fields(body, ('instructions', 'max_runs', 'max_attempts', 'request_key'), ('agent', 'flow_route'))
+            fields(body, ('instructions', 'max_runs', 'max_attempts', 'request_key'), ('agent', 'flow_route', 'publication', 'enable_publication'))
             from .watch_runs import execution_grant
             audit = json.dumps(dict(id=turn, principal='host-control:' + expected.hex()[:16],
-                                    action='grant_local_work', topic=human_topic, watch_id=watch_id))
+                                    action='grant_task_publication' if body.get('enable_publication') else 'grant_publication_intent' if body.get('publication') is not None else 'grant_local_work',
+                                    topic=human_topic, watch_id=watch_id))
             grant = await call(execution_grant, service, topic=human_topic, watch_id=watch_id,
                                user_action=audit, **body)
-            return dict(grant_id=grant['id'], scope='local_work', watch_id=watch_id,
+            return dict(grant_id=grant['id'], scope='task_publication' if grant['publication_enabled'] else 'local_work', watch_id=watch_id,
                         agent=grant['agent'] if not grant['flow_route'] else None, flow_route=grant['flow_route'], max_runs=grant['max_runs'], max_attempts=grant['max_attempts'],
-                        revoked=grant['revoked_at'] is not None)
+                        revoked=grant['revoked_at'] is not None,
+                        publication_recorded=grant['publication_json'] is not None, publication_enabled=bool(grant['publication_enabled']))
         if operation == 'execution-revoke' and human_topic is not None:
             fields(body, ('grant_id',))
             from .watch_runs import revoke_execution

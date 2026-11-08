@@ -52,6 +52,7 @@ def test_fresh_and_resumed_command_and_native_result(monkeypatch):
     assert cmd[cmd.index('--output-format') + 1] == 'stream-json'
     assert cmd[cmd.index('--model') + 1] == 'selected-model'
     assert cmd[cmd.index('--print-timeout') + 1] == '600s'
+    assert cmd.count('--dangerously-skip-permissions') == 1
     assert '--conversation' not in cmd
     assert 'previous prompt' in cmd[-1] and 'next' in cmd[-1]
     assert call['extra_env'] == {'CUSTOM': 'value'}
@@ -106,6 +107,25 @@ def test_missing_result_and_process_error_are_not_success(monkeypatch):
         collect(monkeypatch, [{'event': 'init', 'conversation_id': 'c'}])
     with pytest.raises(runners.CLIError, match='CLI exited'):
         collect(monkeypatch, [result(), runners.CLIError('CLI exited 1')])
+
+
+def test_configured_permission_flag_is_not_duplicated(monkeypatch):
+    _, call = collect(monkeypatch, [result()], backend_args=('--dangerously-skip-permissions',))
+    assert call['cmd'].count('--dangerously-skip-permissions') == 1
+
+
+def test_tool_error_without_reply_names_the_failed_tool(monkeypatch):
+    denied = {'event': 'step_update', 'step_update': {
+        'step_type': 'tool', 'state': 'ERROR', 'step_index': 2, 'tool_name': 'run_command',
+        'tool_info': {'name': 'run_command', 'parameters': {'CommandLine': 'echo hi'},
+                      'error': {'type': 'TOOL_ERROR', 'message': (
+                          'permission check failed for unsandboxed "echo hi": user denied\n'
+                          'Do not attempt to circumvent this denial')}}}}
+    with pytest.raises(runners.CLIError, match=r'tool error \(run_command: permission check failed[^\n]*\)$'):
+        collect(monkeypatch, [denied, result(response='')])
+    # A tool error the agent recovered from still returns its reply.
+    chunks, _ = collect(monkeypatch, [denied, result()])
+    assert chunks[0] == 'answer'
 
 
 def test_missing_cli(monkeypatch):
@@ -184,7 +204,7 @@ print(json.dumps({'harnesses': list_harnesses(), 'providers': public_providers()
     provider = data['providers']['antigravity']
     assert harness['compatible_providers'] == ['antigravity']
     assert harness['supported_apis'] == ['/native/antigravity']
-    assert provider['gauge']['type'] == 'static'
+    assert provider['gauge']['type'] == ('static' if setup == 'custom' else 'antigravity')
     assert data['resolved']['protocol'] == 'oneshot-cli'
     if setup != 'fresh':
         assert set(data['providers']) == {'anthropic', 'antigravity'}
@@ -240,3 +260,16 @@ def test_short_default_keeps_existing_antigravity_agent(tmp_path, monkeypatch):
     assert stats_db.get_agent('antigravity')['model'] == 'chosen-model'
     assert stats_db.get_agent('antigravity')['cwd'] == '/repo'
     assert stats_db.get_agent('agy')['harness'] == 'antigravity'
+
+
+def test_legacy_native_gauge_upgrades_but_custom_gauge_survives():
+    from agent.providers import _validate_provider
+    raw = {
+        'label': 'agy', 'color': '#4285F4',
+        'auth': {'type': 'subscription'},
+        'supported_apis': ['/native/antigravity'],
+        'gauge': {'type': 'static', 'text': 'Native', 'title': 'Managed by Antigravity CLI'},
+    }
+    assert _validate_provider('antigravity', raw).gauge.type == 'antigravity'
+    raw['gauge'] = {'type': 'static', 'text': 'Custom'}
+    assert _validate_provider('antigravity', raw).gauge.type == 'static'

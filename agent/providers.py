@@ -23,7 +23,7 @@ from .config import OLLAMA_PATH, TEST_HARNESS_ENABLED, _cfg
 # secret to check for, and it's what agent/topic_queue.py keys its
 # provider-scoped serial-queueing behavior off of.
 SUPPORTED_AUTH_TYPES = frozenset({"api_key", "subscription", "none"})
-SUPPORTED_GAUGES = frozenset({"claude", "codex", "cursor", "deepseek", "kimi", "static", "none"})
+SUPPORTED_GAUGES = frozenset({"claude", "codex", "cursor", "antigravity", "deepseek", "kimi", "static", "none"})
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -35,7 +35,7 @@ _DEFAULT_PROVIDERS: dict[str, dict[str, Any]] = {
     "antigravity": {
         "label": "agy", "color": "#4285F4",
         "auth": {"type": "subscription"},
-        "gauge": {"type": "static", "text": "Native", "title": "Managed by Antigravity CLI"},
+        "gauge": "antigravity",
         "supported_apis": ["/native/antigravity"],
     },
     "anthropic": {
@@ -337,7 +337,13 @@ def _validate_provider(provider_id: str, raw: Any) -> Provider:
         raise ValueError(f"Provider {provider_id!r} models must be a list of strings")
 
     supported_apis = _validate_supported_apis(provider_id, raw.get("supported_apis"))
-    gauge = _validate_gauge(provider_id, raw.get("gauge"))
+    gauge_raw = raw.get("gauge")
+    # Upgrade the former shipped badge while preserving custom gauge choices.
+    if provider_id == "antigravity" and gauge_raw == {
+        "type": "static", "text": "Native", "title": "Managed by Antigravity CLI"
+    }:
+        gauge_raw = "antigravity"
+    gauge = _validate_gauge(provider_id, gauge_raw)
     links = _validate_links(provider_id, raw.get("links"))
 
     return Provider(provider_id, label, color.upper(), base_url, auth_type, api_key, parallel,

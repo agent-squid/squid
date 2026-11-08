@@ -22,7 +22,11 @@ async def invoke(request, action, identifier=None):
                     raise ValueError('invalid_continuation_request')
                 raw.extend(chunk)
             return await asyncio.to_thread(store.create if action == 'create' else store.result, token, json.loads(raw))
-        return await asyncio.to_thread(store.inspect, token, identifier, action == 'cancel')
+        rows = await asyncio.to_thread(store.inspect, token, identifier, action == 'cancel')
+        if action == 'cancel':
+            from .server import dispatcher
+            await store.cancel_descendants(dispatcher, rows)
+        return rows
     except (PermissionError, WatchDenied):
         return JSONResponse({'error': 'continuation_not_authorized'}, status_code=403)
     except (ValueError, TypeError, UnicodeError, RecursionError) as exc:

@@ -79,7 +79,7 @@ for (const mobile of [false, true]) test(`icon toggles combine and sync shortcut
  await page.click('#chip-search-btn');
  await page.fill('#search-bar-scope', '#demo*');
  await page.fill('#search-bar-keywords', 'hello');
- await page.selectOption('#search-bar-operator', 'or');
+ await page.click('#search-bar-operator'); await page.click('#search-operator-options [data-operator="or"]');
  await page.click('#search-bar-submit');
  await page.click('#search-bar-bookmarks');
  const combined = page.waitForRequest(r => r.url().includes('/search?') && r.url().includes('marked_bad=true'));
@@ -158,7 +158,7 @@ for (const width of [280, 320, 375, 390, 600, 768, 1280]) test(`all history cont
  await page.click('#chip-search-btn');
  await expect(page.getByRole('button', { name: 'Clear all history filters', exact: true })).toBeVisible();
  await expect(page.locator('#search-bar-reset .material-symbols-outlined')).toHaveText('restart_alt');
- await expect(page.locator('#search-bar-operator option')).toHaveText(width <= 600 ? ['&&', '||'] : ['AND', 'OR']);
+ await expect(page.locator('#search-bar-operator')).toHaveText(width <= 600 ? '&&' : 'AND');
  const layout = await page.locator('#search-bar').evaluate(bar => {
   const bounds = bar.getBoundingClientRect();
   if (getComputedStyle(bar).display !== 'grid') throw new Error('History controls must use a single grid row');
@@ -174,10 +174,10 @@ for (const width of [280, 320, 375, 390, 600, 768, 1280]) test(`all history cont
   expect(control.fits).toBe(true);
   expect(control.width).toBeGreaterThan(20);
  }
- await page.selectOption('#search-bar-operator', 'or');
+ await page.click('#search-bar-operator'); await page.click('#search-operator-options [data-operator="or"]');
  await page.setViewportSize({ width: width <= 600 ? 1280 : 375, height: 844 });
- await expect(page.locator('#search-bar-operator')).toHaveValue('or');
- await expect(page.locator('#search-bar-operator option')).toHaveText(width <= 600 ? ['AND', 'OR'] : ['&&', '||']);
+ await expect(page.locator('#search-bar-operator')).toHaveAttribute('value', 'or');
+ await expect(page.locator('#search-bar-operator')).toHaveText(width <= 600 ? 'OR' : '||');
 });
 
 for (const mobile of [false, true]) test(`composer route supplies suggestions without applying a filter ${mobile}`, async ({ page }) => {

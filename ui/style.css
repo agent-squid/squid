@@ -76,7 +76,7 @@
   background: none; border: none; cursor: pointer;
   color: var(--text-mid); font-size: 1rem; line-height: 1;
 }
-#connect-tabs { display: flex; gap: 2px; justify-content: center; margin-bottom: 1rem; }
+#connect-tabs { display: flex; flex-wrap: wrap; gap: 2px; justify-content: center; margin-bottom: 1rem; }
 .connect-tab {
   background: transparent; border: 1px solid #222; border-radius: 6px;
   color: var(--text-dim); cursor: pointer; font-size: var(--text-sm);
@@ -467,6 +467,7 @@ body {
 #codex-quota-display.error #codex-pie-arc { stroke: var(--quota-accent); }
 
 /* cursor quota gauge */
+#antigravity-quota-display,
 #cursor-quota-display {
   --quota-accent: #f5f5f2;
   display: flex;
@@ -481,9 +482,13 @@ body {
   min-height: 24px;
   padding: 0;
 }
+#antigravity-quota-display:hover,
 #cursor-quota-display:hover { color: var(--text-mid); }
+#antigravity-quota-display.loaded,
 #cursor-quota-display.loaded { color: var(--text-lo); }
+#antigravity-quota-display.error,
 #cursor-quota-display.error { color: var(--quota-accent); }
+#antigravity-quota-display.error #antigravity-pie-arc,
 #cursor-quota-display.error #cursor-pie-arc { stroke: var(--quota-accent); }
 /* prepaid-balance cost gauges (deepseek, kimi) */
 #deepseek-quota-display,
@@ -523,6 +528,7 @@ body {
 .live-hidden { display: none !important; }
 #right-rail.quota-chat-hidden #quota-display,
 #right-rail.quota-chat-hidden #codex-quota-display,
+#right-rail.quota-chat-hidden #antigravity-quota-display,
 #right-rail.quota-chat-hidden #cursor-quota-display,
 #right-rail.quota-chat-hidden #deepseek-quota-display,
 #right-rail.quota-chat-hidden #kimi-quota-display,
@@ -1083,6 +1089,46 @@ body {
 .msg.assistant blockquote { border-left: 3px solid var(--accent); margin: 0.4em 0; padding-left: 0.8em; color: var(--text-muted); }
 .msg.assistant a { color: var(--accent-light); }
 .msg.assistant hr { border: none; border-top: 1px solid #333; margin: 0.6em 0; }
+
+/* markdown tables: scroll horizontally with readable columns; first column stays pinned */
+.msg.assistant { --md-table-bg: var(--surface-2); }
+.fv-md-preview { --md-table-bg: var(--bg); }
+.md-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x pan-y;
+  margin: 0.6em 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  /* Right-edge shadow appears only while more columns are hidden. */
+  background:
+    linear-gradient(to right, transparent, var(--md-table-bg) 70%) right / 2.5rem 100% no-repeat local,
+    radial-gradient(farthest-side at 100% 50%, #000a, transparent) right / 0.9rem 100% no-repeat scroll;
+}
+.md-table-wrap table { width: max-content; border-collapse: collapse; min-width: 100%; overflow-wrap: normal; }
+.md-table-wrap th, .md-table-wrap td {
+  min-width: 6rem;
+  max-width: 32ch;
+  padding: 0.4em 0.7em;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+.md-table-wrap th:not([align]), .md-table-wrap td:not([align]) { text-align: left; }
+.md-table-wrap tbody tr:last-child td { border-bottom: 0; }
+.md-table-wrap thead th { background: var(--surface-3); }
+.md-table-wrap th:first-child, .md-table-wrap td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 7rem;
+  max-width: min(32ch, 40vw);
+  background: var(--md-table-bg);
+  box-shadow: 1px 0 0 var(--border);
+}
+.md-table-wrap thead th:first-child { background: var(--surface-3); }
 
 /* loading dots */
 .loader { display: inline-flex; gap: 4px; padding: 2px 0; }
@@ -4681,6 +4727,7 @@ button {
 
   #quota-display,
   #codex-quota-display,
+  #antigravity-quota-display,
   #cursor-quota-display {
     gap: 0.35rem;
     min-width: 0;
@@ -4688,6 +4735,7 @@ button {
 
   #quota-label,
   #codex-quota-label,
+  #antigravity-quota-label,
   #cursor-quota-label {
     max-width: 130px;
     overflow: hidden;
@@ -5601,7 +5649,7 @@ button {
 #search-scope-picker { position: relative; display: flex; flex: 0 1 30%; min-width: 0; max-width: 15rem; }
 #search-bar-scope, #filter-bar-scope { width: 100%; flex: 1; }
 #search-scope-toggle, #filter-scope-toggle { flex-shrink: 0; border: 0; background: transparent; color: var(--text-muted); padding: 0 0.25rem; cursor: pointer; }
-#search-scope-options, #filter-scope-options {
+#search-scope-options, #filter-scope-options, #search-operator-options {
   position: absolute;
   bottom: calc(100% + 0.4rem);
   left: 0;
@@ -5617,9 +5665,11 @@ button {
   border-radius: 6px;
   box-shadow: 0 4px 16px #0006;
 }
-#search-scope-options button, #filter-scope-options button { display: block; width: 100%; padding: 0.5rem; border: 0; background: transparent; color: var(--text); text-align: left; font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-#search-scope-options button:hover, #search-scope-options button:focus, #filter-scope-options button:hover, #filter-scope-options button:focus { background: var(--border); outline: 1px solid var(--accent); }
+#search-scope-options button, #filter-scope-options button, #search-operator-options button { display: block; width: 100%; padding: 0.5rem; border: 0; background: transparent; color: var(--text); text-align: left; font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+#search-scope-options button:hover, #search-scope-options button:focus, #filter-scope-options button:hover, #filter-scope-options button:focus, #search-operator-options button:hover, #search-operator-options button:focus { background: var(--border); outline: 1px solid var(--accent); }
+#search-operator-picker { position: relative; display: flex; flex: 0 0 auto; }
 #search-bar-operator { flex: 0 0 auto; cursor: pointer; font-size: 0.85em; font-weight: 500; }
+#search-operator-options [aria-selected="true"] { color: var(--accent); }
 #search-bar-keywords { flex: 1 1 70%; }
 #search-bar-submit {
   display: inline-flex;
@@ -6066,7 +6116,7 @@ mark.search-kw-highlight {
     flex-basis: 24px; width: 24px; height: 30px; padding: 2px;
   }
   #search-bar .material-symbols-outlined { font-size: 18px; }
-  #search-bar-operator { appearance: none; width: 32px; padding: 5px 2px; text-align: center; }
+  #search-bar-operator { width: 32px; padding: 5px 2px; text-align: center; }
   #search-scope-toggle { padding: 0 2px; }
 }
 
@@ -6087,3 +6137,8 @@ mark.search-kw-highlight {
 .quota-setup-btn { font-size: var(--text-xs); }
 .quota-status-detail:has(.quota-setup-btn) { white-space: normal; overflow: visible; }
 .quota-setup-btn { display: block; margin-top: 0.2rem; }
+
+#connect-ssh-panel { text-align: left; white-space: normal; }
+#connect-ssh-panel p { margin: 0 0 0.75rem; }
+#connect-ssh-panel code { display: block; overflow-wrap: anywhere; margin-bottom: 0.75rem; user-select: all; }
+#connect-ssh-panel a { color: #244c85; }

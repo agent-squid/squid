@@ -14,12 +14,13 @@ from .watch_urls import valid_api_url
 def main(argv):
     parser = argparse.ArgumentParser(prog='agentsquid continue', description=
         'Schedule one bounded sequence (up to 8 steps) after this human turn succeeds and syncs. '
-        'Enabled automatically with worktree.enabled: true. Watches and Flow turns cannot schedule successors. '
+        'Enabled automatically with worktree.enabled: true. Watch and Flow successors use isolated local steps, read-only task_review, or explicitly granted host task_publication. '
         'Create input: {"request_key":"commit","mode":"backing_git","prompt":"Commit the requested changes"}. '
         'For multiple steps: {"request_key":"task","steps":[{"mode":"backing_git","prompt":"Commit"},{"mode":"isolated","prompt":"Next edit"}]}. '
         'Sequence steps must record their outcome with result --input using {"success":true} or {"success":false}. '
+        'Keep each prompt to the next action and necessary scope; do not repeat conversation history or standard execution rules. '
         'Modes: isolated (local edits/checks), backing_git (inspect/commit and explicitly user-requested push of the current branch; no file edits, tags, releases or PRs). '
-        'This records future work; it does not wait for completion. No automatic retry after uncertain execution.')
+        'task_review requires a separate read-only review and positive result. task_publication must be last and requires a recorded human grant for the saved task branch; the host commits, pushes that branch and creates/updates its PR. This records future work; it does not wait for completion. No automatic retry after uncertain execution.')
     parser.add_argument('action', choices=['create', 'list', 'show', 'cancel', 'result'])
     parser.add_argument('identifier', nargs='?')
     parser.add_argument('--input', help='JSON file, or - for stdin')

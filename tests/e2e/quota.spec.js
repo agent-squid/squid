@@ -945,3 +945,45 @@ test('browser import verifies fresh usage for a custom provider after an older r
   await expect(page.locator('#codex-creds-status')).toContainText('usage unavailable');
   expect(freshReads).toBeGreaterThan(0);
 });
+
+
+test('Antigravity refresh uses the selected provider and waits for fresh quota', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/quota/provider/*', route => route.fulfill({
+    json: { status: 'ok', raw: 10, used_percent: 10 },
+  }));
+  await page.route('**/health', route => route.fulfill({ json: { status: 'ok', providers: { anthropic: { label: 'Claude', gauge: { type: 'claude' } }, 'custom-agy': { label: 'Custom AGY', gauge: { type: 'antigravity' } } } } }));
+  await page.goto('/');
+  await expect(page.locator('#quota-display')).toBeVisible();
+  await page.evaluate(() => {
+    _providerMetadata['custom-agy'] = { label: 'Custom AGY', gauge: { type: 'antigravity' } };
+    resolveActiveQuotaBackend = async () => 'custom-agy';
+    setVisibleQuotaBackend('custom-agy');
+  });
+  let requests = 0;
+  await page.route('**/quota/provider/custom-agy', async route => {
+    const used = ++requests * 10;
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await route.fulfill({ json: { status: 'ok', raw: used, used_percent: used, title: 'Live AGY' } });
+  });
+  await page.locator('#antigravity-quota-display').click();
+  await expect(page.locator('#antigravity-pct')).toHaveText(/[1-9]0/);
+  await expect(page.locator('#antigravity-quota-display')).toHaveAttribute('title', 'Live AGY');
+  const results = await page.evaluate(async () => {
+    const first = fetchQuotaForBackend('custom-agy', true);
+    const second = fetchQuotaForBackend('custom-agy', true);
+    return (await Promise.all([first, second])).map(snapshot => snapshot.raw);
+  });
+  expect(results[0]).toBeGreaterThanOrEqual(20);
+  expect(results[1]).toBe(results[0] + 10);
+  expect(requests).toBeGreaterThanOrEqual(3);
+  await expect(page.locator('#antigravity-pct')).toHaveText(String(results[1]));
+  const beforePoll = requests;
+  await page.evaluate(async () => {
+    const poll = fetchQuotaForBackend('custom-agy');
+    // Multiple polling callers must reuse the in-flight request, even if
+    // that read takes longer than a polling interval.
+    await Promise.all([poll, fetchQuotaForBackend('custom-agy'), fetchQuotaForBackend('custom-agy')]);
+  });
+  expect(requests).toBe(beforePoll + 1);
+});

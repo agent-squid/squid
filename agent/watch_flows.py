@@ -70,18 +70,18 @@ def turn_outcome(conn, msg_id):
         return ('failed', 'turn_error') if message['status'] == 'error' else ('cancelled', 'turn_cancelled')
     if conn.execute("SELECT 1 FROM run_events WHERE msg_id=? AND event_type='error'", (msg_id,)).fetchone():
         return 'failed', 'turn_error'
-    if not conn.execute("SELECT 1 FROM run_events WHERE msg_id=? AND event_type='done'", (msg_id,)).fetchone():
-        return 'ambiguous', 'completion_unverified'
     try:
         tools = json.loads(message['context'] or '[]')
     except (ValueError, TypeError):
         return 'ambiguous', 'completion_unverified'
-    if not isinstance(tools, list):
+    if not isinstance(tools, list) or any(not isinstance(tool, dict) for tool in tools):
         return 'ambiguous', 'completion_unverified'
     if (any(t.get('name') == 'WorktreeSync' and t.get('status') != 'synced' for t in tools if isinstance(t, dict))
             or conn.execute("SELECT 1 FROM worktrees WHERE topic=? AND agent=? AND status!='synced'",
                             (message['topic'], str(msg_id))).fetchone()):
         return 'ambiguous', 'sync_conflict'
+    if not conn.execute("SELECT 1 FROM run_events WHERE msg_id=? AND event_type='done'", (msg_id,)).fetchone():
+        return 'ambiguous', 'completion_unverified'
     return 'succeeded', 'local_work_done'
 
 
@@ -134,6 +134,11 @@ async def dispatch(runtime, run_id):
                 if chunk is None:
                     break
                 queue_error |= isinstance(chunk, dict) and '_error' in chunk
+            from .continuations import wait_for_descendants
+            descendant_state, descendant_reason = await wait_for_descendants(prepared['asst_msg_id'])
+            if descendant_state != 'succeeded':
+                await call(watch_runs.settle, runtime.service, run_id, interrupted=True)
+                return
             current, _, _, _ = await call(watch_runs.details, run_id)
             if current['state'] not in {'claimed', 'queued', 'running'}:
                 return
