@@ -16027,17 +16027,23 @@ function showCtxPopup(spanEl) {
       const divider = document.createElement('div');
       divider.className = 'ctx-popup-divider';
       frag.appendChild(divider);
+      const row = document.createElement('div');
+      row.className = 'ctx-popup-inline';
+      row.innerHTML = '<span class="ctx-popup-key">roots</span>';
       roots.forEach((root, i) => {
-        const row = document.createElement('div');
-        row.className = 'ctx-popup-row ctx-popup-root-row';
-        row.dataset.root = root;
-        row.innerHTML = `<span class="ctx-popup-key">${i === 0 ? 'roots' : ''}</span><span class="ctx-popup-val ctx-popup-link" title="Open in file viewer">${escapeHtml(root)}</span>`;
-        row.addEventListener('click', () => {
+        const link = document.createElement('a');
+        link.className = 'ctx-popup-link ctx-popup-root';
+        link.href = '#';
+        link.title = 'Open in file viewer';
+        link.textContent = root;
+        link.addEventListener('click', event => {
+          event.preventDefault();
           _closeCtxPopup(popup);
           openFileViewer(root);
         });
-        frag.appendChild(row);
+        row.append(i ? ', ' : ' ', link);
       });
+      frag.appendChild(row);
       placeholder.replaceWith(frag);
     }).catch(() => {
       const placeholder = document.getElementById('ctx-roots-section');
@@ -16109,17 +16115,13 @@ async function loadCtxSources(popup, spanEl, msgId) {
         section.appendChild(row);
       }
       const instructions = attempt.instructions || [];
-      let instructionLinks;
-      if (instructions.length) {
-        const row = document.createElement('div');
-        row.className = 'ctx-popup-row';
-        row.innerHTML = '<span class="ctx-popup-key">instructions</span><span class="ctx-popup-instruction-links"></span>';
-        instructionLinks = row.querySelector('.ctx-popup-instruction-links');
-        section.appendChild(row);
-      }
-      for (const instruction of instructions) {
+      const instructionRow = document.createElement('div');
+      instructionRow.className = 'ctx-popup-inline';
+      instructionRow.innerHTML = '<span class="ctx-popup-key">instruct</span>';
+      if (instructions.length) section.appendChild(instructionRow);
+      instructions.forEach((instruction, i) => {
         const link = document.createElement('a');
-        link.className = 'ctx-popup-link';
+        link.className = 'ctx-popup-link ctx-popup-instruction';
         link.href = '#';
         link.textContent = instruction.source.split('/').pop().replace(/\.md$/i, '');
         link.title = `${instruction.source} · ${instruction.delivery}`;
@@ -16135,8 +16137,8 @@ async function loadCtxSources(popup, spanEl, msgId) {
           body.replaceChildren(pre);
           modal.classList.add('open');
         });
-        instructionLinks.appendChild(link);
-      }
+        instructionRow.append(i ? ', ' : ' ', link);
+      });
     }
     _positionCtxPopupNearAnchor(popup, spanEl);
   } catch {

@@ -99,9 +99,9 @@ async def test_worker_records_resume_and_fresh_attempts(continuation, tmp_path, 
     assert record['attempts'][1]['sources'][0]['delivery'] == 'injected'
     for attempt, (sent_prompt, _) in zip(record['attempts'], calls):
         assert all(instruction['content'] in sent_prompt for instruction in attempt['instructions'])
-    assert not any(i['source'].startswith('agent/watch_launch.py#')
+    assert not any(i['source'].startswith('agent/runtime/launch-')
                    for i in record['attempts'][0]['instructions'])
-    assert any(i['source'] == 'agent/watch_launch.py#routes'
+    assert any(i['source'] == 'agent/runtime/launch-routes.md'
                for i in record['attempts'][1]['instructions'])
 
 
@@ -239,7 +239,7 @@ async def test_notice_snapshot_contains_only_text_sent_this_launch(
         runner, request_text, topic='test', msg_id=1, resume_session_id=resume,
         persistent=persistent, on_launch=record)] == ['done']
     instructions = snapshots[0]['instructions']
-    assert [i['source'].split('#')[-1] for i in instructions] == expected
+    assert [i['id'].removeprefix('runtime.launch-') for i in instructions] == expected
     assert all(i['delivery'] == 'injected' for i in instructions)
     # The snapshot is the exact prefix delivered, in the same order, not a
     # reconstruction from tool availability or current configuration.

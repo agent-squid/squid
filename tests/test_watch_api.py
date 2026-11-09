@@ -315,7 +315,7 @@ async def test_launch_records_only_delivered_watch_hint(setup, prompt, resume, m
             assert instructions == []
         else:
             assert len(instructions) == 1
-            assert instructions[0]['source'] == 'agent/watch_launch.py#watch'
+            assert instructions[0]['source'] == 'agent/runtime/launch-watch-proposals.md'
             assert instructions[0]['delivery'] == 'injected'
         assert kwargs['backend_env']['SQUID_TURN_TOKEN'] not in json.dumps(snapshots)
         assert kwargs['backend_env']['SQUID_TURN_TOKEN']

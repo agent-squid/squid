@@ -364,7 +364,7 @@ for (const injected of [false, true]) {
     } }));
     await page.route('**/chat/200/context', route => route.fulfill({ json: {
       attempts: [{ sources: [], instructions: injected ? [{
-        source: 'agent/watch_launch.py#history', revision: 'recorded-revision',
+        source: 'agent/runtime/launch-history.md', revision: 'recorded-revision',
         delivery: 'injected', content: 'Exact hint sent for this launch.',
       }] : [], tools: { operations: [], watch_operations: [] } }],
     } }));
@@ -372,7 +372,7 @@ for (const injected of [false, true]) {
     await page.locator('.msg[data-msg-id="200"] .user-ctx').click();
     // Wait for the recorded launch snapshot, rather than checking before fetch resolves.
     await expect(page.locator('#ctx-sources-section')).toContainText('tools');
-    const links = page.locator('#ctx-sources-section .ctx-popup-instruction-links a');
+    const links = page.locator('#ctx-sources-section a.ctx-popup-instruction');
     await expect(links).toHaveCount(injected ? 1 : 0);
     if (injected) {
       await links.click();
