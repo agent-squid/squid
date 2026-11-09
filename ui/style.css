@@ -1047,7 +1047,7 @@ body {
 .ctx-popup-tag { color: var(--accent-light); flex-shrink: 0; }
 .ctx-popup-preview { color: var(--text-lo); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ctx-popup-mem-row, .ctx-popup-trace-row, .ctx-popup-cwd-row, .ctx-popup-session-row { cursor: pointer; }
-.ctx-popup-link { color: var(--accent-light); }
+.ctx-popup-link { color: var(--accent-light); text-decoration: none; }
 .ctx-popup-mem-row:hover .ctx-popup-link, .ctx-popup-trace-row:hover .ctx-popup-link, .ctx-popup-cwd-row:hover .ctx-popup-link, .ctx-popup-session-row:hover .ctx-popup-link, .ctx-popup-inline .ctx-popup-link:hover, .ctx-popup-jump-row:hover .ctx-popup-link { color: var(--accent); }
 .ctx-popup-jump-row .ctx-popup-link { cursor: pointer; }
 .ctx-popup-jump-btn {
