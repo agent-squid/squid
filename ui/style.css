@@ -5367,6 +5367,9 @@ button {
 .ac-prompt-label {
   flex: 1 1 auto;
   min-width: 0;
+  font-family: inherit;
+  font-weight: inherit;
+  font-size: var(--text-lg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5388,7 +5391,7 @@ button {
   vertical-align: middle;
 }
 .ac-cmd   { color: #7ec8a0; font-family: ui-monospace, monospace; font-weight: 600; }
-.ac-history-prompt { color: var(--text-mid); font-weight: 500; }
+.ac-history-prompt { color: var(--text-mid); }
 .ac-item:hover .ac-history-prompt,
 .ac-item.selected .ac-history-prompt { color: var(--text-muted); }
 .ac-close {
@@ -5446,8 +5449,8 @@ button {
   font-family: ui-monospace, monospace;
   font-size: var(--text-body);
   font-weight: 600;
-  padding: 0.14em 0.42em;
-  line-height: 1.3;
+  padding: 0 0.42em;
+  line-height: 1.2;
   border-radius: 4px;
   overflow-x: auto;
   overflow-y: hidden;
