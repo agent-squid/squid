@@ -14229,6 +14229,118 @@ function renderRuntimeCatalogs(health) {
 let _configRevision = null;
 let _configCmView = null;
 
+// Settings may have focus on a toolbar button rather than in the editor.
+document.addEventListener('keydown', event => {
+  if (event.defaultPrevented || !(event.ctrlKey || event.metaKey)
+      || event.altKey || event.key.toLowerCase() !== 'f') return;
+  if (!document.getElementById('view-settings')?.classList.contains('active')
+      || document.querySelector('.modal.open') || !_configCmView
+      || !_configCmView.dom.querySelector('.config-find-input')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  _configCmView.dom.classList.add('config-find-open');
+  _configCmView.requestMeasure();
+  _configCmView.dom.querySelector('.config-find-input').focus();
+}, true);
+
+function createEditorSearchControls({ label = 'Find in file', initialSearch = '', find, reset, go }) {
+  const findInput = document.createElement('input');
+  findInput.className = 'fv-edit-find';
+  findInput.type = 'search';
+  findInput.placeholder = 'Find';
+  findInput.setAttribute('aria-label', label);
+  findInput.value = initialSearch;
+  const findPrevBtn = document.createElement('button');
+  findPrevBtn.className = 'fv-edit-tool-btn';
+  findPrevBtn.type = 'button';
+  findPrevBtn.title = 'Previous match';
+  findPrevBtn.setAttribute('aria-label', 'Previous match');
+  findPrevBtn.textContent = '↑';
+  const findNextBtn = document.createElement('button');
+  findNextBtn.className = 'fv-edit-tool-btn';
+  findNextBtn.type = 'button';
+  findNextBtn.title = 'Next match';
+  findNextBtn.setAttribute('aria-label', 'Next match');
+  findNextBtn.textContent = '↓';
+  const lineInput = document.createElement('input');
+  lineInput.className = 'fv-edit-line';
+  lineInput.type = 'number';
+  lineInput.min = '1';
+  lineInput.placeholder = 'Line';
+  lineInput.setAttribute('aria-label', 'Line number');
+  const lineGoBtn = document.createElement('button');
+  lineGoBtn.className = 'fv-edit-tool-btn';
+  lineGoBtn.type = 'button';
+  lineGoBtn.title = 'Go to line';
+  lineGoBtn.setAttribute('aria-label', 'Go to line');
+  lineGoBtn.textContent = 'Go';
+  const dom = document.createElement('div');
+  dom.className = 'fv-edit-tools';
+  dom.append(findInput, findPrevBtn, findNextBtn, lineInput, lineGoBtn);
+  findPrevBtn.addEventListener('click', () => find(-1));
+  findNextBtn.addEventListener('click', () => find(1));
+  findInput.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      find(event.shiftKey ? -1 : 1);
+    }
+  });
+  findInput.addEventListener('input', () => reset?.());
+  lineGoBtn.addEventListener('click', () => go(lineInput.value));
+  lineInput.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      go(lineInput.value);
+    }
+  });
+  return { dom, findInput, lineInput };
+}
+
+function configSearchPanel(view) {
+  const { SearchQuery, setSearchQuery, findNext, findPrevious } = window._cm;
+  const dom = document.createElement('div');
+  dom.className = 'config-find';
+  dom.classList.add('fv-edit-toolbar');
+  const { dom: tools, findInput: input } = createEditorSearchControls({
+    label: 'Find in config',
+    find: direction => (direction < 0 ? findPrevious : findNext)(view),
+    go: value => {
+      const number = Math.max(1, Math.min(view.state.doc.lines, parseInt(value, 10) || 1));
+      view.dispatch({ selection: { anchor: view.state.doc.line(number).from }, scrollIntoView: true });
+      view.focus();
+    },
+  });
+  input.classList.add('config-find-input');
+  const count = document.createElement('span');
+  count.className = 'fv-edit-status';
+  count.setAttribute('aria-live', 'polite');
+  let query = new SearchQuery({ search: '' });
+  function updateCount() {
+    let total = 0;
+    if (query.search) {
+      const cursor = query.getCursor(view.state.doc);
+      while (!cursor.next().done) total++;
+    }
+    count.textContent = query.search ? `${total} match${total === 1 ? '' : 'es'}` : '';
+  }
+  input.addEventListener('input', () => {
+    query = new SearchQuery({ search: input.value, literal: true });
+    view.dispatch({ effects: setSearchQuery.of(query) });
+    updateCount();
+  });
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      view.dom.classList.remove('config-find-open');
+      view.requestMeasure();
+      view.focus();
+    }
+  });
+  dom.append(tools, count);
+  return { dom, top: true, update(update) { if (update.docChanged) updateCount(); } };
+}
+
 function setConfigStatus(text, state = 'neutral') {
   const status = document.getElementById('config-editor-status');
   if (!status) return;
@@ -14253,6 +14365,9 @@ async function loadConfigYaml() {
       const { EditorView, EditorState, basicSetup, oneDark, atomOneDarkHighlight, LANGS } = window._cm;
       if (_configCmView) _configCmView.destroy();
       const extensions = [basicSetup, oneDark];
+      if (window._cm.search && window._cm.showPanel) {
+        extensions.push(window._cm.search(), window._cm.showPanel.of(configSearchPanel));
+      }
       if (atomOneDarkHighlight) extensions.push(atomOneDarkHighlight);
       const lang = LANGS.yaml?.();
       if (lang) extensions.push(lang);
@@ -18525,37 +18640,13 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   editStatus.className = 'fv-edit-status';
   const editTools = document.createElement('div');
   editTools.className = 'fv-edit-tools';
-  const findInput = document.createElement('input');
-  findInput.className = 'fv-edit-find';
-  findInput.type = 'search';
-  findInput.placeholder = 'Find';
-  findInput.setAttribute('aria-label', 'Find in file');
-  findInput.value = initialSearch;
-  const findPrevBtn = document.createElement('button');
-  findPrevBtn.className = 'fv-edit-tool-btn';
-  findPrevBtn.type = 'button';
-  findPrevBtn.title = 'Previous match';
-  findPrevBtn.setAttribute('aria-label', 'Previous match');
-  findPrevBtn.textContent = '↑';
-  const findNextBtn = document.createElement('button');
-  findNextBtn.className = 'fv-edit-tool-btn';
-  findNextBtn.type = 'button';
-  findNextBtn.title = 'Next match';
-  findNextBtn.setAttribute('aria-label', 'Next match');
-  findNextBtn.textContent = '↓';
-  const lineInput = document.createElement('input');
-  lineInput.className = 'fv-edit-line';
-  lineInput.type = 'number';
-  lineInput.min = '1';
-  lineInput.placeholder = 'Line';
-  lineInput.setAttribute('aria-label', 'Line number');
-  const lineGoBtn = document.createElement('button');
-  lineGoBtn.className = 'fv-edit-tool-btn';
-  lineGoBtn.type = 'button';
-  lineGoBtn.title = 'Go to line';
-  lineGoBtn.setAttribute('aria-label', 'Go to line');
-  lineGoBtn.textContent = 'Go';
-  editTools.append(findInput, findPrevBtn, findNextBtn, lineInput, lineGoBtn);
+  const { dom: sharedTools, findInput, lineInput } = createEditorSearchControls({
+    initialSearch,
+    find: direction => findInEditor(direction),
+    reset: () => { _editFindPos = -1; },
+    go: value => moveEditorToLine(value, true),
+  });
+  editTools.append(...sharedTools.childNodes);
   const findPopover = document.createElement('div');
   findPopover.className = 'fv-edit-find-popover';
   findPopover.hidden = true;
@@ -19266,22 +19357,6 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     loadFile();
   });
 
-  findPrevBtn.addEventListener('click', () => findInEditor(-1));
-  findNextBtn.addEventListener('click', () => findInEditor(1));
-  findInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      findInEditor(e.shiftKey ? -1 : 1);
-    }
-  });
-  findInput.addEventListener('input', () => { _editFindPos = -1; });
-  lineGoBtn.addEventListener('click', () => moveEditorToLine(lineInput.value, true));
-  lineInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      moveEditorToLine(lineInput.value, true);
-    }
-  });
 
   saveBtn.addEventListener('click', async () => {
     const view = body._cmView;

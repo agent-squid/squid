@@ -6168,3 +6168,11 @@ mark.search-kw-highlight {
 #connect-ssh-panel p { margin: 0 0 0.75rem; }
 #connect-ssh-panel code { display: block; overflow-wrap: anywhere; margin-bottom: 0.75rem; user-select: all; }
 #connect-ssh-panel a { color: #244c85; }
+
+/* Keep CodeMirror's panel layers below the app navigation. */
+#config-editor { position: relative; isolation: isolate; }
+/* Desktop search opens with Ctrl/Cmd+F; touch layouts keep it available. */
+#config-editor .cm-editor:not(.config-find-open) .config-find { display: none; }
+@media (max-width: 768px) {
+  #config-editor .cm-editor:not(.config-find-open) .config-find { display: flex; }
+}

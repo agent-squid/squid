@@ -28,7 +28,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
   <link rel="stylesheet" href="/vendor/xterm.css" />
-  <link rel="stylesheet" href="style.css?v=20261111-006" />
+  <link rel="stylesheet" href="style.css?v=20261111-010" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -48,6 +48,8 @@
       const [
         { EditorView, basicSetup },
         { EditorState },
+        { openSearchPanel, search, SearchQuery, setSearchQuery, findNext, findPrevious },
+        { showPanel },
         { javascript }, { python }, { json }, { html: htmlLang }, { css },
         { markdown }, { xml }, { sql }, { cpp },
         { HighlightStyle, StreamLanguage, syntaxHighlighting },
@@ -57,6 +59,8 @@
       ] = await Promise.all([
         import(B + 'codemirror'),
         import(B + '@codemirror/state@6'),
+        import(B + '@codemirror/search@6'),
+        import(B + '@codemirror/view@6'),
         import(B + '@codemirror/lang-javascript@6'),
         import(B + '@codemirror/lang-python@6'),
         import(B + '@codemirror/lang-json@6'),
@@ -111,7 +115,7 @@
         { tag: tags.emphasis, fontStyle: 'italic' },
         { tag: tags.strong, fontWeight: '700' },
       ]));
-      window._cm = { EditorView, EditorState, basicSetup, oneDark: oneDarkTheme, atomOneDarkHighlight, LANGS };
+      window._cm = { EditorView, EditorState, basicSetup, openSearchPanel, search, SearchQuery, setSearchQuery, findNext, findPrevious, showPanel, oneDark: oneDarkTheme, atomOneDarkHighlight, LANGS };
       return true;
     })().catch(err => { console.error('CodeMirror load failed:', err); return false; });
   </script>
@@ -890,7 +894,7 @@
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="flow-lang.js?v=20261111-006"></script>
-  <script src="app.js?v=20261111-006"></script>
+  <script src="flow-lang.js?v=20261111-010"></script>
+  <script src="app.js?v=20261111-010"></script>
 </body>
 </html>
