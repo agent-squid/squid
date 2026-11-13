@@ -1,7 +1,7 @@
 ---
 status: proposed
 date: 2026-10-30
-updated: 2026-11-05
+updated: 2026-11-13
 ---
 # ADR-0053: Persistent Watches and Shared Agent Tools
 
@@ -200,6 +200,42 @@ before retrying. A crashed process does not prove an action did not happen.
 Guarantee durable ingestion and idempotent dispatch identity; do not promise
 exactly-once external side effects. Ambiguous publishing outcomes require
 remote-state reconciliation before another attempt.
+
+### Executable watch adapter setup
+
+Observation plans remain the preferred integration path. Trusted executable
+adapters provide a compatibility path and escape hatch for sources that need a
+wrapper; this does not introduce a general plugin framework.
+
+Expose the wrapper contract through `agentsquid watch probe contract`, with
+revision, baseline, error, output-size and credential semantics. The existing
+`tools --help` and `watch --help` entry points advertise it. A normal agent can
+build a wrapper from this discoverable contract; a predefined prompt is optional.
+`watch probe test` executes one bounded sample poll through the runtime adapter
+and reports the normalized observation without creating a watch or persisting a
+cursor. It runs a trusted executable with the invoking process's environment;
+it is not a sandbox or proof that a wrapper is read-only.
+
+`watch probe register` validates and saves a new named executable registration
+in an explicitly selected existing host configuration. Wrappers and credentials
+must be durable on the host. Registration executes no wrapper, replaces no
+existing adapter, and neither enables watches nor grants authority. Changes
+load after host restart. Monitoring activation still requires an exact-watch
+grant; local work requires a separate execution grant. Task publication requires
+explicitly activated publication scope and a separate task review.
+
+Serialize registration and config-editor saves using a shared cross-process
+lock on a stable sidecar file, covering the read/revision check through atomic
+replacement. Locking the YAML inode is insufficient because replacement changes
+that inode. Concurrent registrations preserve both additions, and stale editor
+saves fail revision validation. External editors must cooperate with this lock
+to receive the same serialization guarantee. Preserve unrelated configuration
+values, including mappings shared through YAML aliases; preserve permissions and
+sync the file and containing directory. YAML formatting and comments may change.
+
+See [executable wrapper setup](../watch-probe-registry.md#executable-wrapper-setup-through-the-cli)
+for schemas and commands. This extends setup discoverability without changing
+the polling engine, observation plans, or authorization boundaries.
 
 ### Agent-built observation plans
 
@@ -670,3 +706,34 @@ reconstructs the service, detects a newly added issue once, and verifies replay
 and issue edits do not create duplicate events. Boundary tests cover 500 matched
 records across steps, rejection above that limit, and cursor-limit enforcement
 before any event ingestion. Publication authority is unchanged.
+
+### Executable adapter setup tooling (2026-11-13)
+
+Implemented `agentsquid watch probe contract`, `test`, and `register`, with
+setup discovery in `agentsquid tools --help` and `agentsquid watch --help`.
+The contract documents JSON input/output, immutable revisions, quiet baselines,
+error behavior, host credentials, durable registration and the activation path.
+No dedicated prompt framework is required. The feature remains executable watch
+adapters, rather than a broader plugin system.
+
+Tests execute one supplied trusted wrapper through the existing bounded probe
+runtime and return the sample request and normalized observation. Both raw
+stdout and normalized JSON count against the configured output limit; ASCII
+escaping can make normalized Unicode results larger than their stdout form.
+Testing creates no watch, grant or persisted cursor. Registration validates the
+complete watch configuration, refuses existing adapter names and saves only to
+an explicitly selected host config. Restart is required to load the adapter.
+
+Registration and config-editor saves share a stable sidecar lock across
+processes. The lock covers registration's read/modify/write transaction and the
+editor's revision check through replacement. Registration copies edited mapping
+levels to preserve unrelated values shared through YAML aliases, retains file
+permissions, and syncs both the replacement file and its directory.
+
+Focused verification passed 93 tests across probe setup, watch CLI, probe runtime
+and watch configuration. Coverage includes real wrapper execution, baseline and
+revision behavior, bounded/sanitized failures, duplicate and invalid registration,
+permission preservation, concurrent registrations, stale editor rejection, and
+YAML alias preservation. No live host configuration or grants were changed by
+this verification. Registration does not activate monitoring or authorize local
+work or publication; those retain their separate recorded grant/review paths.

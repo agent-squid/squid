@@ -13,9 +13,14 @@ from .watch_auth import file_token
 
 
 def main(argv):
+    if argv[:2] == ['watch', 'probe']:
+        from .watch_probe_cli import main as probe_main
+        return probe_main(argv[2:])
     parser = argparse.ArgumentParser(prog='agentsquid ' + argv[0],
         description='Watch monitoring and explicitly granted local work and task publication.',
         epilog='With SQUID_CONTINUE_TOKEN, tools reports shared history/route/continuation capabilities. Use agentsquid search --help for read-only current-topic history. '
+               'Use agentsquid watch probe contract for executable wrapper I/O, registration and credential requirements; '
+               'watch probe test --help and watch probe register --help for local setup. '
                'Use agentsquid watch --help for commands. SQUID_API_URL must name the issuing instance. '
                'Agent calls use SQUID_TURN_TOKEN; --human-topic uses SQUID_WATCH_CONTROL_TOKEN or ~/.squid/watch-control.token. '
                'Mutation input is a JSON object: create needs target, request_key and plan (or legacy adapter); '

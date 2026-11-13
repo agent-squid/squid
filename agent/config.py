@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional
 import yaml
 
+from .config_lock import config_file_lock
+
 _USER_CONFIG = Path.home() / ".squid" / "squid.yaml"
 _EXAMPLE_CONFIG = Path(__file__).parent.parent / "config" / "squid.yaml.example"
 
@@ -96,28 +98,29 @@ def config_revision(content: Optional[str] = None) -> str:
 
 def write_config_text(content: str, expected_revision: Optional[str] = None) -> str:
     """Atomically replace squid.yaml, retaining the previous version as .bak."""
-    if expected_revision is not None and config_revision() != expected_revision:
-        raise RuntimeError("configuration changed since it was loaded")
+    with config_file_lock(_USER_CONFIG):
+        if expected_revision is not None and config_revision() != expected_revision:
+            raise RuntimeError("configuration changed since it was loaded")
 
-    mode = _USER_CONFIG.stat().st_mode & 0o777
-    backup = _USER_CONFIG.with_suffix(_USER_CONFIG.suffix + ".bak")
-    shutil.copy2(_USER_CONFIG, backup)
-    fd, tmp_name = tempfile.mkstemp(prefix=".squid.yaml.", dir=_USER_CONFIG.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_name, mode)
-        os.replace(tmp_name, _USER_CONFIG)
-        directory_fd = os.open(_USER_CONFIG.parent, os.O_RDONLY)
+        mode = _USER_CONFIG.stat().st_mode & 0o777
+        backup = _USER_CONFIG.with_suffix(_USER_CONFIG.suffix + ".bak")
+        shutil.copy2(_USER_CONFIG, backup)
+        fd, tmp_name = tempfile.mkstemp(prefix=".squid.yaml.", dir=_USER_CONFIG.parent)
         try:
-            os.fsync(directory_fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp_name, mode)
+            os.replace(tmp_name, _USER_CONFIG)
+            directory_fd = os.open(_USER_CONFIG.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
-            os.close(directory_fd)
-    finally:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
     return config_revision(content)
 
 _cfg = _load_config()
