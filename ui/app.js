@@ -1848,6 +1848,7 @@ chipFilterBtn.addEventListener('click', async e => {
   const active = historyFilter;
   if (active?.flow_route || active?.topic || active?.agent) {
     clearFilter();
+    syncHistoryPanel();
     return;
   }
   const route = await resolveEffectiveComposerRoute();
@@ -1856,7 +1857,7 @@ chipFilterBtn.addEventListener('click', async e => {
   else filterByTopic(route.topic);
 });
 
-function openHistoryPanel() {
+function openHistoryPanel(suppressFocus = false) {
   searchPanelOpen = true;
   searchScopeContext = { ...historyFilter };
   closeSearchScopes();
@@ -1866,7 +1867,12 @@ function openHistoryPanel() {
   updateHistoryToggleButtons();
   document.getElementById('search-bar').classList.add('active');
   updateSearchButton();
-  document.getElementById('search-bar-keywords').focus();
+  if (!suppressFocus) document.getElementById('search-bar-keywords').focus();
+}
+
+function syncHistoryPanel() {
+  if (searchActive || hasHistoryFilterScope() || hasResponseOnlyFilter()) openHistoryPanel(true);
+  else closeHistoryPanel();
 }
 
 function closeHistoryPanel() {
@@ -1878,7 +1884,12 @@ function closeHistoryPanel() {
 
 chipSearchBtn.addEventListener('click', e => {
   e.stopPropagation();
-  openHistoryPanel();
+  if (searchActive) {
+    clearSearch();
+    syncHistoryPanel();
+  }
+  else if (searchPanelOpen) closeHistoryPanel();
+  else openHistoryPanel();
 });
 
 chipClearBtn.addEventListener('click', e => {
@@ -2144,13 +2155,14 @@ function updatePromptOnlyButton() {
 function updateFilterButton() {
   const isFiltered = hasHistoryFilterScope();
   chipFilterBtn?.classList.toggle('active', isFiltered);
+  document.getElementById('search-scope-picker').classList.toggle('active', isFiltered);
   chipFilterBtn?.setAttribute('aria-pressed', isFiltered ? 'true' : 'false');
 }
 
 function updateSearchButton() {
   chipSearchBtn?.classList.toggle('active', searchActive);
   document.getElementById('search-bar').classList.toggle('search-filtered', searchActive);
-  chipSearchBtn?.removeAttribute('aria-pressed');
+  chipSearchBtn?.setAttribute('aria-pressed', searchActive ? 'true' : 'false');
   chipSearchBtn?.setAttribute('aria-expanded', searchPanelOpen ? 'true' : 'false');
 }
 
@@ -2215,16 +2227,15 @@ function filterByFlowRoute(route, routeParts = null) {
 }
 
 function applyHistoryFilter(filter) {
-  if (searchActive || searchPanelOpen) {
-    searchActive = false;
-    searchState = null;
-    ++searchLoadGeneration;
-    searchPanelOpen = false;
-    document.getElementById('search-bar').classList.remove('active');
-    updateSearchButton();
-    document.querySelectorAll('.search-result-item, #messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
+  if (searchActive && searchState) {
+    startSearch('', {
+      ...searchState, flow_route: null, topic: null, topicSubtree: false,
+      agent: null, adhoc: null, explicitAll: false, ...filter, explicitScope: true,
+    });
+  } else {
+    reloadHistory(filter);
   }
-  reloadHistory(filter);
+  openHistoryPanel(true);
 }
 
 function clearFilter() {
@@ -17625,6 +17636,7 @@ function toggleBookmarkOnlyHistory() {
   } else {
     reloadHistory(historyFilter);
   }
+  syncHistoryPanel();
 }
 
 function toggleBadOnlyHistory() {
@@ -17641,6 +17653,7 @@ function toggleBadOnlyHistory() {
   } else {
     reloadHistory(historyFilter);
   }
+  syncHistoryPanel();
 }
 
 function addBookmarkButton(bubbleEl, msgId, topic, agent) {
@@ -18066,7 +18079,7 @@ document.getElementById('search-bar-reset').addEventListener('click', () => {
   clearSearch();
   reloadHistory({});
   updateBookmarkButton();
-  openHistoryPanel();
+  closeHistoryPanel();
 });
 document.getElementById('chip-prompts-btn')?.addEventListener('click', togglePromptOnlyHistory);
 updatePromptOnlyButton();
@@ -18239,6 +18252,8 @@ async function showScopeOptions(kind, query = '') {
             submitFilterScope();
             if (document.getElementById('filter-scope-picker').hidden) input.focus();
             else { scopeInput.focus(); closeScopeOptions(kind); }
+          } else if (value === '#all') {
+            applyHistoryFilter({ explicitAll: true });
           } else document.getElementById('search-bar-keywords').focus();
         });
         list.appendChild(option);
@@ -18359,7 +18374,7 @@ function submitSearchPanel() {
     historyFilter = parsedScope || {};
     clearSearch();
     reloadHistory(historyFilter);
-    openHistoryPanel();
+    openHistoryPanel(true);
     return;
   }
   startSearch('', { ...parsedScope, explicitScope: !!parsedScope, keywords: keywords.value.trim(), operator: document.getElementById('search-bar-operator').value });
@@ -18375,6 +18390,14 @@ for (const id of ['search-bar-scope', 'search-bar-keywords']) {
   });
 }
 document.addEventListener('keydown', e => {
+  if (!e.defaultPrevented && (e.ctrlKey || e.metaKey) && !e.altKey
+      && e.key.toLowerCase() === 'f'
+      && document.getElementById('view-chat').classList.contains('active')
+      && !document.querySelector('.modal.open')) {
+    e.preventDefault();
+    openHistoryPanel();
+    return;
+  }
   if (e.key === 'Escape' && closeEscSurfaces()) {
     e.preventDefault();
   }

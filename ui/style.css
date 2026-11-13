@@ -5674,6 +5674,9 @@ button {
 #search-bar input:focus, #search-bar-operator:focus, #filter-bar-scope:focus { outline: none; border-color: var(--accent); }
 #search-scope-picker { position: relative; display: flex; flex: 0 1 30%; min-width: 0; max-width: 15rem; }
 #search-bar-scope, #filter-bar-scope { width: 100%; flex: 1; }
+#search-scope-picker .search-scope-icon { position: absolute; left: 5px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; }
+#search-scope-picker.active .search-scope-icon { color: var(--accent); }
+#search-bar #search-bar-scope { padding-left: 23px; }
 #search-scope-toggle, #filter-scope-toggle { flex-shrink: 0; border: 0; background: transparent; color: var(--text-muted); padding: 0 0.25rem; cursor: pointer; }
 #search-scope-options, #filter-scope-options, #search-operator-options {
   position: absolute;
@@ -5709,6 +5712,7 @@ button {
   color: var(--text);
   cursor: pointer;
 }
+#search-bar.search-filtered #search-bar-submit { color: var(--accent); }
 #search-bar-submit:focus:not(:focus-visible) { outline: none; }
 #search-bar-submit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #search-bar-clear, #filter-bar-clear {
@@ -6118,7 +6122,7 @@ mark.search-kw-highlight {
 #filter-badge { display: none !important; }
 #filter-badge #filter-scope-picker, #filter-badge #filter-bar-clear { display: none; }
 #search-bar .history-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; padding: 0.3rem; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer; }
-#search-bar .history-toggle.active { color: var(--accent); border-color: var(--accent); background: var(--surface-2); }
+#search-bar .history-toggle.active { color: var(--accent); }
 #search-bar .history-toggle.active .material-symbols-outlined { font-variation-settings: 'FILL' 1; }
 #search-bar .history-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #search-bar-reset { background: transparent; color: var(--text-muted); border: 0; cursor: pointer; }

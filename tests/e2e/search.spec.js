@@ -1206,3 +1206,88 @@ test('closing the panel preserves a pending search and reopening shows its resul
   await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
   await expect(page.locator('.search-result-item')).toHaveCount(1);
 });
+
+test('route, bookmarks, and keywords toggle independently until the last condition clears', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.fill('#input', '/s #all needle');
+  await page.keyboard.press('Enter');
+  await page.locator('#chip-bookmark-btn').click();
+  await page.locator('#chip-filter-btn').click();
+  for (const id of ['chip-search-btn', 'chip-filter-btn', 'chip-bookmark-btn']) {
+    await expect(page.locator(`#${id}`)).toHaveClass(/active/);
+  }
+  await expect(page.locator('#search-scope-picker')).toHaveClass(/active/);
+  await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
+  await expect(page.locator('#chip-filter-btn')).toHaveClass(/active/);
+  await expect(page.locator('#chip-bookmark-btn')).toHaveClass(/active/);
+  await expect(page.locator('#search-bar')).toBeVisible();
+  await page.locator('#chip-filter-btn').click();
+  await expect(page.locator('#chip-bookmark-btn')).toHaveClass(/active/);
+  await expect(page.locator('#search-bar')).toBeVisible();
+  await page.locator('#chip-bookmark-btn').click();
+  await expect(page.locator('#search-bar')).toBeHidden();
+  await page.fill('#input', '/s #default needle');
+  await page.keyboard.press('Enter');
+  await page.locator('#chip-bookmark-btn').click();
+  await page.locator('#chip-filter-btn').click();
+  await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
+  await expect(page.locator('#search-scope-picker')).not.toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+  await page.locator('#chip-bookmark-btn').click();
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  await expect(page.locator('#search-bar')).toBeVisible();
+  await page.locator('#chip-filter-btn').click();
+  await page.locator('#chip-bookmark-btn').click();
+  await page.locator('#search-bar-clear').click();
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  await page.keyboard.press('Control+f');
+  await page.locator('#search-bar-reset').click();
+  for (const id of ['chip-search-btn', 'chip-filter-btn', 'chip-bookmark-btn']) {
+    await expect(page.locator(`#${id}`)).not.toHaveClass(/active/);
+  }
+  await expect(page.locator('#search-bar')).toBeHidden();
+});
+
+
+test('selecting all immediately clears both route highlights and preserves bookmarks and keywords', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.fill('#input', '/s #default needle');
+  await page.keyboard.press('Enter');
+  await page.locator('#chip-bookmark-btn').click();
+  await expect(page.locator('#chip-filter-btn')).toHaveClass(/active/);
+  await expect(page.locator('#search-scope-picker')).toHaveClass(/active/);
+  await page.locator('#search-scope-toggle').click();
+  await page.locator('#search-scope-options [data-scope="#all"]').click();
+  await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
+  await expect(page.locator('#chip-filter-btn')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#search-scope-picker')).not.toHaveClass(/active/);
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+  await expect(page.locator('#chip-bookmark-btn')).toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  await expect(page.locator('#search-bar-keywords')).toHaveValue('needle');
+});
+
+
+test('bar search icon highlights applied keywords rather than draft input', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.locator('#chip-search-btn').click();
+  const submit = page.locator('#search-bar-submit');
+  const normalColor = await submit.evaluate(el => getComputedStyle(el).color);
+  await page.fill('#search-bar-keywords', 'needle');
+  await expect(submit).toHaveCSS('color', normalColor);
+  await submit.click();
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  await expect(submit).not.toHaveCSS('color', normalColor);
+  await page.locator('#chip-bookmark-btn').click();
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#search-bar')).toBeVisible();
+  await expect(page.locator('#chip-bookmark-btn')).toHaveClass(/active/);
+  await expect(submit).toHaveCSS('color', normalColor);
+});
