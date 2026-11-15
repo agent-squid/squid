@@ -353,3 +353,63 @@ test('always mode upgrades on restart without asking', async ({ page }) => {
   await expect(page.locator('#restart-modal')).not.toHaveClass(/open/);
   expect(cmdBodies[0]).toMatchObject({ command: 'restart', upgrade: true });
 });
+
+for (const trigger of ['periodic', 'foreground']) {
+  test(`${trigger} check detects updates after cache expiry without reloading`, async ({ page }) => {
+    await page.clock.install();
+    await mockApp(page, { version: '0.1.1' });
+    let latest = '0.1.1';
+    let pypiHits = 0;
+    await page.route(PYPI_PROJECT_URL, r => {
+      pypiHits += 1;
+      return r.fulfill({ json: { info: { version: latest } } });
+    });
+    await page.goto('/');
+    await expect.poll(() => page.evaluate(() => !!localStorage.getItem('squid_update_check_cache'))).toBe(true);
+    latest = '0.1.2';
+    await page.clock.fastForward(60 * 60 * 1000);
+    await page.evaluate(() => window.dispatchEvent(new Event('pageshow')));
+    expect(pypiHits).toBe(1);
+    await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+    if (trigger === 'periodic') {
+      await page.clock.fastForward(24 * 60 * 60 * 1000);
+    } else {
+      // Advance wall time without firing timers, as when a PWA is suspended.
+      await page.clock.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
+      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    }
+    await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+    expect(pypiHits).toBe(2);
+  });
+}
+
+for (const failure of ['network', 'http']) {
+  test(`${failure} failure preserves a confirmed update and manual check reports failure`, async ({ page }) => {
+    await mockApp(page, { version: '0.1.1' });
+    await mockLatestVersion(page, '0.1.2');
+    await page.goto('/');
+    await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+    await openSettings(page);
+    await page.unroute(PYPI_PROJECT_URL);
+    await page.route(PYPI_PROJECT_URL, r => failure === 'network'
+      ? r.abort('internetdisconnected')
+      : r.fulfill({ status: 503, body: 'Unavailable' }));
+    await page.evaluate(() => localStorage.setItem('squid_update_check_cache', JSON.stringify({
+      version: '0.1.2', checkedAt: Date.now() - 25 * 60 * 60 * 1000,
+    })));
+    const result = await page.evaluate(() => checkForSquidUpdate(_squidVersion));
+    expect(result.checked).toBe(false);
+    await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+    await expect(page.locator('#settings-update-notice')).toContainText('v0.1.1 → v0.1.2');
+    await page.locator('#settings-update-check').click();
+    await expect(page.locator('#settings-update-check')).toHaveText(/Check Failed/);
+    await expect(page.locator('#settings-update-check')).not.toHaveClass(/is-success/);
+    await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+
+    // A successful retry can still clear the notice when already up to date.
+    await page.unroute(PYPI_PROJECT_URL);
+    await mockLatestVersion(page, '0.1.1');
+    await page.evaluate(() => checkForSquidUpdate(_squidVersion, { force: true }));
+    await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+  });
+}

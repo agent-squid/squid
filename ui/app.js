@@ -198,6 +198,7 @@ let _providerMetadata = {};
 const UPDATE_CHECK_URL = 'https://pypi.org/pypi/agentsquid/json';
 const UPDATE_CACHE_KEY = 'squid_update_check_cache';
 const UPDATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const UPDATE_RECHECK_INTERVAL_MS = 60 * 60 * 1000;
 const UPDATE_DISMISS_KEY = 'squid_update_dismissed_version';
 let _updateInfo = null; // { current, latest } once a newer version is confirmed available
 let _updatesInstallOnRestart = 'ask';
@@ -305,7 +306,9 @@ async function refreshSettingsHealth() {
 async function checkForSquidUpdate(currentVersion, { force = false } = {}) {
   if (!currentVersion) return { checked: false };
   const latest = await _fetchLatestSquidVersion({ force });
-  if (!latest || !_isNewerVersion(latest, currentVersion)) {
+  // A failed request says nothing about a previously confirmed update.
+  if (!latest) return { checked: false };
+  if (!_isNewerVersion(latest, currentVersion)) {
     setUpdateAvailable(null);
     return { checked: true, latest, hasUpdate: false };
   }
@@ -316,6 +319,11 @@ async function checkForSquidUpdate(currentVersion, { force = false } = {}) {
   setUpdateAvailable({ current: currentVersion, latest });
   return { checked: true, latest, hasUpdate: true };
 }
+
+// Reuse the cached result until its TTL expires, including in long-lived tabs.
+setInterval(() => {
+  if (!document.hidden) void checkForSquidUpdate(_squidVersion);
+}, UPDATE_RECHECK_INTERVAL_MS);
 
 function setUpdateCheckButtonText(btn, text) {
   const label = btn.querySelector('.settings-update-check-label');
@@ -341,6 +349,10 @@ async function forceCheckForSquidUpdate() {
   setUpdateCheckButtonIcon(btn, originalIcon);
   try {
     const result = await checkForSquidUpdate(_squidVersion, { force: true });
+    if (!result.checked) {
+      setUpdateCheckButtonText(btn, 'Check Failed');
+      return;
+    }
     setUpdateCheckButtonText(btn, result.hasUpdate ? 'Update Found' : 'Up to Date');
     btn.classList.add('is-success');
     setUpdateCheckButtonIcon(btn, 'check_circle');
@@ -20123,6 +20135,7 @@ document.querySelectorAll('.creds-bookmarklet').forEach(a => {
 // state only if the user was already reading at the bottom.
 let _messagesAtBottomBeforeHide = true;
 function recoverForegroundState() {
+  void checkForSquidUpdate(_squidVersion);
   updateActiveQuotaGauge().then(() => {
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
   }).catch(() => {});
