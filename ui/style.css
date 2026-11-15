@@ -1078,6 +1078,7 @@ body {
 .msg.assistant.has-reply-btn { display: flow-root; }
 
 /* markdown */
+.msg.assistant img { max-width: 100%; height: auto; }
 .msg.assistant p { margin: 0.4em 0; }
 .msg.assistant p:first-child { margin-top: 0; }
 .msg.assistant p:last-child { margin-bottom: 0; }

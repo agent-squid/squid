@@ -32,8 +32,16 @@ def sources_for_turn(msg_id):
             parent = db.get_message(row['parent_id'])
             origin = db.get_message(row['origin_parent_id'] or row['parent_id'])
             request_id = owner.get('request_id') or (origin or {}).get('reply_to')
-            # Watch/Flow-owned continuations retain their existing scoped prompt.
-            if owner['kind'] == 'human':
+            # Flow-owned continuations retain their existing scoped prompt.
+            if owner['kind'] in {'human', 'watch'}:
+                if owner['kind'] == 'watch':
+                    from .watch_runs import details
+                    _, _, grant, _ = details(owner['run_id'])
+                    source = 'agent/runtime/continuation-watch.md'
+                    template = files('agent').joinpath('runtime/continuation-watch.md').read_text(encoding='utf-8')
+                    instructions.append(dict(asdict(load_template(template, source).render(
+                        {'instructions': grant['instructions']})), delivery='injected'))
+                    request_id = (origin or {}).get('reply_to')
                 instructions.append(continuation_instruction(row['mode']))
                 sources.extend([
                     dict(message_id=request_id, label='original request',

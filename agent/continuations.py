@@ -740,7 +740,7 @@ async def dispatch(row, dispatcher):
                             'using JSON {"success":true} only after all requested actions and checks succeed, '
                             'or {"success":false} on any failure or incomplete work. '
                             'Missing or false results stop the sequence. Recording success does not bypass sync.')
-    if owner['kind'] != 'human':
+    if owner['kind'] not in {'human', 'watch'}:
         prompt = ('Squid continuation ' + row['id'] + ' of assistant message ' + str(row['parent_id']) + '.\n'
                   + scope + '\n' + sequence_notice + '\nParent sync succeeded; '
                   'other work may have changed the repos since then.\nOriginal user request:\n'
