@@ -25,8 +25,8 @@ def list_history(topic: Optional[str] = None, agent: Optional[str] = None,
     )
 
 
-def list_history_by_ids(ids: list[int]) -> dict:
-    items = get_history_items_by_ids(ids)
+def list_history_by_ids(ids: list[int], bookmarked: bool = False, marked_bad: bool = False) -> dict:
+    items = get_history_items_by_ids(ids, bookmarked=bookmarked, marked_bad=marked_bad)
     return {"items": items, "total": len(items)}
 
 

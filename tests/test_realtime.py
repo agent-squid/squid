@@ -1425,3 +1425,61 @@ def test_auth_status_recovers_completion_without_event_stream(monkeypatch, state
     assert response.json() == {"state": state, "returncode": returncode}
     assert response.headers["cache-control"] == "no-store"
     assert client.get("/auth/session/missing").status_code == 404
+
+
+def test_history_check_requires_identity_and_returns_exact_existing_ids(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message('squid', 'codex', 'hello')
+    msg_id = stats_db.insert_assistant_message('squid', 'codex', user_id)
+    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+        ws.receive_json()
+        query = {'v': 1, 'type': 'history.check', 'request_id': 'history-test',
+                 'payload': {'ids': [msg_id, 999999]}}
+        ws.send_json(query)
+        assert ws.receive_json()['payload']['error'] == 'client_identity_required'
+        ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
+            'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
+        assert ws.receive_json()['type'] == 'subscribed'
+        assert ws.receive_json()['type'] == 'snapshot'
+        ws.send_json(query)
+        result = _receive_command_result(ws)
+        assert result['ok'] is True
+        assert [row['id'] for row in result['items']] == [msg_id]
+        stats_db.update_assistant_message(msg_id, 'updated content', None)
+        ws.send_json(query)
+        assert _receive_command_result(ws)['items'][0]['content'] == 'updated content'
+        monkeypatch.setattr(server, '_REALTIME_MAX_FRAME_BYTES', 512)
+        stats_db.update_assistant_message(msg_id, 'x' * 1000, None)
+        ws.send_json(query)
+        assert _receive_command_result(ws)['error'] == 'history_result_too_large'
+        stats_db.delete_topic('squid')
+        ws.send_json(query)
+        assert _receive_command_result(ws)['items'] == []
+        for ids in [[True], ['1'], [0], [2**64], list(range(1, 102))]:
+            ws.send_json({**query, 'payload': {'ids': ids}})
+            assert _receive_command_result(ws)['error'] == 'invalid_ids'
+
+
+@pytest.mark.parametrize('filter_name,annotation', [('bookmarked', 'bookmark'), ('marked_bad', 'bad_response')])
+def test_history_check_respects_existing_row_filter_membership(tmp_path, monkeypatch, filter_name, annotation):
+    _fresh_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message('squid', 'codex', 'hello')
+    msg_id = stats_db.insert_assistant_message('squid', 'codex', user_id)
+    stats_db.update_assistant_message(msg_id, 'original', None)
+    stats_db.set_message_annotation(msg_id, annotation)
+    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+        ws.receive_json()
+        ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
+            'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
+        assert ws.receive_json()['type'] == 'subscribed'
+        assert ws.receive_json()['type'] == 'snapshot'
+        query = {'v': 1, 'type': 'history.check', 'request_id': 'filtered-history',
+                 'payload': {'ids': [msg_id], filter_name: True}}
+        stats_db.update_assistant_message(msg_id, 'updated', None)
+        ws.send_json(query)
+        assert _receive_command_result(ws)['items'][0]['content'] == 'updated'
+        stats_db.remove_message_annotation(msg_id, annotation)
+        ws.send_json(query)
+        assert _receive_command_result(ws)['items'] == []
+        ws.send_json({**query, 'payload': {'ids': [msg_id], filter_name: 'true'}})
+        assert _receive_command_result(ws)['error'] == 'invalid_ids'

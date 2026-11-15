@@ -5,6 +5,10 @@ updated: 2026-08-14
 ---
 # ADR-0011: Completed Response Bubbles Surface at the Bottom of the Chat
 
+See [proposed ADR-0056](0056-transcript-scroll-intent-and-completion-footers.md)
+for the investigation of completion-footer jumps and a unified scroll-intent
+policy. The implementation notes below describe their historical revisions.
+
 ## Context and Problem Statement
 
 With parallel adhoc (`!`) execution (ADR-0010) the user can fire multiple queries and

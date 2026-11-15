@@ -2795,10 +2795,11 @@ def get_messages_from_cursor(direction: str, cursor_completed_at: str, cursor_id
     }
 
 
-def get_history_items_by_ids(ids: list[int]) -> list[dict]:
+def get_history_items_by_ids(ids: list[int], bookmarked: bool = False, marked_bad: bool = False) -> list[dict]:
     if not ids:
         return []
     placeholders = ",".join("?" * len(ids))
+    _, _, bookmark_join, marked_bad_join = _history_filter_sql(bookmarked=bookmarked, marked_bad=marked_bad)
     with _connection() as conn:
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
@@ -2812,18 +2813,21 @@ def get_history_items_by_ids(ids: list[int]) -> list[dict]:
                        re.payload AS stats_payload,
                        {_marked_bad_expr("m")} AS marked_bad
                 FROM chat_messages m
+                {bookmark_join}
+                {marked_bad_join}
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
                 {_latest_stats_event_join(msg_alias="m", outer=True)}
                 WHERE m.id IN ({placeholders})
                 ORDER BY m.id ASC""",
             ids,
         ).fetchall()
-    items = []
-    for r in rows:
-        row = dict(r)
-        _attach_turn_stats(row)
-        items.append(row)
-    return items
+        items = []
+        for r in rows:
+            row = dict(r)
+            row["flow_route"] = _infer_origin_flow_route(conn, row)
+            _attach_turn_stats(row)
+            items.append(row)
+        return items
 
 
 def _build_fts_match(q: str, operator: str = "and") -> str:

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-11
-updated: 2026-09-25
+updated: 2026-11-15
 ---
 # ADR-0039: Remote access via Shore Relay on Cloudflare Workers + Durable Objects (agentsquid.ai/@username)
 
@@ -84,6 +84,21 @@ The relay carries the versioned real-time application protocol defined by
 ADR-0040. Implement and validate that protocol locally before making the relay
 its remote transport; Shore must not define a second set of chat, lifecycle,
 reconnect, or replay semantics.
+
+### Chat transport clarification (2026-11-15)
+
+[ADR-0040's Chat-tab scope](0040-versioned-realtime-protocol-over-websocket.md#chat-tab-scope-and-shore-requirement)
+now requires all Chat application operations, including initial history,
+pagination, search, explicit refresh, attachments/tool actions, and recovery,
+to use WS on both direct and Shore paths. The existing push-not-poll requirement
+also applies while the Chat tab is idle; HTTP history polling must not run in
+parallel with live delivery. Earlier HTTP-shaped bounded-resource examples below
+are historical and do not provide exceptions for Chat-tab operations.
+
+This transport requirement does not expand the capability registry or a device's
+grants. New WS queries and commands require explicit authorization and protocol
+validation before remote use; current read-only pairing scopes remain read-only.
+This is a target contract, not a claim that migration is complete.
 
 The accepted implementation contract is split into these normative documents:
 

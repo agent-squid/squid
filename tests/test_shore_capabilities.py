@@ -141,3 +141,8 @@ def test_a_device_with_no_granted_capabilities_is_denied_every_type():
         authorize_capability_frame([], {"v": 1, "type": "ping", "payload": {}})
     with pytest.raises(ShoreProtocolError, match="shore_capability_denied"):
         authorize_capability_frame(["unknown.capability.v1"], {"v": 1, "type": "ping", "payload": {}})
+
+
+def test_history_check_does_not_widen_dashboard_read_grant():
+    with pytest.raises(ShoreProtocolError, match="shore_capability_denied"):
+        authorize_capability_frame(CAPS, {"v": 1, "type": "history.check", "payload": {"ids": [1]}})

@@ -87,6 +87,7 @@ test('history renders completed turns in the same order as live completion', asy
 
   await page.goto('/');
 
+  await expect(page.locator('#messages > .msg.assistant.history-item')).toHaveCount(2);
   const ids = await page.locator('#messages > .msg.assistant.history-item').evaluateAll(
     rows => rows.map(row => row.dataset.msgId)
   );

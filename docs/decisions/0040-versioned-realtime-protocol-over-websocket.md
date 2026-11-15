@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-12
-updated: 2026-08-15
+updated: 2026-11-15
 ---
 # ADR-0040: Versioned real-time application protocol over WebSocket
 
@@ -23,11 +23,10 @@ and resume after ordinary mobile network changes. Defining a separate relay
 protocol while retaining unrelated local SSE behavior would create two live
 application protocols and two sets of lifecycle semantics.
 
-Moving every HTTP operation to WebSocket would create the opposite problem.
-Static assets, login and recovery, history and search queries, configuration
-CRUD, health checks, and large file transfers are naturally bounded HTTP
-requests. Treating WebSocket as a generic RPC replacement would add connection
-state and retry ambiguity without improving those operations.
+The original decision retained HTTP for bounded queries and bulk operations.
+The 2026-11-15 revision replaces that split: all application operations use the
+same WebSocket protocol, eliminating independent HTTP polling and recovery paths
+that can rebuild a conversation after live delivery.
 
 ## Decision
 
@@ -38,16 +37,61 @@ protocol
 between browser and host, with its additional authentication and end-to-end
 encryption requirements.
 
-WebSocket becomes the primary transport for live commands and updates, not a
-replacement for the whole HTTP API. Existing HTTP and SSE routes remain
-available during a staged migration and consume the same underlying event
-producers. SSE is removed only after WebSocket reaches behavioral and test
-parity.
+### Revision 2026-11-15: WebSocket is the sole application transport
+
+All application data, commands, queries, subscriptions, and file transfers go
+through WebSocket. This includes initial conversation history, pagination,
+message lookup/jumps, search, explicit refresh, stats, configuration, health,
+processes, queues, authentication/recovery, worktrees, diffs, uploads, and
+downloads. There is no parallel HTTP/HTTPS application API, SSE fallback, or
+periodic HTTP history refresh in the target architecture.
+
+Browser document/static-asset delivery and the WebSocket opening handshake are
+transport bootstrap, not application-data APIs. This decision does not disable
+TLS: remote connections continue to use secure WebSocket (`wss://`) and Shore's
+authentication and encryption requirements remain in force. No application data
+may be hidden in a static bootstrap response to bypass the WS-only boundary.
+
+Reconnect recovery uses acknowledged cursors, replay, and authoritative WS
+snapshots. Initial loading and bounded queries use correlated WS requests and
+results. Changing transport does not permit snapshots, duplicate terminal
+events, or query completion to reset the reader's scroll position.
+
+This is the accepted target, not a claim that migration is complete. Existing
+HTTP/SSE routes and callers must be migrated and retired. The implementation
+status and migration notes dated before this revision describe historical
+behavior; their HTTP exceptions do not authorize new fallback paths.
+
+### Chat-tab scope and Shore requirement
+
+Every application operation initiated by, or needed to render, the Chat tab
+must use this WS protocol. This includes initial history, older/newer pages,
+search and jumps, prompt submission/cancellation, streaming output, completion
+and its footer, process/queue indicators, context and route controls, attached
+files, tool/diff actions, explicit refresh, and foreground/reconnect recovery.
+A control living inside a modal or panel opened from Chat is still in scope.
+There must be no hidden HTTP fetch, SSE fallback, or interval-based history
+refresh behind that surface. Browser document/static assets and the opening
+handshake remain the bootstrap exceptions described above.
+
+This carries forward [ADR-0039's Shore decision](0039-remote-access-via-shore-relay.md):
+its Decision section requires the same chat/lifecycle/reconnect/replay semantics
+locally and through Shore, and its status/health push requirement explicitly
+rejects HTTP polling. That earlier requirement establishes push-based state
+synchronization; this revision additionally makes bounded Chat queries WS-only.
+It should not be described as proof that the older Shore ADR already required
+all bounded queries to use WS.
+
+The same Chat behavior must work through direct `/ws/v1` and Shore's encrypted
+relay path. Extending transport coverage does not grant remote permissions:
+Shore capability checks and pairing grants continue to authorize each operation.
+Unsupported or unauthorized commands fail explicitly instead of falling back
+to an HTTP endpoint. Implementation and parity tests remain outstanding.
 
 ### Protocol envelope
 
 Every frame is a bounded JSON envelope. Binary payloads and large files are
-transferred by HTTP rather than embedded in frames.
+transferred in bounded WS chunks rather than embedded in one oversized frame.
 
 ```json
 {
@@ -279,13 +323,13 @@ installed cursor are ignored.
 Snapshots contain only the bounded working set needed to render the current
 screen: the latest 20 messages, every pending operation even when older than
 that window, current queue/process/message state, and relevant metadata. Older
-conversation pages and expanded historical tool details remain pull-based HTTP
-resources. Scrolling upward fetches those pages; the WebSocket keeps the active
-window synchronized.
+conversation pages and expanded historical tool details are bounded WS queries.
+Scrolling upward requests those pages; subscriptions keep the active window
+synchronized.
 
 ### Client state and transcript reconciliation
 
-SSE, WebSocket events, snapshots, and HTTP history pages feed one normalized
+WebSocket events, snapshots, and queried history pages feed one normalized
 turn model. Transport code must not maintain a separate visual representation
 or directly reset transcript navigation. The client maintains application
 state independently from DOM state. [ADR-0041](0041-normalized-client-transcript-store-and-reconciler.md)
@@ -329,27 +373,34 @@ Development builds should enforce these invariants where practical:
 - composer-route changes do not mutate history-filter or delivery state; and
 - applying a realtime event never invokes the destructive history reset.
 
-### HTTP boundary
+### WS queries, bootstrap, and large transfers
 
-HTTP remains the preferred transport for:
+Application requests use unique correlation IDs with typed results and errors.
+Initial history, pagination, search, and explicit refresh are bounded queries,
+not new live subscriptions. Query pagination cursors remain independent of the
+realtime event cursor; installing a page merges stable message identities and
+preserves active subscriptions, visible scope, and scroll intent.
 
-- initial HTML, JavaScript, styles, and bootstrap data;
-- account login, magic links, recovery, and WebSocket connection-ticket issue;
-- health checks and bounded history, search, stats, and configuration queries;
-- file browsing, upload, download, diffs, and other large payloads.
+The protocol must define request cancellation, timeouts, bounded result sizes,
+and reconnect behavior. Pending queries fail explicitly on connection loss or
+are retried under documented semantics; mutations retain idempotency keys so
+retry cannot duplicate effects. Late results from an obsolete query or visible
+scope must not replace the current conversation.
 
-Historical pagination is deliberately independent of the WebSocket event
-cursor. An HTTP page provides records at its documented database boundary,
-while live events reconcile records in the active client window by stable
-domain ID.
+Large transfers use bounded chunks, flow control, cancellation, and explicit
+resume/integrity semantics. Scheduling and queue limits must prevent history or
+file transfers from starving live chat, acknowledgements, and control messages.
+They must not fall back to HTTP/HTTPS endpoints.
 
-History could technically be requested over WebSocket, but it is a bounded
-query rather than a live subscription. HTTP gives each page an independent
-request lifecycle, ordinary cancellation/retry/cache behavior, direct status
-codes, and no head-of-line competition with chat deltas on the socket. Keeping
-history on HTTP also avoids inventing request/response multiplexing and page
-backpressure inside the real-time protocol. This is a design boundary, not a
-WebSocket limitation.
+Authentication, account recovery, and connection-ticket operations also move to
+WS with narrowly authorized pre-authentication messages. Authentication and
+origin checks must remain effective before ordinary application commands are
+accepted. Define the concrete exchange and test authorization failures before
+retiring the existing HTTP flows; static-page loading must not require an
+already authenticated application socket.
+
+HTTP/HTTPS is limited to browser document/static assets and the opening
+handshake. It carries no application queries, commands, polling, or file data.
 
 The browser authenticates a direct local/Tailscale WebSocket consistently with
 the local security model. Shore browser connections use a secure session or a
@@ -433,8 +484,10 @@ choice, not its scoped PTY lifecycle or security decisions.
   polling.
 - Good: persisted replay and snapshots make reconnect behavior explicit rather
   than transport-specific.
-- Good: retaining HTTP for bounded and bulk operations keeps the architecture
-  simpler than a WebSocket-only API.
+- Good: one application transport owns live delivery, bounded queries, and
+  recovery; HTTP refresh cannot independently rebuild the transcript.
+- Bad: bounded queries, pre-authentication, and bulk transfers need explicit
+  WS correlation, cancellation, flow control, and reconnect semantics.
 - Bad: the server and UI must temporarily support two streaming transports.
 - Bad: idempotency, replay windows, snapshots, backpressure, and version skew
   become first-class implementation and testing obligations.
@@ -497,3 +550,20 @@ Browser parity items (all in `tests/e2e/chat.spec.js`):
 - [x] Changing the composer route does not change the history filter or lifecycle feed — `clicking a header route sets composer route without filtering history`, `global lifecycle discovers a desktop turn and reconnect completion stays deduplicated`
 - [x] Explicit filters, pagination, and scroll anchors survive realtime events — `search back keeps one status bubble when live meta arrives after history`, `returning from another tab preserves scrolled-up chat position`, `completed response moves to bottom instead of replacing its status bubble`
 - [x] Snapshots reconcile the active window without emptying or replacing the transcript — `foreground resume replaces a stale websocket and restores missed content from snapshot`, `empty reconnect snapshot shows a waiting state until activity resumes`, `flow snapshot rollover preserves an already-attached step and resumes live delivery`
+
+### Verification required for the 2026-11-15 revision
+
+- Initial history, pagination, search, explicit refresh, and all remaining
+  application operations work through WS with no HTTP/SSE fallback.
+- Healthy operation, reconnect, foreground resume, and network changes issue no
+  HTTP application-data requests or periodic history rebuilds.
+- WS replay/snapshot recovery preserves loaded history and scroll intent after
+  completion, including delayed footer/layout changes and concurrent messages.
+- Cancelled/obsolete queries cannot change the current view; retrying mutations
+  remains idempotent across reconnects.
+- Bulk transfers obey limits and do not starve live events; interruption,
+  cancellation, resume, and integrity checks are covered.
+- WS authentication/recovery enforces origin and authorization boundaries,
+  including pre-authentication rejection and expired credentials.
+
+These gates are outstanding until implementation and test evidence are recorded.

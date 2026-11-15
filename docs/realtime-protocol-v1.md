@@ -213,10 +213,29 @@ existing bounded HTTP history API using a stable database-page boundary. The
 client merges pages and live events by message ID. Historical pages do not
 alter the WebSocket cursor.
 
-Although WebSocket can carry such responses, history is deliberately HTTP: it
-is finite query traffic with independent cancellation, retry, caching, status,
-and pagination semantics. It must not compete with live deltas or require a
-second RPC protocol inside the socket.
+The accepted WS-only target in ADR-0040 supersedes the original HTTP-only
+history design. Explicit paging/navigation still use HTTP during migration.
+Automatic recovery never rebuilds history over HTTP.
+
+`history.check` is a local read query using `request_id` / `command.result`
+correlation. Its payload is `{ "ids": [positive integer, ...] }`, capped at 100
+IDs. Optional `bookmarked` and `marked_bad` boolean filters restrict the result
+to current annotation membership (both filters apply when both are true).
+It requires a subscribed local identity and returns `{ "ok": true,
+"items": [...] }` with authoritative stored rows for exactly the requested IDs;
+missing IDs indicate deletion or failure to match the requested annotation
+filters. Invalid IDs, missing identity, and replies over
+the frame byte limit return `ok: false` with `invalid_ids`,
+`client_identity_required`, or `history_result_too_large`. Clients split large
+batches and offer explicit refresh for a single oversized row. This read does
+not advance the durable event cursor or use mutation idempotency records.
+
+The UI verifies rendered completed rows after subscription and health recovery,
+updates only changed rows, and captures position after replies arrive. Pending
+streams retain their transport owners. SSE turn streaming also subscribes to
+the WS global lifecycle feed for discovery. Shore recognizes `history.check`
+as a protocol type but its existing `dashboard.read.v1` grant does **not**
+authorize it; no remote capability is widened by this query.
 
 ## Compatibility and errors
 

@@ -1,5 +1,8 @@
 const { test, expect } = require('@playwright/test');
 
+// Backend mocks must not be replaced by a service-worker activation reload.
+test.use({ serviceWorkers: 'block' });
+
 // ── SSE helpers ───────────────────────────────────────────────────────────────
 
 const SSE_HEADERS = {
@@ -22,8 +25,7 @@ const DONE  = { event: 'done',  data: '' };
 // ── mock setup ────────────────────────────────────────────────────────────────
 
 async function mockBackend(page) {
-  // Compatibility-path tests must not also attach the real global WebSocket
-  // lifecycle. Dedicated WebSocket tests override this route explicitly.
+  // Exercise SSE turn streaming; dedicated WebSocket tests override this route.
   await page.route('**/config/realtime', r => r.fulfill({ json: { transport: 'sse' } }));
   await page.route('**/health',        r => r.fulfill({ json: { status: 'ok', boot_time: new Date().toISOString() } }));
   await page.route('**/history**',     r => r.fulfill({ json: { items: [], has_more: false } }));
@@ -1382,12 +1384,14 @@ test.describe('response bubble', () => {
       { resume_session_id: 'same-session', sources: [{ message_id: 7, label: 'Flow starting message', delivery: 'session history' }], instructions: [instruction] },
       { resume_session_id: null, sources: [{ message_id: 7, label: 'Flow starting message', delivery: 'injected' }], instructions: [instruction] },
     ] } }));
+    await page.evaluate(() => Promise.all([initialHistoryReady, historyBootstrapSettled, bootBannerSettled]));
     await page.evaluate(() => {
       const anchor = document.createElement('span');
       anchor.className = 'user-ctx';
       anchor.dataset.msgId = '42';
       anchor.textContent = 'ctx';
       document.getElementById('messages').appendChild(anchor);
+      scrollToBottom(true);
       showCtxPopup(anchor);
       window._sourceJump = null;
       jumpToMessage = id => { window._sourceJump = id; };
@@ -1398,7 +1402,7 @@ test.describe('response bubble', () => {
     await expect(section).toContainText('#7 · session history');
     await expect(section).toContainText('#7 · injected');
     await expect(page.locator('#ctx-popup .ctx-popup-pin')).toHaveCount(0);
-    await section.locator('.ctx-popup-link').filter({ hasText: 'agent/runtime/worktree.md' }).first().click();
+    await section.getByTitle('agent/runtime/worktree.md · injected', { exact: true }).first().click();
     await expect(page.locator('#msg-modal')).toHaveClass(/open/);
     await expect(page.locator('#msg-modal-title')).toHaveText('agent/runtime/worktree.md');
     await expect(page.locator('#msg-modal-body')).toContainText('saved-revision');
@@ -3768,12 +3772,15 @@ test.describe('recovered pending responses', () => {
     }))).toEqual({ cursor: '12', ackIds: [10, 11, 12] });
   });
 
-  test('sse transport mode does not create a WebSocket', async ({ page }) => {
+  test('sse transport streams pending output over SSE while enabling lifecycle WebSocket discovery', async ({ page }) => {
     await page.addInitScript(() => {
       window.__webSocketCount = 0;
       window.__eventSources = [];
       window.WebSocket = class {
-        constructor() { window.__webSocketCount++; }
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() { this.readyState = 0; window.__webSocketCount++; }
+        close() { if (this.readyState !== 3) window.__webSocketCount--; this.readyState = 3; }
       };
       window.EventSource = class {
         constructor(url) {
@@ -3782,7 +3789,7 @@ test.describe('recovered pending responses', () => {
           window.__eventSources.push(this);
         }
         addEventListener(type, callback) { this.listeners[type] = callback; }
-        close() {}
+        close() { this.closed = true; }
       };
     });
     await mockBackend(page);
@@ -3802,11 +3809,13 @@ test.describe('recovered pending responses', () => {
     }}));
 
     await page.goto('/');
-    await page.waitForFunction(() => window.__eventSources.length === 1);
+    await expect.poll(() => page.evaluate(() => ({
+      sources: window.__eventSources.filter(source => !source.closed).length, sockets: window.__webSocketCount,
+    }))).toEqual({ sources: 1, sockets: 1 });
     expect(await page.evaluate(() => ({
       webSockets: window.__webSocketCount,
       eventSourceUrl: window.__eventSources[0].url,
-    }))).toEqual({ webSockets: 0, eventSourceUrl: '/chat/81/events' });
+    }))).toEqual({ webSockets: 1, eventSourceUrl: '/chat/81/events' });
   });
 
   test('poll fallback keeps retrying after transient status failure', async ({ page }) => {

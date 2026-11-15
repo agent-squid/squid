@@ -4994,6 +4994,26 @@ async def realtime_v1(websocket: WebSocket):
                     scopes = []
                     cursor = await asyncio.to_thread(get_realtime_cursor)
                     await _realtime_send(outbound, {"v": 1, "type": "unsubscribed", "payload": {}}, principal, last_acked_cursor)
+                elif message_type == "history.check":
+                    payload = frame.get("payload")
+                    ids = payload.get("ids") if isinstance(payload, dict) else None
+                    result = {"ok": False, "error": "invalid_ids"}
+                    if not principal:
+                        result["error"] = "client_identity_required"
+                    elif (isinstance(ids, list) and len(ids) <= 100
+                          and all(type(value) is int and 0 < value <= 2**53 - 1 for value in ids)
+                          and all(type(payload.get(key, False)) is bool for key in ("bookmarked", "marked_bad"))):
+                        data = await asyncio.to_thread(
+                            list_history_by_ids, ids, bookmarked=payload.get("bookmarked", False),
+                            marked_bad=payload.get("marked_bad", False))
+                        await asyncio.to_thread(_annotate_history_worktree_state, data)
+                        result = {"ok": True, **data}
+                        if len(json.dumps(result).encode("utf-8")) > _REALTIME_MAX_FRAME_BYTES:
+                            result = {"ok": False, "error": "history_result_too_large"}
+                    await _realtime_send(outbound, {
+                        "v": 1, "type": "command.result", "request_id": frame.get("request_id"),
+                        "payload": result,
+                    }, principal, last_acked_cursor)
                 elif message_type in {"chat.start", "chat.cancel", "auth.start", "worktree.auto_resolve"}:
                     if not principal:
                         await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "client_identity_required"}}, principal, last_acked_cursor)

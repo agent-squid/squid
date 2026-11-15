@@ -76,11 +76,16 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+// isAtBottom() is strict, so a shrinking viewport (keyboard, composer growth)
+// would otherwise unpin a reader who was at the bottom.
+let messagesPinnedToBottom = true;
 messages.addEventListener('scroll', () => {
+  messagesPinnedToBottom = isAtBottom();
   updateScrollButtonVisibility();
 });
 // Follow the transcript edge as search, panels, and the composer change height.
 const scrollButtonLayoutObserver = new ResizeObserver(() => {
+  if (messagesPinnedToBottom) messages.scrollTop = messages.scrollHeight;
   const chat = scrollBtn.parentElement;
   if (!chat.clientHeight) return;
   scrollBtn.style.bottom = `${chat.clientHeight - messages.offsetTop - messages.offsetHeight + 12}px`;
@@ -577,7 +582,7 @@ function switchView(name) {
   }
   if (name === 'flow') initFlowView();
   // Check reachability even when the selected view serves cached data.
-  setTimeout(() => { void syncConnectionHistory(); }, 0);
+  setTimeout(() => { void checkConnectionHealth(); }, 0);
 }
 
 function navigateView(name, { recordHistory = true } = {}) {
@@ -2325,15 +2330,8 @@ function anchorBeforeNextLiveGroup(maxId) {
   return null;
 }
 
-// Shared by every call site that inserts a batch of completed history items
-// reaching the "live" edge (the newest completed messages, adjacent to any
-// still-in-flight turns): loadHistory's offset-0 page, resetHistoryToLatest,
-// and jumpToMessage's initial window. Subsequent newer pages use
-// anchorBeforeNextLiveGroup directly to preserve existing history order.
-// Returns a real anchor node,
-// `null` for "no live groups newer than this batch — insert after the last
-// one", or `undefined` when there are no live groups at all so the caller
-// should fall back to its own default insertion point.
+// Locate the newer boundary of a jump window before inserting its rows.
+// Keep that boundary beside live groups so newer pagination stays in order.
 function anchorForLiveEdgePage(items) {
   const newestCompleted = items.find(item => item.status !== 'pending');
   const anchor = newestCompleted ? anchorBeforeNextLiveGroup(newestCompleted.id) : null;
@@ -2374,7 +2372,8 @@ function reloadHistory(filter = {}) {
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
   if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
   const preserveForLive = collectLiveGroupElements();
-  document.querySelectorAll('.history-item, .boot-banner, .tool-block-history, #messages > .cmd-feedback').forEach(el => {
+  rememberBootBannerPositions();
+  document.querySelectorAll('.history-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => {
     if (!preserveForLive.has(el)) el.remove();
   });
   // Remove live (non-history) messages too — completed ones are in the DB and will reload
@@ -2573,37 +2572,58 @@ function historyUrlParams() {
   return params;
 }
 
-function appendHistoryItems(items, fragment) {
+function appendHistoryItems(items, fragment, insertItem = null) {
   const chronologicalItems = [...items].reverse();
   for (let i = 0; i < chronologicalItems.length; i += 1) {
     const item = chronologicalItems[i];
-    // Skip if a bubble for this message is already in the DOM — e.g. an
-    // in-progress live (SSE) bubble that survived a search → back round-trip.
-    // Without this, loadHistory would render a second, polling-driven bubble
-    // for the same message alongside the live one.
-    if (item.id != null && messages.querySelector(`[data-msg-id="${item.id}"]`)) continue;
+    const target = insertItem ? document.createDocumentFragment() : fragment;
+    const render = () => {
+      // Skip if a bubble for this message is already in the DOM — e.g. an
+      // in-progress live (SSE) bubble that survived a search → back round-trip.
+      // Without this, loadHistory would render a second, polling-driven bubble
+      // for the same message alongside the live one.
+      if (item.id != null && messages.querySelector(`[data-msg-id="${item.id}"]`)) return;
 
-    if (promptOnlyHistory) {
-      appendPromptOnlyHistoryItem(item, fragment);
-      continue;
-    }
+      if (promptOnlyHistory) {
+        appendPromptOnlyHistoryItem(item, target);
+        return;
+      }
 
-    if (!item.content && !item.context && item.status !== 'pending') continue;
+      if (!item.content && !item.context && item.status !== 'pending') return;
 
-    if (item.status === 'pending') {
-      // Queued/in-flight items already carry topic/agent/adhoc from the DB row, so a
-      // filter scope can be checked directly — only skip ones that don't belong to it.
-      if (!itemMatchesFilter(item, historyFilter)) continue;
-      const wipBubble = makeWipBubble(item);
-      fragment.appendChild(wipBubble);
-      reconnectPendingItem(item, wipBubble);
-      continue;
-    }
+      if (item.status === 'pending') {
+        // Queued/in-flight items already carry topic/agent/adhoc from the DB row, so a
+        // filter scope can be checked directly — only skip ones that don't belong to it.
+        if (!itemMatchesFilter(item, historyFilter)) return;
+        const wipBubble = makeWipBubble(item);
+        target.appendChild(wipBubble);
+        reconnectPendingItem(item, wipBubble);
+        return;
+      }
 
-    const routeMarker = historyRouteChainMarkerForItem(item, chronologicalItems[i + 1], chronologicalItems[i - 1]);
-    appendHistoryRouteChainMarker(routeMarker, item, fragment);
-    appendHistoryItem(item, fragment);
+      const routeMarker = historyRouteChainMarkerForItem(item, chronologicalItems[i + 1], chronologicalItems[i - 1]);
+      appendHistoryRouteChainMarker(routeMarker, item, target);
+      appendHistoryItem(item, target);
+    };
+    render();
+    if (insertItem && target.childNodes.length) insertItem(item, target);
   }
+}
+
+// A refresh may straddle live turns. Anchor each rendered turn separately so
+// older history cannot be moved below a newly submitted prompt with the batch.
+function insertHistoryAtLiveEdge(items, fragment) {
+  let previous = null;
+  appendHistoryItems(items, fragment, (item, group) => {
+    let anchor = anchorBeforeNextLiveGroup(Number(item.id));
+    // Live placement must preserve the server's completion-time order.
+    if (previous && anchor && (previous === anchor ||
+        (previous.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_PRECEDING))) {
+      anchor = previous.nextSibling;
+    }
+    previous = group.lastChild;
+    messages.insertBefore(group, anchor);
+  });
 }
 
 async function loadHistory() {
@@ -2641,33 +2661,17 @@ async function loadHistory() {
   if (generation !== historyGeneration) { historyLoading = false; return; }
 
   const { items, has_more } = data;
+  if (historyOffset === 0) connectionLastSync = Date.now();
   const prevHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
-  appendHistoryItems(items, fragment);
+  if (historyOffset === 0) insertHistoryAtLiveEdge(items, fragment);
+  else appendHistoryItems(items, fragment);
 
-  // items are newest-first (server ORDER BY completed_at DESC), so items[0] is
-  // this page's most recent id — used to find the right live-group slot. That
-  // slot only exists on the initial latest page (offset 0), when completed
-  // history has just been cleared and the only DOM above the live groups is the
-  // sentinel. On scroll-up pagination the fetched page is older than everything
-  // already rendered, so it must anchor at the very top — anchoring it before a
-  // live group instead would land it mid-transcript and make the scrollTop
-  // compensation below yank the view down instead of holding it in place.
-  let anchor;
-  if (historyOffset === 0 && items.length) {
-    // A still-running (pending) turn sorts to the top of this page — its
-    // completed_at falls back to created_at, the newest timestamp — so
-    // `items[0]` is often the live group itself, not the newest completed
-    // message. anchorForLiveEdgePage() anchors to the newest *completed* item
-    // instead; live groups are positioned relative to completed history,
-    // never to themselves.
-    anchor = anchorForLiveEdgePage(items);
+  // Older pages belong above all rendered turns, including retained streams.
+  if (historyOffset !== 0) {
+    messages.insertBefore(fragment, topSentinel ? topSentinel.nextSibling : messages.firstChild);
   }
-  if (anchor === undefined) {
-    anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
-  }
-  messages.insertBefore(fragment, anchor || null);
-  messages.scrollTop += messages.scrollHeight - prevHeight;
+  restoreBootBannerPositions();
   markInitialHistoryReady();
 
   historyOffset += items.length;
@@ -2677,6 +2681,7 @@ async function loadHistory() {
   refreshAllRevertButtons();
   evaluateAdvisory();
   refreshDateDividers();
+  messages.scrollTop += messages.scrollHeight - prevHeight;
 
   if (historyExhausted && topSentinel) {
     topSentinel.remove();
@@ -2745,12 +2750,13 @@ async function loadHistoryWindow(direction) {
       anchor = bottomSentinel;
     }
     messages.insertBefore(fragment, anchor);
+    restoreBootBannerPositions();
     historyNewerCursor = data.newer_cursor || historyNewerCursor;
     historyHasNewer = !!data.has_more;
   } else {
     const anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
     messages.insertBefore(fragment, anchor);
-    messages.scrollTop += messages.scrollHeight - prevHeight;
+    restoreBootBannerPositions();
     historyOlderCursor = data.older_cursor || historyOlderCursor;
     historyHasOlder = !!data.has_more;
   }
@@ -2761,10 +2767,11 @@ async function loadHistoryWindow(direction) {
   evaluateAdvisory();
   refreshDateDividers();
   updateHistoryWindowSentinels();
+  if (direction === 'older') messages.scrollTop += messages.scrollHeight - prevHeight;
   updateScrollButtonVisibility();
 }
 
-async function resetHistoryToLatest({ data = null } = {}) {
+async function resetHistoryToLatest({ data = null, followLatest = true } = {}) {
   const generation = historyGeneration;
   try {
     if (!data) {
@@ -2781,6 +2788,7 @@ async function resetHistoryToLatest({ data = null } = {}) {
     return false;
   }
   if (generation !== historyGeneration) return false;
+  const position = captureTranscriptPosition();
   invalidateHistoryLoad();
   historyWindowMode = false;
   historyWindowEdgesArmed = false;
@@ -2806,7 +2814,8 @@ async function resetHistoryToLatest({ data = null } = {}) {
     }
   }
   const preserveForLive = collectLiveGroupElements();
-  document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => {
+  rememberBootBannerPositions();
+  document.querySelectorAll('.history-item, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => {
     if (!preserveForLive.has(el)) el.remove();
   });
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
@@ -2816,13 +2825,8 @@ async function resetHistoryToLatest({ data = null } = {}) {
 
   const items = data.items || [];
   const fragment = document.createDocumentFragment();
-  appendHistoryItems(items, fragment);
-  // This is the same "newest completed page, adjacent to any live groups"
-  // case loadHistory's offset-0 page anchors for — a blind appendChild here
-  // would land newest-completed messages after live groups that actually
-  // postdate them.
-  const anchor = items.length ? anchorForLiveEdgePage(items) : undefined;
-  messages.insertBefore(fragment, anchor || null);
+  insertHistoryAtLiveEdge(items, fragment);
+  restoreBootBannerPositions();
   historyOffset = items.length;
   historyExhausted = !data.has_more;
   historyLoading = false;
@@ -2838,12 +2842,13 @@ async function resetHistoryToLatest({ data = null } = {}) {
     setTimeout(() => { historyTopPaginationArmed = true; }, 250);
   }
 
-  messages.scrollTop = messages.scrollHeight;
   _updateFilterBadge();
   updateInContextMarkers();
   refreshAllRevertButtons();
   evaluateAdvisory();
   refreshDateDividers();
+  if (followLatest) scrollToBottom(true);
+  else restoreTranscriptPosition(position);
   updateScrollButtonVisibility();
   return true;
 }
@@ -2869,6 +2874,9 @@ function initHistoryScroll() {
     { root: messages, threshold: 0 },
   );
   historyObserver.observe(topSentinel);
+  // Retained live turns and banners can leave this sentinel above the viewport.
+  // Explicit filter/reload navigation still needs its first page immediately.
+  void loadHistory();
 }
 
 function updateHistoryWindowSentinels() {
@@ -3041,7 +3049,8 @@ async function jumpToMessage(msgId, flowRunId = null, clearForJump = null) {
     if (topSentinel) { topSentinel.remove(); topSentinel = null; }
     if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
     const preserveForLive = collectLiveGroupElements();
-    document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => {
+    rememberBootBannerPositions();
+    document.querySelectorAll('.history-item, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => {
       if (!preserveForLive.has(el)) el.remove();
     });
     document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
@@ -3051,10 +3060,10 @@ async function jumpToMessage(msgId, flowRunId = null, clearForJump = null) {
 
     const jumpItems = data.items || [];
     const fragment = document.createDocumentFragment();
-    appendHistoryItems(jumpItems, fragment);
-    // Older jump windows must also precede any preserved newer live group.
+    // Capture the window boundary before inserting rows beside live groups.
     const jumpAnchor = jumpItems.length ? anchorForLiveEdgePage(jumpItems) : undefined;
-    messages.insertBefore(fragment, jumpAnchor || null);
+    insertHistoryAtLiveEdge(jumpItems, fragment);
+    restoreBootBannerPositions();
     historyOlderCursor = data.older_cursor || null;
     historyNewerCursor = data.newer_cursor || null;
     historyHasOlder = !!data.has_older;
@@ -3254,7 +3263,8 @@ function startSearch(rawArgs, parsedInput = null) {
   invalidateHistoryLoad();
 
   // Clear pane
-  document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history').forEach(el => el.remove());
+  rememberBootBannerPositions();
+  document.querySelectorAll('.history-item, .search-result-item, .tool-block-history').forEach(el => el.remove());
   const preserveForLive = collectLiveGroupElements();
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .cmd-feedback').forEach(el => {
     if (!preserveForLive.has(el)) el.remove();
@@ -5501,6 +5511,7 @@ const liveQueuedTurnHandlers = new Map();
 
 async function sendMessage(text, opts = {}) {
   const source = opts.source === 'workflow' || opts.source === 'diff_viewer' ? opts.source : 'human';
+  const followSubmission = source === 'human' || isAtBottom();
   const updateComposerRoute = source === 'human' && opts.updateComposerRoute !== false;
   const suppressChipTurnCount = !!opts.suppressChipTurnCount;
   const parsed = parseInput(text);
@@ -5540,10 +5551,6 @@ async function sendMessage(text, opts = {}) {
   const liveHiddenByScope = searchActive ||
     (hasHistoryFilterScope() && !itemMatchesFilter({ topic, agent, adhoc, flow_route: flowRoute }, historyFilter));
 
-  // Declared this early (before any of the several one-shot follow-to-bottom
-  // requestAnimationFrame calls below) so each can guard against firing after
-  // the turn has already completed and positioned the response bubble itself
-  // — a late callback would otherwise silently override that positioning.
   let thinkingFrozen = false;
   let chainMarker = null;
   const renderSuppressedHeadMarker = opts.suppressUserBubble && flowOrigins && flowOrigins.length > 1;
@@ -5575,8 +5582,6 @@ async function sendMessage(text, opts = {}) {
       userBubble.classList.add('live-hidden');
       userTimeEl?.classList.add('live-hidden');
     }
-    requestAnimationFrame(() => { if (!thinkingFrozen) messages.scrollTop = messages.scrollHeight; });
-
     // Non-blocking nudge — fires async after the message is already in flight
     maybeShowCodeRootsNudge(topic, userBubble);
   }
@@ -5751,13 +5756,14 @@ async function sendMessage(text, opts = {}) {
 
   function updateThinkingPreview() {
     if (thinkingFrozen) return;
+    const wasAtBottom = isAtBottom();
     if (thinkingLoader.parentNode) thinkingLoader.remove();
     const text = (statusBuf ? statusBuf.trimEnd() + (raw ? '\n\n' : '') : '') + raw;
     thinkingContent.textContent = text.trim();
     thinkingContent.scrollTop = thinkingContent.scrollHeight;
     updateThinkingHeightButton(thinkingBubble);
     thinkingBubble.style.display = '';
-    scrollToBottom();
+    if (wasAtBottom) scrollToBottom(true);
   }
   function freezeThinking() {
     if (thinkingFrozen) return;
@@ -5796,12 +5802,9 @@ async function sendMessage(text, opts = {}) {
     thinkingBubble.remove();
   }
 
-  // Scrolls to reveal the new thinking bubble. Deferred a frame so its
-  // just-inserted layout is measurable. If the turn finishes fast enough
-  // that 'done' (and its own, more informed scroll positioning) lands
-  // before this frame, thinkingFrozen is already true — skip so this stale
-  // scroll doesn't override it.
-  requestAnimationFrame(() => { if (!thinkingFrozen) messages.scrollTop = messages.scrollHeight; });
+  // A human submission explicitly requests the latest turn. Automated sends
+  // follow only when the reader was already at the bottom.
+  if (followSubmission && !liveHiddenByScope) scrollToBottom(true);
 
   // ── Response bubble (not yet in DOM — appended on first content chunk) ────────
   const bubble = document.createElement('div');
@@ -6025,7 +6028,6 @@ async function sendMessage(text, opts = {}) {
     firstDataReceived = true;
     // Bubble stays out of DOM until done — content streams into thinkingBubble as preview
     if (thinkingLoader.parentNode) thinkingLoader.remove();
-    requestAnimationFrame(() => { if (!thinkingFrozen) messages.scrollTop = messages.scrollHeight; });
   }
 
   function stopStatusFallback() {
@@ -6070,7 +6072,7 @@ async function sendMessage(text, opts = {}) {
     return true;
   }
 
-  function showStoredResponse(content) {
+  function showStoredResponse(content, { reveal = true } = {}) {
     if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return false;
     const wasAtBottom = isAtBottom();
     placeResponseBubble();
@@ -6082,7 +6084,7 @@ async function sendMessage(text, opts = {}) {
     } else {
       setAssistantMarkdown(contentDiv, raw);
     }
-    if (wasAtBottom) scrollToRevealBubble(bubble);
+    if (reveal && wasAtBottom) scrollToRevealBubble(bubble);
     return true;
   }
 
@@ -6289,13 +6291,16 @@ async function sendMessage(text, opts = {}) {
           if (data.status_raw && data.status_raw.trim().length > ssePart.length) {
             statusBuf = data.status_raw;
           }
+          const position = captureTranscriptPosition(thinkingBubble);
+          const wasAtBottom = position.atBottom;
           removeThinking();
-          if (!showStoredResponse(data.content || '')) {
+          if (!showStoredResponse(data.content || '', { reveal: false })) {
             controller.abort();
             finalizeQuotaTracking();
             return;
           }
           bubble.classList.add('history-item');
+          bubble._historyContent = raw;
           resolvedAgent = data.agent || resolvedAgent;
           addPinButton(bubble, msgId, topic, resolvedAgent, data.session_id || null);
           addBookmarkButton(bubble, msgId, topic, resolvedAgent);
@@ -6335,7 +6340,8 @@ async function sendMessage(text, opts = {}) {
           liveCtxSpan.dataset.hasTrace = _hasTraceContent(data.status_raw, storedTools.length ? storedTools : liveToolEvents, data.content || '') ? 'true' : 'false';
           renderCompletionTools(storedTools.length ? storedTools : liveToolEvents);
           addCompletionTimestamp();
-          scrollToBottom();
+          if (wasAtBottom) scrollToRevealBubble(bubble);
+          else restoreTranscriptPosition(position);
           if (flowRunId && msgId) watchFlowRun(flowRunId, msgId, flowRoute || route);
           if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
           controller.abort();
@@ -6767,6 +6773,8 @@ async function sendMessage(text, opts = {}) {
             turnStatus = 'done';
             stopStatusFallback();
             liveCtxSpan.dataset.hasTrace = (statusBuf.trim() || liveToolEvents.length) ? 'true' : 'false';
+            const position = captureTranscriptPosition(thinkingBubble);
+            const wasAtBottom = position.atBottom;
             removeThinking();
             invalidateTopicsCache();
             invalidateTopicsManageCache();
@@ -6780,8 +6788,8 @@ async function sendMessage(text, opts = {}) {
                 setAssistantMarkdown(contentDiv, raw);
               }
               bubble.classList.add('history-item');
+              bubble._historyContent = raw;
               if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
-                const wasAtBottom = isAtBottom();
                 placeResponseBubble();
                 // statsEl was created back at the 'stats' event, while bubble was
                 // still detached (bubble only joins `messages` here, at 'done') —
@@ -6794,9 +6802,11 @@ async function sendMessage(text, opts = {}) {
                 // unrelated later conversation.
                 if (statsEl) bubble.after(statsEl);
                 renderCompletionTools(liveToolEvents);
+                addCompletionTimestamp();
                 if (wasAtBottom) scrollToRevealBubble(bubble);
               }
             }
+            if (!wasAtBottom) restoreTranscriptPosition(position);
             // Later chain steps (target handoff, "<>" return) are dispatched
             // server-side (agent/flow.py) — not sent from here anymore, so a
             // refresh mid-chain can't strand it. Just watch for them to keep
@@ -8526,19 +8536,22 @@ function compareCompletedTurnKeys(left, right) {
   return timeOrder || left[1] - right[1];
 }
 
-function insertCompletedHistoryItem(item, { reconcile = false } = {}) {
-  const wasAtBottom = isAtBottom();
+function insertCompletedHistoryItem(item, { reconcile = false, followBottom = isAtBottom() } = {}) {
+  const wasAtBottom = followBottom;
   const previousHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
-  const bubble = appendHistoryItem(item, fragment);
+  const bubble = promptOnlyHistory ? appendPromptOnlyHistoryItem(item, fragment) : appendHistoryItem(item, fragment);
+  if (!bubble) return null;
   const key = completedTurnKey(item);
-  const anchor = [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
+  let anchor = [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id], :scope > .prompt-only-history-item[data-msg-id]')]
     .find(existing => compareCompletedTurnKeys([
       existing.dataset.orderAt || existing.dataset.completedAt || existing.dataset.ts || '',
       Number(existing.dataset.msgId) || 0,
     ], key) > 0) || bottomSentinel;
+  if (anchor?.classList.contains('msg-thinking')) anchor = liveGroupElements(anchor)[0];
   const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
   messages.insertBefore(fragment, anchor || null);
+  restoreBootBannerPositions();
   // Snapshot rows reconcile the bounded HTTP history already on screen. They
   // are not newly completed responses, so revealing an older inserted row can
   // yank a refreshed transcript away from its newest message.
@@ -8620,11 +8633,12 @@ function insertPendingHistoryItem(item) {
   const previousHeight = messages.scrollHeight;
   const bubble = makeWipBubble(item);
   const key = [String(item.timestamp || ''), Number(item.id) || 0];
-  const anchor = [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
+  let anchor = [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
     .find(existing => compareCompletedTurnKeys([
       existing.dataset.orderAt || existing.dataset.completedAt || existing.dataset.ts || '',
       Number(existing.dataset.msgId) || 0,
     ], key) > 0) || bottomSentinel;
+  if (anchor?.classList.contains('msg-thinking')) anchor = liveGroupElements(anchor)[0];
   const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
   messages.insertBefore(bubble, anchor || null);
   if (wasAtBottom) scrollToRevealBubble(bubble);
@@ -8643,23 +8657,19 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, on
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
     if (data.status === 'error' && !String(data.content || '').trim()) return;
     onStored?.(data);
-    // Removing a finished wip bubble that sits above the viewport (e.g. another
-    // bubble is still streaming below where the user is reading) shrinks the
-    // content above without moving scrollTop, which visually yanks the view
-    // upward. Compensate before insertCompletedHistoryItem does its own
-    // (unrelated) compensation for the new item it inserts.
-    const wipRect = wipBubble.getBoundingClientRect();
-    const wipAboveViewport = wipRect.bottom <= messages.getBoundingClientRect().top;
+    const position = captureTranscriptPosition(wipBubble);
     wipBubble.remove();
-    if (wipAboveViewport) messages.scrollTop -= wipRect.height;
-    if (!shouldShowNewResponse(data)) return;
-    insertCompletedHistoryItem(data);
+    if (!shouldShowNewResponse(data)) {
+      restoreTranscriptPosition(position);
+      return;
+    }
+    insertCompletedHistoryItem(data, { followBottom: position.atBottom });
+    if (!position.atBottom) restoreTranscriptPosition(position);
     if (data.agent && !data.adhoc) refreshComposerSessionCount(data.topic || item.topic || 'default', data.agent);
     updateInContextMarkers();
     updatePinCount();
     if (pinPanel.classList.contains('open')) renderPinPanel();
     refreshAllRevertButtons();
-    if (isAtBottom()) scrollToBottom();
   } catch {} finally {
     // Local WS sends already refresh through their completion callbacks.
     // Discovered turns have no such owner now that agy active polling is off.
@@ -8838,6 +8848,7 @@ const realtimeV1 = (() => {
       }
       else if (frame.type === 'subscribed') {
         subscribed = true;
+        void reconcileRenderedHistory();
         for (const watch of watches.values()) watch.onAvailable?.();
         for (const command of commands.values()) {
           if (!command.sent) {
@@ -8888,7 +8899,7 @@ const realtimeV1 = (() => {
       socket = null;
       if (globalEnabled) {
         realtimeTransportMode.then(mode => {
-          if (mode === 'auto') releaseRealtimeProcessState();
+          if (mode !== 'websocket') releaseRealtimeProcessState();
         }).catch(() => {});
       }
       const unavailable = !subscribed;
@@ -8910,7 +8921,7 @@ const realtimeV1 = (() => {
     };
   };
 
-  const sendCommand = ({ type, payload, topic, agent = null, freshScope = false, timeoutMessage, unscoped = false, onLateResult = null }) => {
+  const sendCommand = ({ type, payload, topic, agent = null, freshScope = false, timeoutMessage, unscoped = false, onLateResult = null, reuseSubscription = false }) => {
     const requestId = window.crypto?.randomUUID?.()
       || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     const promise = new Promise((resolve, reject) => {
@@ -8940,7 +8951,14 @@ const realtimeV1 = (() => {
     });
     if (freshScope) needsSnapshot = true;
     connect();
-    if (socket?.readyState === WebSocket.OPEN) subscribe(freshScope);
+    if (socket?.readyState === WebSocket.OPEN) {
+      if (reuseSubscription && subscribed) {
+        const command = commands.get(requestId);
+        command.sent = true;
+        command.everSent = true;
+        socket.send(JSON.stringify(command.frame));
+      } else subscribe(freshScope);
+    }
     return promise;
   };
 
@@ -8977,6 +8995,11 @@ const realtimeV1 = (() => {
         subscribe(true);
         needsSnapshot = false;
       }
+    },
+    checkHistory(ids, filters = {}) {
+      return sendCommand({ type: 'history.check', payload: { ids, ...filters },
+        unscoped: true, freshScope: false, reuseSubscription: true,
+        timeoutMessage: 'History verification timed out.' });
     },
     start(payload, onLateResult) {
       return sendCommand({
@@ -9095,11 +9118,99 @@ async function cancelRealtimeMessage(msgId, topic = 'default', agent = null, sou
   return true;
 }
 
+// Verify exact rendered IDs: absence from a bounded lifecycle snapshot is not
+// proof of deletion. Never replace the whole transcript during recovery.
+let renderedHistoryCheckBusy = false;
+let renderedHistoryCheckAgain = false;
+let renderedHistoryCheckFailed = false;
+async function reconcileRenderedHistory() {
+  if (renderedHistoryCheckBusy) { renderedHistoryCheckAgain = true; return; }
+  if (document.hidden || currentView !== 'chat' || searchActive) return;
+  const rows = [...messages.querySelectorAll(':scope > .assistant.history-item[data-msg-id]:not(.msg-thinking), :scope > .prompt-only-history-item[data-msg-id]')];
+  if (!rows.length || !realtimeV1?.isActive()) return;
+  renderedHistoryCheckBusy = true;
+  const generation = historyGeneration;
+  try {
+    const batches = [];
+    for (let offset = 0; offset < rows.length; offset += 100) batches.push(rows.slice(offset, offset + 100));
+    for (let index = 0; index < batches.length; index++) {
+      const batch = batches[index];
+      const snapshots = new Map(batch.map(row => [row, row._historySnapshot]));
+      const result = await realtimeV1.checkHistory(batch.map(row => Number(row.dataset.msgId)), {
+        bookmarked: bookmarkOnlyHistory, marked_bad: badOnlyHistory,
+      });
+      if (generation !== historyGeneration || searchActive || currentView !== 'chat' || document.hidden) return;
+      if (result.error === 'history_result_too_large' && batch.length > 1) {
+        const middle = Math.ceil(batch.length / 2);
+        batches.splice(index + 1, 0, batch.slice(0, middle), batch.slice(middle));
+        continue;
+      }
+      if (!result.ok || !Array.isArray(result.items)) throw new Error(result.error || 'Invalid history result');
+      const items = new Map(result.items.map(item => [Number(item.id), item]));
+      // Capture after the await so a reader's intervening navigation wins.
+      const position = captureTranscriptPosition();
+      let changed = false;
+      for (const row of batch) {
+        if (row.parentNode !== messages || row._historySnapshot !== snapshots.get(row)) continue;
+        const item = items.get(Number(row.dataset.msgId));
+        if (item && ((item.status === 'pending' && !row.classList.contains('prompt-only-history-item')) ||
+            row._historySnapshot === historySnapshot(item))) continue;
+        // Seed locally streamed completions without replacing their presentation.
+        if (item && row._historySnapshot === undefined && row._historyContent === item.content) {
+          row._historySnapshot = historySnapshot(item);
+          continue;
+        }
+        changed = true;
+        // Only remove this response's ancillary rows, never its live prompt or
+        // adjacent banners, date dividers, pagination edges, or another turn.
+        let next = row.nextElementSibling;
+        while (next && next.matches('.stats, .msg-time, .tool-block-history')) {
+          const following = next.nextElementSibling;
+          next.remove();
+          next = following;
+        }
+        row.remove();
+        if (item && itemMatchesFilter(item, historyFilter)) {
+          insertCompletedHistoryItem(item, { reconcile: true, followBottom: false });
+        }
+      }
+      if (changed) {
+        refreshDateDividers();
+        restoreTranscriptPosition(position);
+        updateScrollButtonVisibility();
+      }
+    }
+    if (renderedHistoryCheckFailed) {
+      renderedHistoryCheckFailed = false;
+      connectionLatest.hidden = true;
+      connectionMessage('reachable', 'Squid reachable');
+    }
+  } catch {
+    if (generation !== historyGeneration || searchActive || currentView !== 'chat' || document.hidden) return;
+    // Leave loaded content intact and provide an explicit recovery action.
+    renderedHistoryCheckFailed = true;
+    connectionLatest.hidden = false;
+    connectionMessage('waiting', 'History recovery unavailable · jump to latest to refresh');
+  } finally {
+    renderedHistoryCheckBusy = false;
+    if (renderedHistoryCheckAgain) {
+      renderedHistoryCheckAgain = false;
+      void reconcileRenderedHistory();
+    }
+  }
+}
+
 const realtimeDiscoveries = new Set();
 
 async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
   const msgId = Number(message.id);
-  if (!Number.isFinite(msgId) || messages.querySelector(`[data-msg-id="${msgId}"]`) || realtimeDiscoveries.has(msgId)) return;
+  if (!Number.isFinite(msgId)) return;
+  const existing = messages.querySelector(`:scope > .assistant[data-msg-id="${msgId}"], :scope > .prompt-only-history-item[data-msg-id="${msgId}"]`);
+  if (existing) {
+    if (!existing.classList.contains('msg-thinking')) void reconcileRenderedHistory();
+    return;
+  }
+  if (realtimeDiscoveries.has(msgId)) return;
   realtimeDiscoveries.add(msgId);
   try {
     let item = null;
@@ -9116,14 +9227,13 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
     }
     if (!item) return;
     if (messages.querySelector(`[data-msg-id="${msgId}"]`) || !shouldShowNewResponse(item)) return;
-    if (item.status === 'pending') {
+    if (item.status === 'pending' && !promptOnlyHistory) {
       const bubble = insertPendingHistoryItem(item);
       reconnectPendingItem(item, bubble);
     } else if (item.status !== 'error' || String(item.content || '').trim()) {
       insertCompletedHistoryItem(item, { reconcile });
       if (item.agent && !item.adhoc) refreshComposerSessionCount(item.topic || 'default', item.agent);
     }
-    if (isAtBottom()) scrollToBottom();
   } catch {
   } finally {
     realtimeDiscoveries.delete(msgId);
@@ -9144,7 +9254,6 @@ async function attachFlowStep(msgId) {
     } else {
       insertCompletedHistoryItem(data);
     }
-    scrollToBottom();
   } catch {}
 }
 
@@ -9236,6 +9345,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
 
   const updatePreview = () => {
     if (!live) return;
+    const wasAtBottom = isAtBottom();
     const text = (statusBuf ? statusBuf.trimEnd() + (raw ? '\n\n' : '') : '') + raw;
     if (text.trim()) {
       waitingForUpdates = false;
@@ -9251,12 +9361,15 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     }
     live.scrollTop = live.scrollHeight;
     updateThinkingHeightButton(wipBubble);
+    if (wasAtBottom) scrollToBottom(true);
   };
 
   if (item.content && live) {
+    const wasAtBottom = isAtBottom();
     if (loader?.parentNode) loader.remove();
     live.textContent = item.content;
     updateThinkingHeightButton(wipBubble);
+    if (wasAtBottom) scrollToBottom(true);
   }
 
   if (useWebSocket) {
@@ -9517,6 +9630,7 @@ async function pollPendingItem(item, wipBubble, onStored = null, onSettled = nul
         // the .thinking-live container scrolls once it exceeds its max-height.
         const live = wipBubble.querySelector('.thinking-live');
         if (live) {
+          const wasAtBottom = isAtBottom();
           const loader = live.querySelector('.loader');
           if (loader) loader.remove();
           let stream = live.querySelector('.thinking-stream');
@@ -9528,6 +9642,7 @@ async function pollPendingItem(item, wipBubble, onStored = null, onSettled = nul
           stream.textContent = data.content;
           live.scrollTop = live.scrollHeight;
           updateThinkingHeightButton(wipBubble);
+          if (wasAtBottom) scrollToBottom(true);
         }
       }
     } catch {}
@@ -9884,6 +9999,7 @@ function appendPromptOnlyHistoryItem(item, container) {
   if (item.agent) bubble.dataset.agent = item.agent;
   if (item.session_id) bubble.dataset.sessionId = item.session_id;
   if (item.timestamp) bubble.dataset.ts = item.timestamp;
+  if (item.completed_at || item.timestamp) bubble.dataset.orderAt = item.completed_at || item.timestamp;
   if (item.id) {
     const openBtn = document.createElement('button');
     openBtn.type = 'button';
@@ -9906,12 +10022,60 @@ function appendPromptOnlyHistoryItem(item, container) {
 }
 
 
+// Preserve a visible, surviving row across removal and insertion. Saving only
+// scrollTop loses the reading position when content above the viewport moves.
+function captureTranscriptPosition(replacedBubble) {
+  const viewport = messages.getBoundingClientRect();
+  let anchor = [...messages.children].find(el => {
+    if (el === replacedBubble) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.height > 0 && rect.bottom > viewport.top && rect.top < viewport.bottom;
+  });
+  // Footer rows have no ID; use their owning message as the durable anchor.
+  if (anchor && !anchor.dataset.msgId && !anchor.classList.contains('boot-banner')) {
+    let previous = anchor.previousElementSibling;
+    while (previous && previous !== replacedBubble && !previous.dataset.msgId &&
+           !previous.classList.contains('boot-banner')) previous = previous.previousElementSibling;
+    if (previous && previous !== replacedBubble && previous.dataset.msgId) anchor = previous;
+  }
+  return {
+    atBottom: isAtBottom(),
+    top: messages.scrollTop,
+    anchor,
+    msgId: anchor?.dataset.msgId,
+    role: anchor?.classList.contains('assistant') ? 'assistant'
+      : anchor?.classList.contains('user') ? 'user' : null,
+    anchorTop: anchor?.getBoundingClientRect().top,
+  };
+}
+
+function restoreTranscriptPosition(position) {
+  if (position.atBottom) {
+    scrollToBottom(true);
+    return;
+  }
+  const anchor = position.anchor?.parentNode === messages ? position.anchor
+    : position.msgId ? messages.querySelector(`:scope > ${position.role ? `.msg.${position.role}` : ''}[data-msg-id="${position.msgId}"]`) : null;
+  if (anchor) {
+    messages.scrollTop += anchor.getBoundingClientRect().top - position.anchorTop;
+  } else {
+    // The message may have been deleted. Keep the nearest valid offset;
+    // only an explicit latest/refresh action should jump to the bottom.
+    messages.scrollTop = position.top;
+  }
+  messagesPinnedToBottom = isAtBottom();
+}
+
 function isAtBottom() {
-  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 150;
+  // Allow only subpixel rounding, so scrolling up opts out of following.
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 1;
 }
 
 function scrollToBottom(force = false) {
-  if (force || isAtBottom()) messages.scrollTop = messages.scrollHeight;
+  if (force || isAtBottom()) {
+    messages.scrollTop = messages.scrollHeight;
+    messagesPinnedToBottom = true;
+  }
 }
 
 // Following a new bubble to the literal bottom skips past its own content
@@ -15651,7 +15815,9 @@ function initPullToRefresh() {
     // Ignore touches starting in the Android system gesture zone
     if (y > window.innerHeight - GESTURE_ZONE) return;
     startY = y;
-    startedAtBottom = isAtBottom();
+    // Gesture recognition tolerates being near the edge; message following
+    // uses the strict bottom check independently.
+    startedAtBottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 150;
   }, { passive: true });
 
   messages.addEventListener('touchend', (e) => {
@@ -15938,10 +16104,52 @@ function bootLogoHtml(bubbleText) {
   return `<div class="boot-logo-lockup boot-logo-talking-squid">${logo}${bubble}</div>`;
 }
 
-async function appendBootBannerAtBottom(el) {
+// Keep client-only banners between the same turns when server history is rebuilt.
+function rememberBootBannerPositions() {
+  const rows = [...messages.children];
+  rows.forEach((banner, index) => {
+    if (!banner.classList.contains('boot-banner')) return;
+    const before = rows.slice(0, index).map(el => el.dataset.msgId).filter(Boolean);
+    const after = rows.slice(index + 1).map(el => el.dataset.msgId).filter(Boolean);
+    if (before.length || after.length || !banner._historyNeighbors) {
+      banner._historyNeighbors = { before, after };
+    }
+  });
+}
+
+function restoreBootBannerPositions() {
+  for (const banner of messages.querySelectorAll(':scope > .boot-banner')) {
+    const neighbors = banner._historyNeighbors;
+    if (!neighbors) continue;
+    const following = neighbors.after.map(id => messages.querySelector(`:scope > [data-msg-id="${id}"]`)).find(Boolean);
+    if (following) {
+      const anchor = following.classList.contains('msg-thinking')
+        ? liveGroupElements(following)[0] : following;
+      messages.insertBefore(banner, anchor);
+      continue;
+    }
+    const previousId = [...neighbors.before].reverse().find(id => messages.querySelector(`:scope > [data-msg-id="${id}"]`));
+    if (!previousId) continue;
+    const matches = messages.querySelectorAll(`:scope > [data-msg-id="${previousId}"]`);
+    let previous = matches[matches.length - 1];
+    // Include this turn's timestamp, stats and diff blocks, and prior banners.
+    while (previous.nextElementSibling && previous.nextElementSibling !== banner &&
+           !previous.nextElementSibling.dataset.msgId &&
+           !previous.nextElementSibling.classList.contains('msg')) {
+      previous = previous.nextElementSibling;
+    }
+    previous.after(banner);
+  }
+}
+
+async function appendBootBannerAtBottom(el, { followBottom = false, beforePending = false } = {}) {
   await initialHistoryReady;
-  const shouldFollow = isAtBottom();
-  messages.appendChild(el);
+  const shouldFollow = followBottom || isAtBottom();
+  const live = beforePending
+    ? messages.querySelector(':scope > .msg.user:not(.history-item), :scope > .msg-thinking:not(.msg-thinking-done)') : null;
+  const anchor = live?.classList.contains('msg-thinking') ? liveGroupElements(live)[0] : live;
+  messages.insertBefore(el, anchor);
+  rememberBootBannerPositions();
   if (!shouldFollow) return;
 
   messages.scrollTop = messages.scrollHeight;
@@ -15993,7 +16201,7 @@ async function showBootBanner() {
     el.className = 'boot-banner';
     el.innerHTML = bootLogoHtml(bubbleText) +
       `<div class="boot-meta">AgentSquid${bootTime ? `  ·  started ${bootTime}` : ''}</div>`;
-    await appendBootBannerAtBottom(el);
+    await appendBootBannerAtBottom(el, { beforePending: true });
 
     const anyAvailable = (data.harnesses || []).some(h => h.installed);
     if (!anyAvailable) {
@@ -20171,8 +20379,8 @@ updateComposerActionTitles();
 updateActiveQuotaGauge();
 initMobileViewNavigation();
 initPullToRefresh();
-Promise.all([realtimeTransportMode, initialHistoryReady]).then(([mode]) => {
-  if (mode !== 'sse') realtimeV1?.enableGlobal(discoverRealtimeTurn);
+Promise.all([realtimeTransportMode, initialHistoryReady]).then(() => {
+  realtimeV1?.enableGlobal(discoverRealtimeTurn);
 }).catch(() => {});
 // Discover processes that survived a refresh; polling stops again when idle.
 startProcPoll();
@@ -20225,7 +20433,7 @@ function recoverForegroundState() {
   }).catch(() => {});
   if (_activePollImmediate) _activePollImmediate();
   realtimeV1?.resume();
-  void syncConnectionHistory();
+  void checkConnectionHealth();
   recoverPendingBubbles();
   startProcPoll();
   if (stickyChip?.route && !stickyChip.broadcastAgents) {
@@ -20316,6 +20524,11 @@ new ResizeObserver(() => {
   document.documentElement.style.setProperty('--topbar-height', `${topbar.getBoundingClientRect().height}px`);
 }).observe(topbar);
 function connectionMessage(state, text) {
+  if (state === 'reachable' && renderedHistoryCheckFailed) {
+    state = 'waiting';
+    text = 'History recovery unavailable · jump to latest to refresh';
+  }
+  const position = captureTranscriptPosition();
   // Stop startup feedback before a terminal result is mapped to a view error.
   if (['ok', 'reachable', 'lost', 'load-error'].includes(state)) clearTimeout(connectionStartupTimer);
   if (state === 'ok' || state === 'reachable') {
@@ -20329,7 +20542,7 @@ function connectionMessage(state, text) {
     clearTimeout(connectionSnackbarTimer);
     connectionSnackbar.hidden = true;
   }
-  const needsAction = state === 'lost' || state === 'load-error' || (state === 'waiting' && connectionHadLoss);
+  const needsAction = state === 'lost' || state === 'load-error' || (state === 'waiting' && (connectionHadLoss || renderedHistoryCheckFailed));
   connectionBanner.hidden = !(needsAction || (state === 'sync' && (connectionHadLoss || (connectionStartupSlow && !connectionLastSync))));
   document.getElementById('connection-retry').hidden = state !== 'lost' && state !== 'load-error';
   if (state === 'ok' || state === 'reachable') {
@@ -20341,6 +20554,22 @@ function connectionMessage(state, text) {
       connectionSnackbarTimer = setTimeout(() => { connectionSnackbar.hidden = true; }, 4000);
     }
     connectionHadLoss = false;
+  }
+  restoreTranscriptPosition(position);
+}
+// Automatic recovery is owned by realtime replay/snapshots. A health probe
+// updates connectivity feedback without replacing the reader's transcript.
+async function checkConnectionHealth() {
+  if (document.hidden) return;
+  try {
+    const response = await fetch('/health', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error('Host unavailable');
+    await response.json();
+    void loadPromptHistory();
+    void reconcileRenderedHistory();
+    if (currentView !== 'chat' || !resolveInitialHistoryReady) connectionMessage('reachable', 'Squid reachable');
+  } catch {
+    connectionMessage('lost', 'Squid unreachable · showing previously loaded content');
   }
 }
 async function syncConnectionHistory(forceLatest = false, showRefreshBanner = false) {
@@ -20387,7 +20616,10 @@ async function syncConnectionHistory(forceLatest = false, showRefreshBanner = fa
     const pageMembership = JSON.stringify([
       params.toString(), promptOnlyHistory, latest.items.map(item => Number(item.id)),
     ]);
-    const changed = (connectionHistoryPage !== null && connectionHistoryPage !== pageMembership) || latest.items.some(item => {
+    const latestIds = new Set(latest.items.map(item => Number(item.id)));
+    const removed = [...messages.querySelectorAll(':scope > .assistant.history-item[data-msg-id]:not(.msg-thinking)')]
+      .some(row => row._historySnapshot !== undefined && !latestIds.has(Number(row.dataset.msgId)));
+    const changed = removed || (connectionHistoryPage !== null && connectionHistoryPage !== pageMembership) || latest.items.some(item => {
       // A turn's prompt and response share an ID. Compare the rendered snapshot,
       // rather than the first matching node (usually the prompt).
       const existing = Array.from(messages.querySelectorAll(`[data-msg-id="${Number(item.id)}"]`))
@@ -20414,11 +20646,12 @@ async function syncConnectionHistory(forceLatest = false, showRefreshBanner = fa
       return;
     }
     // Avoid rebuilding the transcript on each healthy heartbeat.
-    if ((forceLatest || changed || !connectionLastSync) && !await resetHistoryToLatest({ data: latest })) {
+    if ((forceLatest || changed || !connectionLastSync) && !await resetHistoryToLatest({ data: latest, followLatest: forceLatest })) {
       throw new Error('History sync failed');
     }
     connectionHistoryPage = pageMembership;
     connectionLastSync = Date.now();
+    renderedHistoryCheckFailed = false;
     connectionLatest.hidden = true;
     connectionMessage('ok', 'Up to date');
     recoverPendingBubbles();
@@ -20428,7 +20661,11 @@ async function syncConnectionHistory(forceLatest = false, showRefreshBanner = fa
       el.setAttribute('role', 'status');
       el.innerHTML = bootLogoHtml('History refreshed') +
         '<div class="boot-meta">AgentSquid · refreshed just now</div>';
-      await appendBootBannerAtBottom(el);
+      // An explicit refresh follows its logo even if sync status/layout changes
+      // moved the bottom between resetting history and inserting the banner.
+      await appendBootBannerAtBottom(el, { followBottom: true });
+    } else if (forceLatest) {
+      scrollToBottom(true);
     }
   } catch {
     connectionLatest.hidden = true;
@@ -20488,15 +20725,15 @@ connectionMethod.onchange = () => {
   updateConnectionAdvice();
 };
 updateConnectionAdvice();
-window.addEventListener('online', () => syncConnectionHistory());
+window.addEventListener('online', () => checkConnectionHealth());
 window.addEventListener('offline', () => {
   connectionLatest.hidden = true;
   connectionMessage('lost', currentView !== 'chat' ? 'Network unavailable · showing previously loaded content' : connectionLastSync ? 'Network unavailable · showing previously loaded history' : 'Network unavailable · connect to load history');
   // Local servers and tunnels may still be reachable despite this browser hint.
-  void syncConnectionHistory();
+  void checkConnectionHealth();
 });
-setInterval(() => { void syncConnectionHistory(); }, 15000);
-initialHistoryReady.then(() => syncConnectionHistory());
+setInterval(() => { void checkConnectionHealth(); }, 15000);
+initialHistoryReady.then(() => checkConnectionHealth());
 
 // Keep fast refreshes silent, including while initial history is loading.
 connectionStartupTimer = setTimeout(() => {
