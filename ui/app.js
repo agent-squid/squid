@@ -15657,7 +15657,7 @@ function initPullToRefresh() {
   messages.addEventListener('touchend', (e) => {
     if (!startedAtBottom || !startY) return;
     const dy = startY - e.changedTouches[0].clientY; // positive = finger moved up
-    if (dy > REFRESH_DRAG_THRESHOLD) void syncConnectionHistory(true);
+    if (dy > REFRESH_DRAG_THRESHOLD) void syncConnectionHistory(true, true);
     startY = 0;
   }, { passive: true });
 }
@@ -20343,7 +20343,7 @@ function connectionMessage(state, text) {
     connectionHadLoss = false;
   }
 }
-async function syncConnectionHistory(forceLatest = false) {
+async function syncConnectionHistory(forceLatest = false, showRefreshBanner = false) {
   if (connectionSyncBusy || document.hidden) return;
   connectionSyncBusy = true;
   const generation = historyGeneration;
@@ -20422,6 +20422,14 @@ async function syncConnectionHistory(forceLatest = false) {
     connectionLatest.hidden = true;
     connectionMessage('ok', 'Up to date');
     recoverPendingBubbles();
+    if (showRefreshBanner) {
+      const el = document.createElement('div');
+      el.className = 'boot-banner';
+      el.setAttribute('role', 'status');
+      el.innerHTML = bootLogoHtml('History refreshed') +
+        '<div class="boot-meta">AgentSquid · refreshed just now</div>';
+      await appendBootBannerAtBottom(el);
+    }
   } catch {
     connectionLatest.hidden = true;
     connectionMessage('lost', currentView !== 'chat' ? 'Squid unreachable · showing previously loaded content' : connectionLastSync ? 'Connection lost · showing previously loaded history' : 'Squid unreachable · connect to load history');
