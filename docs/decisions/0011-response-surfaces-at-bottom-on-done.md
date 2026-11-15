@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-05-26
-updated: 2026-08-14
+updated: 2026-11-15
 ---
 # ADR-0011: Completed Response Bubbles Surface at the Bottom of the Chat
 
@@ -130,3 +130,22 @@ Consequences:
   project, and running it ad hoc via `--browser=webkit` fails on unrelated pre-existing
   route-mocking issues (confirmed against an untouched existing test, not this change) — so
   Safari itself still cannot be re-verified end-to-end from this environment
+
+
+## Update 2026-11-15: recovery is not a new completion
+
+Bottom placement/reveal applies to a genuinely new completion. An existing
+response refreshed because quota, stats, annotations or stored content changed
+must retain its position relative to newer prompt/WIP groups. Recovery now
+replaces that presentation at its original sibling boundary, then restores
+following or the reading anchor after synchronous footer/tool/divider changes.
+It does not send the old row through `insertCompletedHistoryItem`.
+
+This corrects a reproduced case where submitting a new prompt and then updating
+an older response's quota metadata moved the older response below the new WIP,
+so bottom-following hid the submitted prompt. Regressions exercise both local
+submission and a recovered live group. See the
+[stabilization plan](../plans/chat-scroll-stability-and-ws-migration.md) for
+implementation status and remaining gates, and proposed ADR-0056 for the fuller
+scroll-intent/footer policy. This update does not declare that proposal accepted
+or all asynchronous layout cases resolved.

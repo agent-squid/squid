@@ -1,6 +1,7 @@
 ---
-status: planned
+status: in-progress
 date: 2026-11-15
+updated: 2026-11-15
 ---
 # Chat scroll stability, then WS-only migration
 
@@ -8,14 +9,76 @@ date: 2026-11-15
 
 The user wants delayed automatic scroll movement fixed and every Chat-tab
 application operation moved to WS. The recommended sequence is essential fixes
-first, full transport migration second. This turn records that plan only;
-implementation and publication have not been performed by this plan.
+first, full transport migration second. Targeted stabilization has been
+implemented and tested as recorded below. Full WS migration remains pending;
+this document does not authorize publication.
 
 Read the current session's workspace instructions before editing. Squid isolated
 worktree paths change each turn: use the code roots provided by the new session,
 not paths from old messages. Do not edit backing checkouts during an edit turn.
 Publication requires a separate review and the applicable Squid publication/Git
 workflow; this plan is not publication authorization.
+
+## Current implementation and next steps (2026-11-15)
+
+Phase 1 is partially implemented; do not restart from the original investigation
+below or treat all validation gates as complete. The latest ordering fix is in
+`ui/app.js`; PWA asset versions are `20261115-043`.
+
+Implemented:
+
+- Automatic startup, foreground, view-switch, network, and 15-second checks no
+  longer fetch/rebuild HTTP history. They still probe HTTP `/health`, retry
+  failed prompt-history bootstrap, and trigger bounded WS verification.
+- Local `history.check` verifies exact rendered IDs, including bookmark/bad
+  annotation membership and prompt-only rows. It uses correlated command
+  replies, validates inputs, splits oversized batches, rejects stale-scope
+  results, and captures reading position after each reply. A failed check or
+  single oversized row offers explicit refresh. Snapshot absence alone is not
+  deletion evidence. SSE turn streaming also enables WS lifecycle discovery.
+- Captured bottom-following survives restoration. History reset and older-page
+  compensation run after date dividers; WIP updates preserve following or
+  scrollback. Explicit filter/reload loads its first page even when retained
+  live rows leave the sentinel offscreen.
+- Existing-row recovery replaces a response and its ancillary rows at their
+  original sibling boundary. It must not pass metadata-only updates through
+  new-completion sorting: that reproduced `[old response, new prompt, new WIP]`
+  becoming `[new prompt, new WIP, old response]`, hiding the submitted prompt
+  when bottom-following resumed. Prompt-only replacements retain their renderer.
+- Newly completed/discovered rows still use completion-time ordering. History
+  insertion around live turns preserves completed order when IDs disagree.
+- A frontend/backend mismatch was confirmed separately: the old running backend
+  rejected `history.check` as `unsupported_type` while `/health` succeeded.
+  Restarting it resolved that probe. Host reachability is not proof of protocol
+  compatibility or successful history recovery.
+
+Latest validation: 18 Node UI tests, JavaScript syntax checking, and 75 browser
+checks passed across connection recovery, thinking/scroll, and pagination. The
+browser checks include local submission followed by two quota-metadata updates
+to the older response, a recovered live group, prompt/WIP identity and visibility,
+footer counts, bottom gap, filtered recovery, and prompt-only reading position.
+Backend validation and earlier reproductions are recorded in the
+[postmortem](../postmortems/2026-11-15-transcript-scroll-drift.md).
+
+Next work:
+
+1. Complete the remaining Phase 1 gates: whole-presentation fit (bubble plus
+   footer/tools/padding), late asynchronous layout, once-only tall-response
+   reveal, reader intent beyond instantaneous geometry, date-boundary/newer
+   pagination, and WIP expansion-control reachability. Existing coverage is
+   evidence for specific paths, not universal completion of this policy.
+2. Keep the older-response-after-new-submission regression as a release gate.
+   The screenshot matches the reproduced ordering defect, but its exact
+   production metadata-trigger field was not captured. The original delayed
+   scroll recording also lacks a conclusive production callback trace.
+3. Execute Phase 2's request inventory and migration. HTTP health/bootstrap,
+   history/search/navigation, status lookups and other application callers,
+   plus SSE compatibility, remain migration debt. `history.check` is local;
+   Shore recognizes but denies it under the existing `dashboard.read.v1` grant.
+   Remote parity requires explicit capability design without widening grants.
+4. Review the final changes before any separately authorized publication.
+   ADR-0056 remains proposed; incident closure and WS-only completion are not
+   claimed by these fixes.
 
 ## Read first
 
@@ -32,7 +95,7 @@ workflow; this plan is not publication authorization.
 - [ADR-0041](../decisions/0041-normalized-client-transcript-store-and-reconciler.md)
   is superseded: do not revive the abandoned reconciler as an assumed requirement.
 
-## Current findings and limits
+## Original investigation findings and limits
 
 The final response initially appears with its footer visible, then seconds later
 moves without reader input and displays the bottom button. WIP output can also
@@ -54,7 +117,9 @@ Confirmed investigations, with numerical results in the postmortem:
 
 The untouched recording strongly matches delayed history replacement, but no
 production callback trace has conclusively attributed its exact transition.
-The earlier passing tests do not establish that these defects are fixed.
+The tests that predated stabilization did not establish that these defects
+were fixed. See the implementation and validation record above for subsequent
+fixes; the original production transition remains untraced.
 
 `syncConnectionHistory()` and its unconditional 15-second timer were introduced
 in commit `2f382b8` on 2026-11-15. WS already owns live lifecycle delivery,
@@ -62,7 +127,9 @@ cursor replay, and snapshot recovery. HTTP history polling duplicates that role.
 
 ## Phase 1: essential stabilization
 
-Keep this change reviewable separately from a protocol-wide migration.
+Keep this change reviewable separately from a protocol-wide migration. The
+numbered items below are the original Phase 1 scope; use the status above to
+distinguish implemented work from remaining verification.
 
 1. Read current code before making changes; check for intervening fixes.
    Relevant areas in `ui/app.js` are `syncConnectionHistory`,

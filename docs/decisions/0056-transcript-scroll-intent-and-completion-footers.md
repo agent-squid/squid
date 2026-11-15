@@ -1,6 +1,7 @@
 ---
 status: proposed
 date: 2026-11-15
+updated: 2026-11-15
 ---
 # ADR-0056: Transcript scroll intent and completion footers
 
@@ -15,7 +16,8 @@ rendering paths.
 The [ongoing scroll-drift investigation](../postmortems/2026-11-15-transcript-scroll-drift.md)
 contains the incident reports, implementation analysis, reproductions, and
 coverage gaps. This ADR specifies proposed behavior; it does not claim that the
-runtime implements it or that the incident has been resolved.
+runtime fully implements it or that the incident has been resolved. Targeted
+implementation progress is recorded below; the ADR remains proposed.
 
 ## Proposed decision
 
@@ -80,7 +82,16 @@ intent. Use one documented tolerance for bottom-following decisions; gesture
 recognition may retain a separate, larger edge threshold.
 
 Ordering and scrolling are separate concerns. Preserve completed order by
-`(completed_at, msg_id)` independently of any scroll adjustment. Scroll policy must not change the authoritative completion order.
+`(completed_at, msg_id)` independently of any scroll adjustment. Scroll policy
+must not change the authoritative completion order.
+
+Distinguish **new completion placement** from **existing-row recovery**. A quota,
+stats, footer, annotation, or stored-content refresh is not a new completion.
+Replace an existing presentation at its original sibling boundary, preserving
+its position relative to newer live prompt/WIP groups and client-only banners.
+Do not remove it and feed it through the new-completion sorter. Restore position
+only after its replacement footer/tool rows and date dividers are settled.
+The same invariant applies to normal, filtered, and prompt-only history.
 
 ## Alternatives considered
 
@@ -111,4 +122,27 @@ policy and browser coverage across the existing DOM paths.
 The proposal retains ADR-0011's top-down reading behavior for tall responses.
 It does not require reviving the abandoned reconciler in
 [ADR-0041](0041-normalized-client-transcript-store-and-reconciler.md).
-Acceptance and runtime implementation remain outstanding.
+Acceptance and full runtime implementation remain outstanding.
+
+## Implementation progress (2026-11-15)
+
+The [stabilization plan](../plans/chat-scroll-stability-and-ws-migration.md)
+and [postmortem](../postmortems/2026-11-15-transcript-scroll-drift.md) track
+implemented paths and unresolved gates. Current code preserves captured
+bottom-following, restores after synchronous history decorations, verifies
+rendered rows through bounded local WS queries, and replaces existing rows in
+place. Bookmark/bad and prompt-only recovery are covered. Automatic HTTP
+history rebuilds have been removed; HTTP health checks and other HTTP/SSE
+application traffic remain pending ADR-0040 migration.
+
+The latest browser reproduction changed only an older response's quota metadata
+after actual submission. Recovery incorrectly moved that response below the new
+prompt/WIP. The correction preserves the original sibling boundary. Tests cover
+both fresh local submission and a recovered live group, repeated metadata
+updates, prompt/WIP identity, visibility, footer counts and bottom gap. Latest
+validation passed 18 Node UI tests and 75 browser checks, plus JS syntax checking.
+
+These targeted fixes do not establish complete footer-inclusive fit measurement,
+reader intent tracking across every asynchronous layout path, WIP control
+reachability, or incident closure. The precise production callback/metadata
+sequence remains untraced. Retain those acceptance gates until demonstrated.

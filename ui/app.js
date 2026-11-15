@@ -8381,31 +8381,7 @@ function historySnapshot(item) {
     ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
 }
 
-function appendHistoryItem(item, container) {
-  if (item.source === 'monitor') return appendMonitorItem(item, container);
-  const lb = item.stats?.lookback ?? 0;
-  const asstBubble = document.createElement('div');
-  asstBubble.className = 'msg assistant history-item';
-  asstBubble._historySnapshot = historySnapshot(item);
-  const nativeShell = item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!');
-  if (nativeShell) asstBubble.classList.add('shell-result');
-  if (item.id) asstBubble.dataset.msgId = String(item.id);
-  asstBubble.dataset.topic = item.topic || 'default';
-  if (item.agent) asstBubble.dataset.agent = item.agent;
-  if (item.session_id) asstBubble.dataset.sessionId = item.session_id;
-
-  const asstHeader = document.createElement('div');
-  asstHeader.className = 'response-header';
-  const asstLabel = item.agent || item.backend;
-  const asstTag = makeTopicTag(item.topic || 'default', asstLabel, { clickable: true, adhoc: !!item.adhoc, lookback: lb, backend: item.backend || null });
-  const asstHeaderText = document.createElement('span');
-  asstHeaderText.className = 'response-header-text';
-  asstHeaderText.appendChild(asstTag);
-  asstHeaderText.appendChild(document.createTextNode('  '));
-  const { promptToggle, promptFullDiv } = makeHistoryPromptToggle(item.prompt);
-  asstHeaderText.appendChild(promptToggle);
-  asstHeader.appendChild(asstHeaderText);
-
+function makeHistoryContextControl(item, nativeShell) {
   const _pc = (() => {
     try {
       const v = JSON.parse(item.prompt_context || 'null');
@@ -8451,6 +8427,35 @@ function appendHistoryItem(item, container) {
   ctxSpan.dataset.hasTrace = nativeShell ? 'false' : (_hasTraceContent(item.status_raw, item.context, item.content || '') ? 'true' : 'false');
   if (nativeShell) setShellResultMetadata(ctxSpan, item.content || '');
   ctxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(ctxSpan); });
+  return ctxSpan;
+}
+
+function appendHistoryItem(item, container) {
+  if (item.source === 'monitor') return appendMonitorItem(item, container);
+  const lb = item.stats?.lookback ?? 0;
+  const asstBubble = document.createElement('div');
+  asstBubble.className = 'msg assistant history-item';
+  asstBubble._historySnapshot = historySnapshot(item);
+  const nativeShell = item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!');
+  if (nativeShell) asstBubble.classList.add('shell-result');
+  if (item.id) asstBubble.dataset.msgId = String(item.id);
+  asstBubble.dataset.topic = item.topic || 'default';
+  if (item.agent) asstBubble.dataset.agent = item.agent;
+  if (item.session_id) asstBubble.dataset.sessionId = item.session_id;
+
+  const asstHeader = document.createElement('div');
+  asstHeader.className = 'response-header';
+  const asstLabel = item.agent || item.backend;
+  const asstTag = makeTopicTag(item.topic || 'default', asstLabel, { clickable: true, adhoc: !!item.adhoc, lookback: lb, backend: item.backend || null });
+  const asstHeaderText = document.createElement('span');
+  asstHeaderText.className = 'response-header-text';
+  asstHeaderText.appendChild(asstTag);
+  asstHeaderText.appendChild(document.createTextNode('  '));
+  const { promptToggle, promptFullDiv } = makeHistoryPromptToggle(item.prompt);
+  asstHeaderText.appendChild(promptToggle);
+  asstHeader.appendChild(asstHeaderText);
+
+  const ctxSpan = makeHistoryContextControl(item, nativeShell);
   asstHeader.appendChild(ctxSpan);
 
   asstBubble.appendChild(asstHeader);
@@ -8592,6 +8597,8 @@ function makeWipBubble(item) {
   const { promptToggle, promptFullDiv } = makeHistoryPromptToggle(item.prompt);
   headerText.appendChild(promptToggle);
   header.appendChild(headerText);
+  const nativeShell = item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!');
+  header.appendChild(makeHistoryContextControl(item, nativeShell));
   bubble.appendChild(header);
   bubble.appendChild(promptFullDiv);
   addLoader(content);

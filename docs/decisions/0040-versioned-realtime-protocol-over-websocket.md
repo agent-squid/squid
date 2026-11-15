@@ -138,6 +138,35 @@ reconciliation requirements that are not wire-protocol concerns. Its failure,
 impact, and required migration gates are documented in the
 [WebSocket UI migration postmortem](../postmortems/2026-08-12-websocket-ui-regression.md).
 
+### Stabilization implementation status (2026-11-15)
+
+The [scroll/WS migration plan](../plans/chat-scroll-stability-and-ws-migration.md)
+records targeted stabilization, not completion of the sole-transport decision:
+
+- Automatic HTTP history rebuilds were removed from startup, foreground,
+  network recovery and the periodic check. HTTP `/health` still runs every
+  15 seconds and on recovery; successful reachability is separate from history
+  recovery and protocol compatibility. Other HTTP/SSE Chat callers remain.
+- Local WS `history.check` is a bounded, correlated read for up to 100 exact
+  rendered IDs, with optional bookmark/bad filters. Oversized batches split;
+  a single oversized row or failed check exposes explicit refresh. Pending
+  prompt-only rows participate without attaching response streams. See the
+  [protocol reference](../realtime-protocol-v1.md#history-boundary) for its schema.
+- Existing-row verification preserves row position relative to live groups;
+  metadata recovery must not invoke new-completion placement. New completions
+  retain their own ordering/reveal semantics. SSE turn streaming also uses the
+  WS lifecycle feed for discovery during the transition.
+- Shore knows the query type but its existing `dashboard.read.v1` capability
+  denies it. No grant was widened. This is not direct/Shore Chat query parity.
+- Serving a newer UI against an older running backend was observed to produce
+  `unsupported_type` for this query while HTTP health succeeded. Restarting the
+  backend resolved that probe; coordinated rollout/compatibility verification
+  remains necessary.
+
+The latest targeted scroll/recovery validation passed 18 Node UI tests and 75
+browser checks. The full HTTP request audit, remaining query/file migration,
+capability-reviewed Shore parity, and WS-only verification below remain open.
+
 ### Implementation status (2026-08-15)
 
 The ADR is partially implemented. WebSocket is now the browser's primary chat
