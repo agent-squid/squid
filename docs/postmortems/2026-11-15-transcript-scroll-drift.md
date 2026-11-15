@@ -301,3 +301,30 @@ Validation for the prompt-only correction: all 18 Node UI tests and 73 browser
 checks passed (72 connection/scroll/pagination cases plus the new prompt-only
 regression). JavaScript syntax checking passed. PWA cache versions were bumped
 together to `20261115-042`. No publication was performed.
+
+## Existing-row ordering correction (2026-11-15)
+
+A mobile screenshot showed a newly submitted prompt and its WIP above an older
+completed response. A browser reproduction using actual `sendMessage()` and
+WS recovery changed only the older response's quota metadata. DOM order changed
+from `[old response, new prompt, new WIP]` to `[new prompt, new WIP, old response]`.
+This identifies a recovery ordering defect; the phone's exact metadata-trigger
+field was not captured. Recovery removed the old row and passed it through the
+new-completion insertion helper. That helper does not anchor against freshly
+submitted live WIP rows, so the older response was appended after the live group.
+Bottom restoration then followed the displaced old response and could hide the
+new prompt above the viewport.
+
+Existing-row recovery now renders a replacement fragment at the old group's
+original sibling boundary, including its timestamp/stats/tool rows, instead of
+sorting it as a newly completed turn. New-completion ordering remains separate.
+Prompt-only replacements retain their row-specific presentation. Regressions
+exercise two successive metadata updates after real local submission and with
+a recovered live group, asserting exact row order, surviving prompt/WIP identity,
+prompt visibility, footer counts, and bottom gap on a mobile-sized viewport.
+
+Validation for existing-row ordering: all 18 Node UI tests and 75 browser checks
+passed (connection recovery, thinking/scroll, and history pagination), including
+both new metadata-after-submission regressions. JavaScript syntax checking
+passed. PWA cache versions were bumped together to `20261115-043`. This change
+is frontend-only; no backend restart or publication was performed.

@@ -9160,6 +9160,13 @@ async function reconcileRenderedHistory() {
           row._historySnapshot = historySnapshot(item);
           continue;
         }
+        // Recovery updates an existing presentation in place. Sorting it as a
+        // newly completed turn can move it below a newer live prompt/WIP group.
+        const replacement = document.createDocumentFragment();
+        if (item && itemMatchesFilter(item, historyFilter)) {
+          if (row.classList.contains('prompt-only-history-item')) appendPromptOnlyHistoryItem(item, replacement);
+          else appendHistoryItem(item, replacement);
+        }
         changed = true;
         // Only remove this response's ancillary rows, never its live prompt or
         // adjacent banners, date dividers, pagination edges, or another turn.
@@ -9170,9 +9177,7 @@ async function reconcileRenderedHistory() {
           next = following;
         }
         row.remove();
-        if (item && itemMatchesFilter(item, historyFilter)) {
-          insertCompletedHistoryItem(item, { reconcile: true, followBottom: false });
-        }
+        messages.insertBefore(replacement, next);
       }
       if (changed) {
         refreshDateDividers();

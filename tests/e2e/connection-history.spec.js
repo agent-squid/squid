@@ -677,3 +677,57 @@ test('prompt-only recovery updates and deletes rows while preserving presentatio
   await expect(page.locator('#messages > .assistant')).toHaveCount(0);
   expect(await page.locator('.prompt-only-history-item').evaluateAll(els => els.map(el => el.dataset.msgId))).toEqual(['1', '2', '4']);
 });
+
+for (const streaming of ['local', 'recovered']) {
+  test(`old response metadata recovery stays before a new ${streaming} prompt/WIP group`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await setup(page);
+    await page.route('**/config/realtime', r => r.fulfill({ json: { transport: 'sse' } }));
+    let previous = { ...item(10), content: 'Previous response\n\n'.repeat(60), completed_at: '2026-11-15T12:00:30Z', quota_delta: null };
+    await page.route('**/history?**', r => r.fulfill({ json: { items: [previous], has_more: false } }));
+    await page.route('**/chat/100/status', r => r.fulfill({ json: { id: 100, status: 'pending', content: '' } }));
+    await page.route('**/chat', r => r.fulfill({ headers: { 'Content-Type': 'text/event-stream' },
+      body: 'event: meta\ndata: {"msg_id":100,"agent":"claude"}\n\nevent: status\ndata: Working...\n\n' }));
+    await page.routeWebSocket('**/ws/v1', ws => {
+      ws.onMessage(raw => {
+        const frame = JSON.parse(raw);
+        if (frame.type === 'subscribe') ws.send(JSON.stringify({ v: 1, type: 'subscribed', payload: {} }));
+        if (frame.type === 'history.check') ws.send(JSON.stringify({ v: 1, type: 'command.result', request_id: frame.request_id,
+          payload: { ok: true, items: [previous] } }));
+      });
+      ws.send(JSON.stringify({ v: 1, type: 'hello', payload: {} }));
+    });
+    await page.goto('/');
+    await page.evaluate(() => Promise.all([initialHistoryReady, historyBootstrapSettled, bootBannerSettled]));
+    await expect.poll(() => page.evaluate(() => realtimeV1.isActive() && !renderedHistoryCheckBusy)).toBe(true);
+    if (streaming === 'local') {
+      await page.evaluate(() => { void sendMessage('#squid@claude New submitted prompt'); });
+    } else {
+      await page.evaluate(() => {
+        const prompt = makeUserBubble('New submitted prompt', 'squid', 'claude');
+        messages.appendChild(prompt);
+        addTimestamp(prompt, '2026-11-15T12:01:00Z', true);
+        messages.appendChild(makeWipBubble({ id: 100, topic: 'squid', agent: 'claude', prompt: 'New submitted prompt', timestamp: '2026-11-15T12:01:00Z' }));
+        scrollToBottom(true);
+      });
+    }
+    await expect(page.locator('.msg-thinking[data-msg-id="100"]')).toBeVisible();
+    const order = () => page.locator('#messages > .msg').evaluateAll(els => els.map(el =>
+      el.classList.contains('user') ? 'prompt' : el.classList.contains('msg-thinking') ? 'WIP' : el.dataset.msgId));
+    expect(await order()).toEqual(['10', 'prompt', 'WIP']);
+    await page.evaluate(() => {
+      window.savedNewPrompt = messages.querySelector('.msg.user');
+      window.savedNewWip = messages.querySelector('.msg-thinking');
+    });
+    for (const quota_delta of [1, 2]) {
+      previous = { ...previous, quota_delta };
+      await page.evaluate(() => reconcileRenderedHistory());
+      expect(await order()).toEqual(['10', 'prompt', 'WIP']);
+      expect(await page.evaluate(() => savedNewPrompt.isConnected && savedNewWip.isConnected)).toBe(true);
+      await expect(page.locator('.msg.user')).toBeVisible();
+      const gap = await page.locator('#messages').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight);
+      expect(gap).toBeLessThanOrEqual(1);
+      await expect(page.locator('#messages > .msg-time')).toHaveCount(2);
+    }
+  });
+}
