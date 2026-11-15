@@ -2323,7 +2323,7 @@ body {
   color: #fff;
 }
 
-#restart-modal {
+#restart-modal, #connection-guide {
   display: none;
   position: fixed;
   inset: 0;
@@ -2334,7 +2334,7 @@ body {
   padding: 1rem;
 }
 #restart-modal.open { display: flex; }
-#restart-modal-box {
+#restart-modal-box, #connection-guide-box {
   width: min(440px, 96%);
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2343,6 +2343,7 @@ body {
   flex-direction: column;
   overflow: hidden;
 }
+#connection-guide-header,
 #restart-modal-header,
 #restart-modal-footer {
   display: flex;
@@ -2357,7 +2358,7 @@ body {
   border-top: 1px solid var(--surface-2);
   border-bottom: 0;
 }
-#restart-modal-close {
+#restart-modal-close, #connection-guide-close {
   background: transparent;
   border: none;
   color: var(--text-dim);
@@ -4735,7 +4736,7 @@ button {
   }
 
   #app {
-    padding: calc(45px + env(safe-area-inset-top)) 0.75rem calc(0.75rem + env(safe-area-inset-bottom));
+    padding: var(--topbar-height, calc(45px + env(safe-area-inset-top))) 0.75rem calc(0.75rem + env(safe-area-inset-bottom));
     gap: 0.75rem;
   }
 
@@ -6181,3 +6182,39 @@ mark.search-kw-highlight {
 @media (max-width: 768px) {
   #config-editor .cm-editor:not(.config-find-open) .config-find { display: flex; }
 }
+
+/* Connection status stays outside the scrollable transcript. */
+#connection-banner { display: flex; flex-direction: column; align-items: stretch; gap: .15rem; padding: .55rem .75rem; background: var(--surface); border-bottom: 1px solid var(--border); font-size: .85rem; flex-shrink: 0; }
+#connection-banner[hidden], #connection-snackbar[hidden] { display: none; }
+#connection-status { overflow-wrap: anywhere; }
+#connection-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: 7px 0; }
+#connection-banner[data-state="lost"] { color: var(--text-muted); }
+#connection-banner[data-state="lost"] #connection-status::before,
+#connection-snackbar::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: .5rem; border-radius: 50%; background: var(--accent); vertical-align: middle; }
+#connection-snackbar::before { background: var(--ok); }
+#connection-guide { display: flex; color: var(--text-muted); font-size: .85rem; }
+#connection-guide[hidden] { display: none; }
+#connection-guide-box { max-height: 80dvh; overflow-y: auto; }
+#connection-guide-body { padding: .8rem .75rem; }
+#connection-method { display: block; box-sizing: border-box; width: 100%; max-width: 22rem; min-height: 36px; padding: .35rem .6rem; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-2); color: var(--text); font: inherit; color-scheme: dark; }
+#connection-method:focus-visible { outline: 1px solid var(--accent-dim); outline-offset: 2px; }
+#connection-guide p { margin: .6rem 0 0; line-height: 1.5; }
+@media (max-width: 768px) { #connection-method { font-size: 16px; } }
+#connection-banner button { position: relative; min-height: 30px; padding: .25rem .7rem; border-radius: 5px; font-size: .8rem; line-height: 1.25; font-weight: 500; white-space: nowrap; }
+#connection-banner .btn-ghost { color: var(--text-muted); border-color: var(--border); }
+#connection-snackbar { padding: .5rem .75rem; color: var(--text-muted); background: var(--surface); font-size: .85rem; flex-shrink: 0; }
+/* Extend touch targets without making the visible buttons bulky. */
+@media (pointer: coarse) {
+  #connection-actions { row-gap: 14px; }
+  #connection-banner button::after { content: ''; position: absolute; inset: -7px 0; }
+}
+
+/* One load-error treatment for each view, independent of viewer fonts. */
+.load-error { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: .75rem 0; padding: .75rem; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text-muted); font: .85rem/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.load-error-title::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: .5rem; border-radius: 50%; background: var(--accent); vertical-align: middle; }
+.load-error-detail { margin-top: .25rem; }
+.load-error button { flex-shrink: 0; min-height: 36px; padding: .35rem .7rem; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); font: inherit; }
+
+#load-errors { flex-shrink: 0; }
+#load-errors > .load-error { margin: 0; }
+.load-error[hidden] { display: none; }

@@ -561,6 +561,7 @@ function switchView(name) {
   const mobileTitle = document.getElementById('mobile-view-title');
   if (mobileTitle) mobileTitle.textContent = VIEW_LABELS[name] || name;
   currentView = name;
+  updateLoadErrorVisibility();
   document.getElementById('right-rail')?.classList.toggle('quota-chat-hidden', name !== 'chat');
   if (name !== 'chat') {
     document.querySelectorAll('#quota-creds-popup, #codex-creds-popup, #cursor-creds-popup, #balance-max-popup')
@@ -575,6 +576,8 @@ function switchView(name) {
     loadConfigYaml();
   }
   if (name === 'flow') initFlowView();
+  // Check reachability even when the selected view serves cached data.
+  setTimeout(() => { void syncConnectionHistory(); }, 0);
 }
 
 function navigateView(name, { recordHistory = true } = {}) {
@@ -663,18 +666,15 @@ function initMobileViewNavigation() {
 }
 
 async function doRefresh() {
-  /* Clear all Cache API caches, unregister service workers, then reload. */
+  // Refresh must retain the installed shell so a failed navigation can recover.
+  // A new worker installs its versioned cache before replacing the old one.
   try {
     sessionStorage.setItem('squid_skip_sw_reload', '1');
-    if ('caches' in window) {
-      const keys = await caches.keys();
-      await Promise.all(keys.map(k => caches.delete(k)));
-    }
     if ('serviceWorker' in navigator) {
-      const regs = await navigator.serviceWorker.getRegistrations();
-      await Promise.all(regs.map(r => r.unregister()));
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) await reg.update();
     }
-  } catch (_) {/* best-effort */}
+  } catch (_) { /* Offline: reload through the existing worker and shell. */ }
   window.location.reload();
 }
 
@@ -2534,6 +2534,8 @@ let searchState = null;  // { topic, agent, adhoc, explicitAll, keywords }
 let searchLoadGeneration = 0;
 
 let promptHistory = [];   // newest first, in-memory, seeded from DB
+let promptHistoryLoaded = false;
+let promptHistoryLoading = false;
 let promptHistoryPos = -1; // -1 = editing draft; 0..N = navigating history
 let promptDraft = '';      // stashed current input while navigating
 let promptDraftChip = null; // stashed chip state while navigating history
@@ -2623,7 +2625,8 @@ async function loadHistory() {
     params.set('offset', historyOffset);
     params.set('limit', 5);
     const url = `/history?${params.toString()}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new Error('History unavailable');
     data = await res.json();
   } catch {
     if (generation === historyGeneration) {
@@ -2761,8 +2764,23 @@ async function loadHistoryWindow(direction) {
   updateScrollButtonVisibility();
 }
 
-async function resetHistoryToLatest() {
-  const generation = historyGeneration + 1;
+async function resetHistoryToLatest({ data = null } = {}) {
+  const generation = historyGeneration;
+  try {
+    if (!data) {
+      const params = historyUrlParams();
+      params.set('offset', 0);
+      params.set('limit', 5);
+      const res = await fetch(`/history?${params.toString()}`, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error('History unavailable');
+      data = await res.json();
+    }
+    if (!Array.isArray(data.items)) throw new Error('Invalid history');
+  } catch {
+    // Leave the current transcript and pagination observers usable on failure.
+    return false;
+  }
+  if (generation !== historyGeneration) return false;
   invalidateHistoryLoad();
   historyWindowMode = false;
   historyWindowEdgesArmed = false;
@@ -2776,24 +2794,21 @@ async function resetHistoryToLatest() {
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
   if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
 
-  let data;
-  try {
-    const params = historyUrlParams();
-    params.set('offset', 0);
-    params.set('limit', 5);
-    const res = await fetch(`/history?${params.toString()}`);
-    data = await res.json();
-  } catch {
-    if (generation === historyGeneration) {
-      historyLoading = false;
-      updateScrollButtonVisibility();
-    }
-    return;
-  }
-  if (generation !== historyGeneration) return;
 
-  document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
+  // Keep ongoing streams attached. Terminal snapshots replace their old live
+  // group so deduplication does not leave a completed turn looking pending.
+  for (const item of data.items) {
+    if (item.status === 'pending') continue;
+    const pending = messages.querySelector(`.msg-thinking[data-msg-id="${Number(item.id)}"]`);
+    if (pending) {
+      cancelPendingPoll(pending);
+      liveGroupElements(pending).forEach(el => el.remove());
+    }
+  }
   const preserveForLive = collectLiveGroupElements();
+  document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => {
+    if (!preserveForLive.has(el)) el.remove();
+  });
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
     if (!preserveForLive.has(el)) el.remove();
   });
@@ -2830,6 +2845,7 @@ async function resetHistoryToLatest() {
   evaluateAdvisory();
   refreshDateDividers();
   updateScrollButtonVisibility();
+  return true;
 }
 
 function initHistoryScroll() {
@@ -3668,16 +3684,28 @@ function openRouteHistoryAutocomplete(direction) {
 async function initPromptHistory() {
   const draft = localStorage.getItem('squid_draft');
   if (draft) { input.value = draft; resizeComposer(); }
+  promptHistory = mergePromptHistory(getStashedPrompts(), promptHistory);
+  await loadPromptHistory();
+}
+
+// Retried by reachability checks without restoring an older draft or discarding
+// prompts entered while the startup request was unavailable.
+async function loadPromptHistory() {
+  if (promptHistoryLoaded || promptHistoryLoading) return;
+  promptHistoryLoading = true;
   try {
-    const res = await fetch('/prompts/recent?limit=50');
+    const res = await fetch('/prompts/recent?limit=50', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!res.ok) return;
     const data = await res.json();
+    if (!Array.isArray(data.items)) return;
     if (data.agents && typeof data.agents === 'object') {
       mergeAgentCache(Object.values(data.agents));
     }
-    if (Array.isArray(data.items)) promptHistory = mergePromptHistory(getStashedPrompts(), data.items);
+    promptHistory = mergePromptHistory(getStashedPrompts(), promptHistory, data.items);
+    promptHistoryLoaded = true;
     if (input.value.trim()) updateAutocomplete();
-  } catch { /* ignore */ }
+  } catch { /* Keep local entries; the next reachability check retries. */ }
+  finally { promptHistoryLoading = false; }
 }
 
 async function loadSearchResults() {
@@ -8318,6 +8346,7 @@ function appendMonitorItem(item, container) {
   if (!saved?.watch_id) return;
   const bubble = document.createElement('div');
   bubble.className = 'msg assistant history-item monitor-bubble';
+  bubble._historySnapshot = historySnapshot(item);
   bubble.dataset.msgId = String(item.id);
   bubble.dataset.topic = item.topic || 'default';
   bubble.dataset.monitorId = saved.watch_id;
@@ -8336,11 +8365,18 @@ function appendMonitorItem(item, container) {
   return bubble;
 }
 
+// Compare server snapshots independently of rendered Markdown and key order.
+function historySnapshot(item) {
+  return JSON.stringify(item, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+}
+
 function appendHistoryItem(item, container) {
   if (item.source === 'monitor') return appendMonitorItem(item, container);
   const lb = item.stats?.lookback ?? 0;
   const asstBubble = document.createElement('div');
   asstBubble.className = 'msg assistant history-item';
+  asstBubble._historySnapshot = historySnapshot(item);
   const nativeShell = item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!');
   if (nativeShell) asstBubble.classList.add('shell-result');
   if (item.id) asstBubble.dataset.msgId = String(item.id);
@@ -9842,6 +9878,7 @@ function appendPromptOnlyHistoryItem(item, container) {
     item.prompt_source || 'human',
   );
   bubble.classList.add('history-item', 'prompt-only-history-item');
+  bubble._historySnapshot = historySnapshot(item);
   if (item.id) bubble.dataset.msgId = String(item.id);
   bubble.dataset.topic = item.topic || 'default';
   if (item.agent) bubble.dataset.agent = item.agent;
@@ -13002,6 +13039,7 @@ procStatusBtn.addEventListener('click', e => {
 });
 
 async function loadStats() {
+  clearLoadError('stats');
   statsContent.innerHTML = '<div class="empty">Loading…</div>';
   _updateStatsBreakdownUi();
 
@@ -13022,7 +13060,7 @@ async function loadStats() {
   try {
     rows = await fetch(`/stats?${params}`).then(r => r.json());
   } catch {
-    statsContent.innerHTML = '<div class="empty">Failed to load.</div>';
+    showLoadError(statsContent, 'stats', () => loadStats());
     return;
   }
 
@@ -13756,6 +13794,7 @@ function _renderTopicRows(topic, opts = {}) {
 }
 
 async function loadTopicsView() {
+  clearLoadError('topics');
   const listEl = document.getElementById('topics-list');
   const countEl = document.getElementById('topics-count');
   const searchEl = document.getElementById('topics-search');
@@ -13765,7 +13804,7 @@ async function loadTopicsView() {
   try {
     topics = await _managedTopics();
   } catch {
-    listEl.innerHTML = '<div class="topics-empty">Failed to load.</div>';
+    showLoadError(listEl, 'topics', () => loadTopicsView());
     if (countEl) countEl.textContent = '';
     return;
   }
@@ -14364,6 +14403,55 @@ function configSearchPanel(view) {
   return { dom, top: true, update(update) { if (update.docChanged) updateCount(); } };
 }
 
+// View load failures share one location directly below the navigation.
+function updateLoadErrorVisibility() {
+  const host = document.getElementById('load-errors');
+  // Retain per-view retry state, but render only the common connection box.
+  host.hidden = true;
+  const error = host.querySelector(`[data-view="${currentView}"]`);
+  const banner = document.getElementById('connection-banner');
+  if (error && !['lost', 'sync'].includes(banner.dataset.state)) {
+    connectionMessage('load-error', error.textContent.replace(/Retry$/, '').trim());
+  } else if (!error && banner.dataset.state === 'load-error') {
+    banner.hidden = true;
+  }
+}
+function clearLoadError(resource) {
+  const host = document.getElementById('load-errors');
+  host.querySelector(`[data-view="${resource}"]`)?.remove();
+  updateLoadErrorVisibility();
+}
+// Keep save/validation errors separate, and modal errors within their dialog.
+function showLoadError(container, resource, retry, detail = 'Check your connection and try again.') {
+  const panel = document.createElement('div');
+  panel.className = 'load-error';
+  panel.setAttribute('role', 'status');
+  const copy = document.createElement('div');
+  const title = document.createElement('div');
+  title.className = 'load-error-title';
+  title.textContent = `Unable to load ${resource}. `;
+  const advice = document.createElement('div');
+  advice.className = 'load-error-detail';
+  advice.textContent = detail;
+  copy.append(title, advice);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn-ghost';
+  button.textContent = 'Retry';
+  button.onclick = () => { clearLoadError(resource); retry(); };
+  panel.append(copy, button);
+  if (container.closest('.view')) {
+    container.replaceChildren();
+    clearLoadError(resource);
+    panel.dataset.view = resource;
+    panel._retry = button.onclick;
+    document.getElementById('load-errors').appendChild(panel);
+    updateLoadErrorVisibility();
+  } else {
+    container.replaceChildren(panel);
+  }
+}
+
 function setConfigStatus(text, state = 'neutral') {
   const status = document.getElementById('config-editor-status');
   if (!status) return;
@@ -14373,8 +14461,11 @@ function setConfigStatus(text, state = 'neutral') {
 }
 
 async function loadConfigYaml() {
+  clearLoadError('settings');
   const container = document.getElementById('config-editor');
   if (!container) return;
+  const loadError = document.getElementById('config-load-error');
+  loadError.replaceChildren();
   setConfigStatus('loading…');
   try {
     const res = await fetch('/config/yaml');
@@ -14412,7 +14503,8 @@ async function loadConfigYaml() {
     }
     setConfigStatus('');
   } catch (err) {
-    setConfigStatus(`Error: ${err.message || 'failed to load'}`, 'error');
+    setConfigStatus('');
+    showLoadError(loadError, 'settings', () => loadConfigYaml(), err instanceof TypeError ? undefined : err.message);
   }
 }
 
@@ -14454,6 +14546,7 @@ function _updateHomeModeIcon(select) {
 }
 
 async function loadAgents() {
+  clearLoadError('agents');
   const listEl = document.getElementById('agents-list');
   listEl.innerHTML = '<div class="empty">Loading…</div>';
   let agents, health;
@@ -14463,7 +14556,7 @@ async function loadAgents() {
       fetch('/health').then(r => r.json()).catch(() => null),
     ]);
   } catch {
-    listEl.innerHTML = '<div class="empty">Failed to load.</div>';
+    showLoadError(listEl, 'agents', () => loadAgents());
     return;
   }
   if (health?.squid_home) {
@@ -15564,7 +15657,7 @@ function initPullToRefresh() {
   messages.addEventListener('touchend', (e) => {
     if (!startedAtBottom || !startY) return;
     const dy = startY - e.changedTouches[0].clientY; // positive = finger moved up
-    if (dy > REFRESH_DRAG_THRESHOLD) setTimeout(() => location.reload(), 150);
+    if (dy > REFRESH_DRAG_THRESHOLD) void syncConnectionHistory(true);
     startY = 0;
   }, { passive: true });
 }
@@ -15899,8 +15992,7 @@ async function showBootBanner() {
     const el = document.createElement('div');
     el.className = 'boot-banner';
     el.innerHTML = bootLogoHtml(bubbleText) +
-      `<div class="boot-meta">AgentSquid${bootTime ? `  ·  started ${bootTime}` : ''}</div>` +
-      (!navigator.onLine ? `<div class="boot-offline">no internet — LLM calls will fail</div>` : '');
+      `<div class="boot-meta">AgentSquid${bootTime ? `  ·  started ${bootTime}` : ''}</div>`;
     await appendBootBannerAtBottom(el);
 
     const anyAvailable = (data.harnesses || []).some(h => h.installed);
@@ -15938,17 +16030,8 @@ async function showBootBanner() {
       if (shouldFollowSetup) messages.scrollTop = messages.scrollHeight;
     }
   } catch {
-    const isLocal = ['127.0.0.1', 'localhost', '::1'].includes(location.hostname);
-    const msg = !navigator.onLine
-      ? 'no network connection'
-      : isLocal
-        ? 'squid server is not running'
-        : 'server unreachable — check Tailscale';
-    const el = document.createElement('div');
-    el.className = 'boot-banner';
-    el.innerHTML = bootLogoHtml(BOOT_FALLBACK_TEXT) +
-      `<div class="boot-offline">${msg}</div>`;
-    await appendBootBannerAtBottom(el);
+    // Reachability belongs to the connection banner, which clears on recovery.
+    // A transcript error would become stale independently of that state.
   }
 }
 
@@ -19606,6 +19689,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   }
 
   async function loadFile() {
+    if (isInline) clearLoadError('files');
     body.textContent = 'Loading…';
     try {
       if (!path) {
@@ -19619,7 +19703,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       const res = await fetch('/localfile?' + new URLSearchParams({ path, _t: Date.now() }));
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        body.textContent = errData.error || `Error ${res.status}`;
+        showLoadError(body, 'files', () => loadFile(), errData.error || `Server returned ${res.status}. Try again.`);
         return;
       }
       const ct = res.headers.get('content-type') || '';
@@ -19685,7 +19769,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
         showFileViewToolbar();
       }
     } catch (err) {
-      body.textContent = err?.message || 'Failed to load file.';
+      showLoadError(body, 'files', () => loadFile(), err instanceof TypeError ? undefined : err.message);
     }
   }
 
@@ -20141,6 +20225,7 @@ function recoverForegroundState() {
   }).catch(() => {});
   if (_activePollImmediate) _activePollImmediate();
   realtimeV1?.resume();
+  void syncConnectionHistory();
   recoverPendingBubbles();
   startProcPoll();
   if (stickyChip?.route && !stickyChip.broadcastAgents) {
@@ -20209,3 +20294,205 @@ window.addEventListener('pageshow', recoverForegroundState);
       .catch(() => _showImportResult('codex-creds-popup', 'codex-creds-status', false));
   }
 })();
+
+// Reachability is distinct from a successful history sync. Never infer either
+// from navigator.onLine or a WebSocket opening alone.
+let connectionSyncBusy = false;
+let connectionLastSync = null;
+let connectionStartupSlow = false;
+let connectionStartupTimer = null;
+// Track page membership as well as row content: an empty or shorter page
+// contains no changed row to trigger reconciliation after a deletion.
+let connectionHistoryPage = null;
+const connectionStatus = document.getElementById('connection-status');
+const connectionBanner = document.getElementById('connection-banner');
+const connectionLatest = document.getElementById('connection-latest');
+let connectionHadLoss = false;
+let connectionSnackbarTimer = null;
+const connectionSnackbar = document.getElementById('connection-snackbar');
+// The mobile topbar is fixed and can grow with font scaling or safe-area insets.
+const topbar = document.getElementById('topbar');
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--topbar-height', `${topbar.getBoundingClientRect().height}px`);
+}).observe(topbar);
+function connectionMessage(state, text) {
+  // Stop startup feedback before a terminal result is mapped to a view error.
+  if (['ok', 'reachable', 'lost', 'load-error'].includes(state)) clearTimeout(connectionStartupTimer);
+  if (state === 'ok' || state === 'reachable') {
+    const error = document.querySelector(`#load-errors > [data-view="${currentView}"]`);
+    if (error) { state = 'load-error'; text = error.textContent.replace(/Retry$/, '').trim(); }
+  }
+  connectionBanner.dataset.state = state;
+  connectionStatus.textContent = text + (connectionLastSync && currentView === 'chat' ? ` · last synced ${new Date(connectionLastSync).toLocaleTimeString()}` : '');
+  if (state === 'lost') {
+    connectionHadLoss = true;
+    clearTimeout(connectionSnackbarTimer);
+    connectionSnackbar.hidden = true;
+  }
+  const needsAction = state === 'lost' || state === 'load-error' || (state === 'waiting' && connectionHadLoss);
+  connectionBanner.hidden = !(needsAction || (state === 'sync' && (connectionHadLoss || (connectionStartupSlow && !connectionLastSync))));
+  document.getElementById('connection-retry').hidden = state !== 'lost' && state !== 'load-error';
+  if (state === 'ok' || state === 'reachable') {
+    closeConnectionGuide();
+    if (connectionHadLoss) {
+      connectionSnackbar.textContent = state === 'ok' ? 'Back online · history updated' : 'Back online';
+      connectionSnackbar.hidden = false;
+      clearTimeout(connectionSnackbarTimer);
+      connectionSnackbarTimer = setTimeout(() => { connectionSnackbar.hidden = true; }, 4000);
+    }
+    connectionHadLoss = false;
+  }
+}
+async function syncConnectionHistory(forceLatest = false) {
+  if (connectionSyncBusy || document.hidden) return;
+  connectionSyncBusy = true;
+  const generation = historyGeneration;
+  try {
+    // Keep the current warning and layout stable while probing in background.
+    const health = await fetch('/health', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+    if (!health.ok) throw new Error('Host unavailable');
+    await health.json();
+    void loadPromptHistory();
+    if (currentView !== 'chat') {
+      connectionLatest.hidden = true;
+      connectionMessage('reachable', 'Squid reachable');
+      return;
+    }
+    if (searchActive) {
+      connectionLatest.hidden = true;
+      connectionMessage('waiting', 'Squid reachable · clear search to sync history');
+      return;
+    }
+    if (historyLoading || generation !== historyGeneration) return;
+    const params = historyUrlParams();
+    params.set('offset', 0);
+    // Reconcile the loaded window, including removals outside its newest page.
+    params.set('limit', Math.max(5, historyOffset));
+    const response = await fetch(`/history?${params}`, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error('History unavailable');
+    const latest = await response.json();
+    if (!Array.isArray(latest.items)) throw new Error('Invalid history');
+    if (currentView !== 'chat') {
+      connectionLatest.hidden = true;
+      connectionMessage('reachable', 'Squid reachable');
+      return;
+    }
+    if (searchActive) {
+      connectionLatest.hidden = true;
+      connectionMessage('waiting', 'Squid reachable · clear search to sync history');
+      return;
+    }
+    if (generation !== historyGeneration) return;
+    if (historyLoading) return;
+    const pageMembership = JSON.stringify([
+      params.toString(), promptOnlyHistory, latest.items.map(item => Number(item.id)),
+    ]);
+    const changed = (connectionHistoryPage !== null && connectionHistoryPage !== pageMembership) || latest.items.some(item => {
+      // A turn's prompt and response share an ID. Compare the rendered snapshot,
+      // rather than the first matching node (usually the prompt).
+      const existing = Array.from(messages.querySelectorAll(`[data-msg-id="${Number(item.id)}"]`))
+        .find(el => el._historySnapshot !== undefined || el.classList.contains('msg-thinking'));
+      if (!existing) return true;
+      // Streaming bubbles reconcile through the realtime transport. Completed
+      // rows must match the snapshot, including edits under an unchanged ID.
+      if (existing.classList.contains('msg-thinking')) return item.status !== 'pending';
+      return existing._historySnapshot !== historySnapshot(item);
+    });
+    // Already-rendered history is synced even when a keyboard or scroll position
+    // means the reader isn't at the bottom. No jump or DOM replacement is needed.
+    if (!forceLatest && !changed && !historyWindowMode) {
+      connectionHistoryPage = pageMembership;
+      connectionLastSync = Date.now();
+      connectionLatest.hidden = true;
+      connectionMessage('ok', 'Up to date');
+      return;
+    }
+    // The reader may have scrolled or switched views while requests were in flight.
+    if (!forceLatest && (document.hidden || currentView !== 'chat' || historyWindowMode || !isAtBottom())) {
+      connectionLatest.hidden = !(changed || connectionHadLoss);
+      connectionMessage('waiting', 'Squid reachable · jump to latest to sync history');
+      return;
+    }
+    // Avoid rebuilding the transcript on each healthy heartbeat.
+    if ((forceLatest || changed || !connectionLastSync) && !await resetHistoryToLatest({ data: latest })) {
+      throw new Error('History sync failed');
+    }
+    connectionHistoryPage = pageMembership;
+    connectionLastSync = Date.now();
+    connectionLatest.hidden = true;
+    connectionMessage('ok', 'Up to date');
+    recoverPendingBubbles();
+  } catch {
+    connectionLatest.hidden = true;
+    connectionMessage('lost', currentView !== 'chat' ? 'Squid unreachable · showing previously loaded content' : connectionLastSync ? 'Connection lost · showing previously loaded history' : 'Squid unreachable · connect to load history');
+  } finally {
+    connectionSyncBusy = false;
+  }
+}
+document.getElementById('connection-retry').onclick = () => {
+  document.querySelector(`#load-errors > [data-view="${currentView}"]`)?._retry?.();
+  void syncConnectionHistory();
+};
+connectionLatest.onclick = () => syncConnectionHistory(true);
+const connectionGuide = document.getElementById('connection-guide');
+const connectionHelp = document.getElementById('connection-help');
+function closeConnectionGuide() {
+  const hadFocus = connectionGuide.contains(document.activeElement);
+  connectionGuide.hidden = true;
+  connectionHelp.setAttribute('aria-expanded', 'false');
+  if (hadFocus) (connectionBanner.hidden ? input : connectionHelp).focus({ preventScroll: true });
+}
+connectionHelp.onclick = () => {
+  connectionGuide.hidden = false;
+  connectionHelp.setAttribute('aria-expanded', 'true');
+  document.getElementById('connection-method').focus({ preventScroll: true });
+};
+document.getElementById('connection-guide-close').onclick = closeConnectionGuide;
+connectionGuide.addEventListener('click', event => { if (event.target === connectionGuide) closeConnectionGuide(); });
+connectionGuide.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeConnectionGuide();
+  } else if (event.key === 'Tab') {
+    const first = document.getElementById('connection-guide-close');
+    const last = document.getElementById('connection-method');
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus({ preventScroll: true });
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus({ preventScroll: true });
+    }
+  }
+});
+const connectionMethod = document.getElementById('connection-method');
+const connectionAdvice = {
+  unknown: 'Check your network, that the host is awake, and that Squid is running.',
+  tailscale: 'Check Tailscale is connected on both devices and the host is awake. Confirm Squid is running on the host, then retry.',
+  ssh: 'Check the SSH session is still connected. Reopen your SSH port-forwarding tunnel using the same local port, host, and Squid port, then retry this address.',
+  local: 'Check Squid is running on this computer at the expected address and port, then retry.',
+};
+try { connectionMethod.value = localStorage.getItem('squid_connection_method') || (location.hostname.endsWith('.ts.net') ? 'tailscale' : 'unknown'); } catch {}
+function updateConnectionAdvice() {
+  document.getElementById('connection-advice').textContent = connectionAdvice[connectionMethod.value] || connectionAdvice.unknown;
+}
+connectionMethod.onchange = () => {
+  try { localStorage.setItem('squid_connection_method', connectionMethod.value); } catch {}
+  updateConnectionAdvice();
+};
+updateConnectionAdvice();
+window.addEventListener('online', () => syncConnectionHistory());
+window.addEventListener('offline', () => {
+  connectionLatest.hidden = true;
+  connectionMessage('lost', currentView !== 'chat' ? 'Network unavailable · showing previously loaded content' : connectionLastSync ? 'Network unavailable · showing previously loaded history' : 'Network unavailable · connect to load history');
+  // Local servers and tunnels may still be reachable despite this browser hint.
+  void syncConnectionHistory();
+});
+setInterval(() => { void syncConnectionHistory(); }, 15000);
+initialHistoryReady.then(() => syncConnectionHistory());
+
+// Keep fast refreshes silent, including while initial history is loading.
+connectionStartupTimer = setTimeout(() => {
+  if (connectionLastSync || connectionHadLoss) return;
+  connectionStartupSlow = true;
+  connectionMessage('sync', 'Connecting to Squid…');
+}, 3000);

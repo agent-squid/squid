@@ -1,10 +1,10 @@
-const CACHE_NAME = 'squid-pwa-v20261115-002';
+const CACHE_NAME = 'squid-pwa-v20261115-024';
 const APP_SHELL = [
   '/',
   '/index.html',
-  '/style.css?v=20261115-002',
-  '/app.js?v=20261115-002',
-  '/flow-lang.js?v=20261115-002',
+  '/style.css?v=20261115-024',
+  '/app.js?v=20261115-024',
+  '/flow-lang.js?v=20261115-024',
   '/vendor/highlight.min.js',
   '/vendor/atom-one-dark.min.css',
   '/vendor/marked.min.js',
@@ -39,6 +39,25 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
 
   if (request.method !== 'GET' || url.origin !== self.location.origin) return;
+  // Serve the installed HTML and assets as one version, online or offline.
+  // Fetching newer HTML here can reference assets not yet installed locally.
+  // Registration checks install updates atomically and reload after activation.
+  if (request.mode === 'navigate' && ['/', '/index.html'].includes(url.pathname)) {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_NAME);
+      const shell = await cache.match('/');
+      if (shell) return shell;
+      try {
+        const response = await fetch(request, { signal: AbortSignal.timeout(5000) });
+        if (response.status >= 500) throw new Error('Host unavailable');
+        return response;
+      } catch {
+        const cache = await caches.open(CACHE_NAME);
+        return await cache.match('/') || Response.error();
+      }
+    })());
+    return;
+  }
   if (request.mode === 'navigate') return;
   if (url.pathname === '/manifest.webmanifest' || url.pathname.startsWith('/icons/')) return;
   if (
@@ -59,13 +78,12 @@ self.addEventListener('fetch', (event) => {
     || url.pathname.startsWith('/topics')
   ) return;
 
-  event.respondWith(
-    fetch(request)
-      .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-        return response;
-      })
-      .catch(() => caches.match(request).then((cached) => cached || caches.match('/index.html'))),
-  );
+  // Only cache known shell assets. API failures must never receive HTML.
+  if (!APP_SHELL.includes(url.pathname + url.search)) return;
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    return fetch(request);
+  })());
 });
