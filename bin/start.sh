@@ -28,10 +28,14 @@ fi
 mkdir -p "/tmp/$(whoami)/squid"
 
 # ── check venv ───────────────────────────────────────────────────────────────
-if [[ ! -f "$VENV/bin/uvicorn" ]]; then
+if [[ ! -x "$VENV/bin/python" || ! -f "$VENV/bin/uvicorn" ]]; then
   echo "Dependencies not installed. Running install.sh first..."
   bash "$SCRIPT_DIR/install.sh"
 fi
+
+# A restored/moved virtualenv can retain launchers pointing at a deleted turn.
+# Invoke Python directly so broken console-script shebangs cannot block repair.
+"$VENV/bin/python" "$SCRIPT_DIR/repair-venv.py" "$VENV"
 
 # ── read port from config ────────────────────────────────────────────────────
 PORT=$("$VENV/bin/python3" -c \
