@@ -93,6 +93,27 @@ const scrollButtonLayoutObserver = new ResizeObserver(() => {
 scrollButtonLayoutObserver.observe(messages);
 scrollButtonLayoutObserver.observe(scrollBtn.parentElement);
 
+// The scroller's box does not resize when a response, footer, or image grows.
+// Observe its rows too so delayed layout keeps a following reader at the edge.
+// Never infer following from the new bottom gap: growth itself creates that gap.
+const transcriptRowResizeObserver = new ResizeObserver(() => {
+  if (messagesPinnedToBottom) scrollToBottom(true);
+  updateScrollButtonVisibility();
+});
+const transcriptRowsObserver = new MutationObserver(records => {
+  for (const record of records) {
+    for (const node of record.removedNodes) {
+      if (node.nodeType === Node.ELEMENT_NODE) transcriptRowResizeObserver.unobserve(node);
+    }
+    for (const node of record.addedNodes) {
+      if (node.nodeType === Node.ELEMENT_NODE) transcriptRowResizeObserver.observe(node);
+    }
+  }
+});
+transcriptRowsObserver.observe(messages, { childList: true });
+for (const row of messages.children) transcriptRowResizeObserver.observe(row);
+
+
 scrollBtn.addEventListener('click', () => {
   if (historyWindowMode) {
     resetHistoryToLatest();
@@ -10132,9 +10153,10 @@ function scrollToBottom(force = false) {
 // same direction as reading the rest of the transcript.
 function scrollToRevealBubble(bubble) {
   if (bubble.offsetHeight > messages.clientHeight) {
+    messagesPinnedToBottom = false;
     messages.scrollTop += bubble.getBoundingClientRect().top - messages.getBoundingClientRect().top;
   } else {
-    messages.scrollTop = messages.scrollHeight;
+    scrollToBottom(true);
   }
 }
 

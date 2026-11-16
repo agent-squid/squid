@@ -23,7 +23,7 @@ workflow; this plan is not publication authorization.
 
 Phase 1 is partially implemented; do not restart from the original investigation
 below or treat all validation gates as complete. The latest ordering fix is in
-`ui/app.js`; current PWA asset versions are `20261115-050`.
+`ui/app.js`; current PWA asset versions are `20261115-052`.
 
 Implemented:
 
@@ -319,3 +319,12 @@ implementation checkpoints. This documentation review checked source consistency
 and document links; it did not rerun runtime tests. The focused suites do not
 cover all application HTTP requests, remote query parity, transfer interruption,
 or every Phase 1 scroll acceptance gate.
+
+### No-edit footer regression follow-up
+
+Direct transcript rows now have resize observation so late footer/content growth
+retains bottom-following even when the scroller itself does not resize. Tall
+response reveal explicitly releases following. Two new mocked browser checks
+cover a tool-free completion followed by delayed footer growth, with and without
+a deliberate scroll into history; both pass. ADR-0056 remains proposed with the
+broader measurement and reader-intent gates still open.

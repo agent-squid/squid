@@ -152,3 +152,15 @@ These targeted fixes do not establish complete footer-inclusive fit measurement,
 reader intent tracking across every asynchronous layout path, WIP control
 reachability, or incident closure. The precise production callback/metadata
 sequence remains untraced. Retain those acceptance gates until demonstrated.
+
+### No-edit completion footer follow-up
+
+The transcript now observes direct row sizes as well as its viewport. Delayed
+footer/content growth keeps a bottom-following reader at the latest edge; tall
+completion reveal explicitly releases following. Removed rows are unobserved.
+Browser regressions stream a completion without tool/file edits, grow its footer
+after completion without calling restoration, and check timestamp visibility and
+the bottom button. A companion case scrolls away first and verifies that the same
+growth preserves scrollback. Both checks pass, as does JavaScript syntax checking.
+This addresses previously unobserved row growth; it does not establish all of the
+ADR's remaining footer-inclusive measurement and asynchronous intent gates.

@@ -582,3 +582,41 @@ test('live placement preserves completion order when IDs disagree', async ({ pag
   const ids = await page.locator('#messages > .assistant:not(.msg-thinking)').evaluateAll(els => els.map(el => el.dataset.msgId));
   expect(ids).toEqual(['110', '90']);
 });
+
+for (const readAway of [false, true]) {
+  test(`no-edit completion late footer growth ${readAway ? 'respects scrollback' : 'keeps timestamp visible'}`, async ({ page }) => {
+    await mockBackend(page);
+    await page.goto('/');
+    await page.evaluate(() => Promise.all([initialHistoryReady, historyBootstrapSettled, bootBannerSettled]));
+    await page.evaluate(() => {
+      const filler = document.createElement('div');
+      filler.style.cssText = 'height:2500px;flex-shrink:0';
+      messages.appendChild(filler);
+      scrollToBottom(true);
+    });
+    await page.route('**/chat', r => r.fulfill({ status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'Completed without file changes.' }, { event: 'done', data: {} }),
+    }));
+    await page.fill('#input', 'Check without editing files');
+    await page.keyboard.press('Enter');
+    const footer = page.locator('#messages > .msg-time:not(.right)').last();
+    await expect(footer).toBeVisible();
+    await expect.poll(() => page.locator('#messages').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThanOrEqual(1);
+    if (readAway) {
+      await page.locator('#messages').hover();
+      await page.mouse.wheel(0, -200);
+      await expect.poll(() => page.locator('#messages').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeGreaterThan(50);
+    }
+    const before = await page.locator('#messages').evaluate(el => el.scrollTop);
+    // Delayed layout in an existing footer, without explicit restoration.
+    await footer.evaluate(el => { el.style.minHeight = '96px'; });
+    if (readAway) {
+      await page.waitForTimeout(150);
+      expect(await page.locator('#messages').evaluate(el => el.scrollTop)).toBe(before);
+    } else {
+      await expect.poll(() => page.locator('#messages').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThanOrEqual(1);
+      expect(await footer.evaluate(el => el.getBoundingClientRect().bottom <= document.getElementById('messages').getBoundingClientRect().bottom)).toBe(true);
+      await expect(page.locator('#scroll-btn')).not.toHaveClass(/visible/);
+    }
+  });
+}
