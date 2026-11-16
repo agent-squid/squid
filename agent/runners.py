@@ -1883,6 +1883,8 @@ async def run_cursor(
 
     session_id: Optional[str] = None
     text_started = False
+    partial_text = ""
+    pending_text = ""
 
     async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=backend_env):
         if not line:
@@ -1893,6 +1895,16 @@ async def run_cursor(
             continue
 
         t = event.get("type")
+        # Retry/query flushes omit model_call_id. Hold an ambiguous repeat
+        # until the following event distinguishes a flush from a real delta.
+        flush_boundary = t in ("retry", "interaction_query")
+        if pending_text:
+            if not flush_boundary:
+                partial_text += pending_text
+                yield pending_text
+            pending_text = ""
+        if flush_boundary:
+            partial_text = ""
 
         if t == "system":
             session_id = event.get("session_id")
@@ -1908,8 +1920,22 @@ async def run_cursor(
             for block in content:
                 if block.get("type") == "text":
                     text = block.get("text", "")
-                    if text and ("timestamp_ms" in event or not text_started):
+                    if not text:
+                        continue
+                    # Timestamped deltas have no model_call_id. Completed blocks
+                    # carry that ID, or omit the timestamp on older CLI versions.
+                    is_block = "model_call_id" in event or "timestamp_ms" not in event
+                    if is_block:
+                        remainder = text[len(partial_text):] if partial_text and text.startswith(partial_text) else text
+                        partial_text = ""
+                        if remainder:
+                            text_started = True
+                            yield remainder
+                    elif partial_text and text == partial_text:
+                        pending_text = text
+                    else:
                         text_started = True
+                        partial_text += text
                         yield text
 
         elif t == "result":
@@ -1931,6 +1957,9 @@ async def run_cursor(
                     "duration_ms": event.get("duration_ms"),
                 }
             }
+
+    if pending_text:
+        yield pending_text
 
 
 async def run_antigravity(

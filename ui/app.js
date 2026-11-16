@@ -5775,11 +5775,12 @@ async function sendMessage(text, opts = {}) {
     updateThinkingPreview();
   }
 
+  const orderedPreview = createWipPreview();
   function updateThinkingPreview() {
     if (thinkingFrozen) return;
     const wasAtBottom = isAtBottom();
     if (thinkingLoader.parentNode) thinkingLoader.remove();
-    const text = (statusBuf ? statusBuf.trimEnd() + (raw ? '\n\n' : '') : '') + raw;
+    const text = orderedPreview(statusBuf, raw);
     thinkingContent.textContent = text.trim();
     thinkingContent.scrollTop = thinkingContent.scrollHeight;
     updateThinkingHeightButton(thinkingBubble);
@@ -7755,9 +7756,10 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
 
               let raw = '';
               let statusBuf = '';
+              const orderedPreview = createWipPreview();
               const updatePreview = () => {
                 if (loader?.parentNode) loader.remove();
-                thinkingContent.textContent = (statusBuf ? statusBuf.trim() + (raw ? '\n\n' : '') : '') + raw;
+                thinkingContent.textContent = orderedPreview(statusBuf, raw);
                 scrollToBottom();
               };
 
@@ -9410,11 +9412,12 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
   let statusBuf = '';
   let closed = false;
   let waitingForUpdates = false;
+  const orderedPreview = createWipPreview();
 
   const updatePreview = () => {
     if (!live) return;
     const wasAtBottom = isAtBottom();
-    const text = (statusBuf ? statusBuf.trimEnd() + (raw ? '\n\n' : '') : '') + raw;
+    const text = orderedPreview(statusBuf, raw);
     if (text.trim()) {
       waitingForUpdates = false;
       live.textContent = text.trim();
@@ -10132,6 +10135,29 @@ function restoreTranscriptPosition(position) {
     messages.scrollTop = position.top;
   }
   messagesPinnedToBottom = isAtBottom();
+}
+
+// Keep live output in arrival order while retaining separate response/trace buffers.
+function createWipPreview() {
+  let previousStatus = '', previousRaw = '';
+  let segments = [];
+  return (status, raw) => {
+    for (const [kind, value, previous] of [['status', status, previousStatus], ['text', raw, previousRaw]]) {
+      if (value === previous) continue;
+      const appended = value.startsWith(previous);
+      if (!appended) segments = segments.filter(segment => segment.kind !== kind);
+      const delta = appended ? value.slice(previous.length) : value;
+      if (!delta) continue;
+      const last = segments[segments.length - 1];
+      if (last?.kind === kind) last.text += delta;
+      else segments.push({ kind, text: delta });
+    }
+    previousStatus = status;
+    previousRaw = raw;
+    return segments.map((segment, index) =>
+      (index && segments[index - 1].kind !== segment.kind ? '\n\n' : '') + segment.text
+    ).join('');
+  };
 }
 
 function isAtBottom() {

@@ -250,3 +250,4 @@ def test_omitted_file_diff_recoverable_via_anchored_trees(tmp_path, monkeypatch)
     recovered = diff_for_path(tmp_path, event["base"], event["head"], "huge.txt")
     assert "+h changed" in recovered
     assert "small.txt" not in recovered
+

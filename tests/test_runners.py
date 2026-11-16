@@ -2384,3 +2384,76 @@ def test_failed_message_stop_retains_process_for_retry():
             assert send.call_count == 2
     finally:
         _clear()
+
+
+@pytest.mark.parametrize('deltas', [['Reviewing ', 'files.\n'], ['ha', 'ha'], ['1', '1', '1']])
+@pytest.mark.parametrize('timestamped', [True, False])
+def test_cursor_skips_block_flush_without_dropping_repeated_deltas(deltas, timestamped):
+    async def fake_stream_lines(cmd, **kwargs):
+        for index, parts in enumerate([deltas, ['Done.']]):
+            for text in parts:
+                yield json.dumps({'type': 'assistant', 'timestamp_ms': 1,
+                                  'message': {'content': [{'type': 'text', 'text': text}]}})
+            block = {'type': 'assistant', 'model_call_id': str(index),
+                     'message': {'content': [{'type': 'text', 'text': ''.join(parts)}]}}
+            if timestamped:
+                block['timestamp_ms'] = 2
+            yield json.dumps(block)
+            yield json.dumps({'type': 'thinking', 'subtype': 'delta', 'text': 'Checking code'})
+        yield json.dumps({'type': 'result', 'result': 'Done.'})
+
+    async def collect():
+        return [chunk async for chunk in run_cursor('next', cwd='/tmp')]
+
+    with patch('agent.runners.CURSOR_PATH', 'cursor-agent'), patch(
+        'agent.runners._stream_lines', fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+    assert ''.join(chunk for chunk in chunks if isinstance(chunk, str)) == ''.join(deltas) + 'Done.'
+    assert {'_status': 'Checking code'} in chunks
+
+
+@pytest.mark.parametrize('boundary', ['retry', 'interaction_query'])
+@pytest.mark.parametrize('parts', [['Checking ', 'files.'], ['ha', 'ha']])
+def test_cursor_skips_unmarked_flush_at_protocol_boundary(boundary, parts):
+    async def fake_stream_lines(cmd, **kwargs):
+        for text in [*parts, ''.join(parts)]:
+            yield json.dumps({'type': 'assistant', 'timestamp_ms': 1,
+                              'message': {'content': [{'type': 'text', 'text': text}]}})
+        yield json.dumps({'type': boundary, 'subtype': 'started', 'timestamp_ms': 2})
+        yield json.dumps({'type': 'thinking', 'subtype': 'delta', 'text': 'Continuing'})
+        for metadata in [{'timestamp_ms': 3}, {'timestamp_ms': 4, 'model_call_id': 'next'}]:
+            yield json.dumps({'type': 'assistant', **metadata,
+                              'message': {'content': [{'type': 'text', 'text': 'Done.'}]}})
+        yield json.dumps({'type': 'result', 'result': 'Done.'})
+
+    async def collect():
+        return [chunk async for chunk in run_cursor('next', cwd='/tmp')]
+
+    with patch('agent.runners.CURSOR_PATH', 'cursor-agent'), patch(
+        'agent.runners._stream_lines', fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+    assert ''.join(chunk for chunk in chunks if isinstance(chunk, str)) == ''.join(parts) + 'Done.'
+    assert {'_status': 'Continuing'} in chunks
+
+
+@pytest.mark.parametrize('ending', ['eof', 'result', 'thinking'])
+def test_cursor_retains_ambiguous_repeated_delta_without_flush_boundary(ending):
+    async def fake_stream_lines(cmd, **kwargs):
+        for text in ['ha', 'ha']:
+            yield json.dumps({'type': 'assistant', 'timestamp_ms': 1,
+                              'message': {'content': [{'type': 'text', 'text': text}]}})
+        if ending == 'result':
+            yield json.dumps({'type': 'result', 'result': 'haha'})
+        elif ending == 'thinking':
+            yield json.dumps({'type': 'thinking', 'subtype': 'delta', 'text': 'Thinking'})
+
+    async def collect():
+        return [chunk async for chunk in run_cursor('next', cwd='/tmp')]
+
+    with patch('agent.runners.CURSOR_PATH', 'cursor-agent'), patch(
+        'agent.runners._stream_lines', fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+    assert ''.join(chunk for chunk in chunks if isinstance(chunk, str)) == 'haha'

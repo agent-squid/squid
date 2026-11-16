@@ -35,6 +35,7 @@ for (const recovered of [false, true]) {
       const content = { set textContent(value) { messages.scrollHeight += 220; }, scrollHeight: 220 };
       Object.assign(context, {
         thinkingFrozen: false, thinkingLoader: {}, statusBuf: 'Working', raw: 'Output',
+        orderedPreview: (status, raw) => status + raw,
         thinkingContent: content, live: content, thinkingBubble: { style: {} }, wipBubble: {},
         waitingForUpdates: false, loader: null, updateThinkingHeightButton() {},
       });
@@ -57,4 +58,26 @@ test('Flow completion preserves the insertion helper scroll position', async () 
   vm.runInContext(source.slice(start, end), context);
   await context.attachFlowStep(1);
   assert.equal(messages.scrollTop, 490);
+});
+
+test('WIP preview appends reasoning after earlier response text', () => {
+  const context = vm.createContext({});
+  vm.runInContext(source.slice(source.indexOf('function createWipPreview()'), source.indexOf('function isAtBottom()')), context);
+  const preview = context.createWipPreview();
+  assert.equal(preview('Thinking', ''), 'Thinking');
+  assert.equal(preview('Thinking', 'Opening.'), 'Thinking\n\nOpening.');
+  assert.equal(preview('ThinkingMore thinking', 'Opening.'), 'Thinking\n\nOpening.\n\nMore thinking');
+  assert.equal(preview('ThinkingMore thinking', 'Opening.Answer'), 'Thinking\n\nOpening.\n\nMore thinking\n\nAnswer');
+});
+
+test('WIP status replacement preserves response position and subsequent arrival order', () => {
+  const context = vm.createContext({});
+  vm.runInContext(source.slice(source.indexOf('function createWipPreview()'), source.indexOf('function isAtBottom()')), context);
+  const preview = context.createWipPreview();
+  preview('Thinking', 'Opening.');
+  preview('ThinkingMore reasoning', 'Opening.');
+  assert.equal(preview('loading model…', 'Opening.'), 'Opening.\n\nloading model…');
+  assert.equal(preview('loading model…', 'Opening.Answer'), 'Opening.\n\nloading model…\n\nAnswer');
+  assert.equal(preview('', 'Opening.Answer'), 'Opening.Answer');
+  assert.equal(preview('', 'Recovered answer'), 'Recovered answer');
 });
