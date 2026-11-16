@@ -1,7 +1,7 @@
 ---
 status: accepted (branchless isolation implemented; prior worktree/branch mechanism superseded)
 date: 2026-07-09
-updated: 2026-11-04
+updated: 2026-11-15
 ---
 # ADR-0025: Per-Turn Git Worktree Isolation for Agent Changes
 
@@ -315,6 +315,34 @@ worktree isolation itself is on.
   million-file scale. It's suitable for something like a startup-time repo
   size check, but counting files doesn't tell you dirtiness — that's the
   part that's actually expensive.
+
+### Proposed follow-on: intent-based preparation
+
+[ADR-0057](0057-intent-based-turn-preparation.md) proposes enforced read-only starts, with
+Squid-injected instructions guiding the agent to request isolated writable roots
+through a host tool only when needed. It is proposed, not implemented: editing turns retain this
+ADR's isolation, shared dirty-state visibility, merge, and drift-check guarantees.
+Skipping preparation requires host enforcement; injected instructions and tool
+requests alone are not a permission boundary. Performance evaluation must use the actual VM filesystem.
+
+### 2026-11-15: Private snapshot index reuse investigated and reverted
+
+Retaining the GitDiff tracker's private index between initial and final scans
+was investigated to avoid repeated content reads for unchanged files. A disposable
+warm-cache experiment with 2,000 text files took 85–100 ms with fresh indexes
+versus 14–15 ms on subsequent reused-index scans; this was not a production benchmark.
+
+Review reproduced a correctness regression: adding `.gitattributes` to apply a
+clean filter during a turn left unchanged files cached with their old content,
+whereas a fresh snapshot applied the new filter. The resulting tree also feeds
+sync, making this a promotion correctness issue rather than just a display issue.
+Handling newly ignored files already required special cache maintenance; safely
+invalidating all conversion-rule changes would add further complexity.
+
+Decision: revert index reuse and retain fresh private indexes for every snapshot.
+Reconsider only with a complete invalidation design, correctness coverage, and
+representative performance evidence. This experiment did not eliminate checkout
+materialization, filesystem traversal, integration checkouts, or drift checks.
 
 ### Resolved: no auto-commit or squash-on-push in the shipped implementation
 
