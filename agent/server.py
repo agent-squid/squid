@@ -2083,6 +2083,66 @@ async def history_around(msg_id: Optional[int] = None, flow_run_id: Optional[str
     return JSONResponse(payload)
 
 
+async def _realtime_history_query(message_type: str, payload: object) -> dict:
+    """Bounded history reads; never use the durable replay cursor for paging."""
+    common = {"topic", "agent", "adhoc", "flow_route", "bookmarked", "marked_bad", "topic_subtree"}
+    around = {"msg_id", "flow_run_id", "before", "after", "direction", "cursor_completed_at", "cursor_id", "limit"}
+    allowed = common | ({"offset", "limit"} if message_type == "history.page" else around)
+    if not isinstance(payload, dict) or payload.keys() - allowed:
+        return {"ok": False, "error": "invalid_history_query"}
+    integers = {"offset": (0, 1000000), "limit": (1, 100), "before": (0, 100),
+                "after": (0, 100), "msg_id": (1, 2**53 - 1), "cursor_id": (1, 2**53 - 1)}
+    for key, value in payload.items():
+        if key in integers:
+            low, high = integers[key]
+            if type(value) is not int or not low <= value <= high:
+                return {"ok": False, "error": "invalid_history_query"}
+        elif key in {"adhoc", "bookmarked", "marked_bad", "topic_subtree"}:
+            if type(value) is not bool:
+                return {"ok": False, "error": "invalid_history_query"}
+        elif not isinstance(value, str) or len(value) > 1024:
+            return {"ok": False, "error": "invalid_history_query"}
+    handler = history if message_type == "history.page" else history_around
+    response = await handler(**payload)
+    data = json.loads(response.body)
+    result = {"ok": True, **data} if response.status_code == 200 else {
+        "ok": False, "error": data.get("error", "invalid_history_query")}
+    # Leave room for the correlated envelope. Chunked transfers are separate work.
+    if len(json.dumps(result).encode("utf-8")) > _REALTIME_MAX_FRAME_BYTES - 4096:
+        return {"ok": False, "error": "history_result_too_large"}
+    return result
+
+
+_REALTIME_HISTORY_QUERY_LIMIT = 2
+_REALTIME_HISTORY_QUERY_TIMEOUT = 5.0
+
+
+def _history_query_frame(request_id: str, result: dict) -> dict:
+    frame = {"v": 1, "type": "command.result", "request_id": request_id, "payload": result}
+    # Match WebSocket.send_json's encoding and measure the entire wire envelope.
+    if len(json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > _REALTIME_MAX_FRAME_BYTES:
+        frame["payload"] = {"ok": False, "error": "history_result_too_large"}
+    return frame
+
+
+async def _run_history_query(frame: dict, outbound, principal: str, last_acked_cursor: int) -> None:
+    worker = asyncio.create_task(_realtime_history_query(frame["type"], frame.get("payload")))
+    try:
+        try:
+            result = await asyncio.wait_for(asyncio.shield(worker), _REALTIME_HISTORY_QUERY_TIMEOUT)
+        except asyncio.TimeoutError:
+            result = {"ok": False, "error": "history_query_timeout"}
+        except Exception:
+            log.exception("Realtime history query failed")
+            result = {"ok": False, "error": "history_query_failed"}
+        await _realtime_send(outbound, _history_query_frame(frame["request_id"], result), principal, last_acked_cursor)
+        # A timed-out to_thread read cannot be stopped. Keep its admission slot
+        # occupied until it finishes, and never emit its late result.
+        await asyncio.gather(worker, return_exceptions=True)
+    finally:
+        worker.cancel()
+
+
 def _is_squid_worktree_path(value: object) -> bool:
     return isinstance(value, str) and bool(re.search(r"(^|/)\.squid/worktrees/", value))
 
@@ -4870,15 +4930,22 @@ async def realtime_v1(websocket: WebSocket):
     notify_task: Optional[asyncio.Task] = None
     heartbeat_task: Optional[asyncio.Task] = None
     output_task: Optional[asyncio.Task] = None
+    output_task_queue = None
+    history_tasks: set[asyncio.Task] = set()
     try:
         while True:
-            receive_task = asyncio.create_task(websocket.receive_text())
+            if receive_task is None:
+                receive_task = asyncio.create_task(websocket.receive_text())
             notify_task = asyncio.create_task(_realtime_notifier.wait(generation))
             heartbeat_task = asyncio.create_task(asyncio.sleep(max(0.0, next_ping_at - loop.time())))
-            wait_set = {receive_task, notify_task, heartbeat_task, sender_task}
-            output_task = None
+            wait_set = {receive_task, notify_task, heartbeat_task, sender_task} | history_tasks
+            if output_task is not None and output_task_queue is not auth_output_q:
+                output_task.cancel()
+                output_task = None
             if auth_output_q is not None:
-                output_task = asyncio.create_task(auth_output_q.get())
+                if output_task is None:
+                    output_task = asyncio.create_task(auth_output_q.get())
+                    output_task_queue = auth_output_q
                 wait_set.add(output_task)
             done, pending = await asyncio.wait(
                 wait_set, return_when=asyncio.FIRST_COMPLETED,
@@ -4893,7 +4960,10 @@ async def realtime_v1(websocket: WebSocket):
                 if exc is not None:
                     raise exc
                 break
-            ephemeral = pending - {sender_task}
+            for query_task in done & history_tasks:
+                history_tasks.remove(query_task)
+                query_task.result()  # Surface outbound overflow through normal socket cleanup.
+            ephemeral = pending - {sender_task, receive_task, output_task} - history_tasks
             for task in ephemeral:
                 task.cancel()
             await asyncio.gather(*ephemeral, return_exceptions=True)
@@ -4905,6 +4975,7 @@ async def realtime_v1(websocket: WebSocket):
                     frame_raw = receive_task.result()
                 except KeyError:
                     binary_frame = True
+                receive_task = None
             if notify_task in done:
                 generation = notify_task.result()
             if heartbeat_task in done:
@@ -4915,6 +4986,7 @@ async def realtime_v1(websocket: WebSocket):
                 next_ping_at = loop.time() + _REALTIME_HEARTBEAT_SECONDS
             if output_task is not None and output_task in done:
                 chunk = output_task.result()
+                output_task = None
                 if chunk is None:
                     from .auth_sessions import get_session
                     session = get_session(auth_session_id) if auth_session_id else None
@@ -4994,6 +5066,32 @@ async def realtime_v1(websocket: WebSocket):
                     scopes = []
                     cursor = await asyncio.to_thread(get_realtime_cursor)
                     await _realtime_send(outbound, {"v": 1, "type": "unsubscribed", "payload": {}}, principal, last_acked_cursor)
+                elif message_type == "health.check":
+                    result = ({"ok": True, "status": "ok", "boot_time": BOOT_TIME, "version": SQUID_VERSION}
+                              if principal else {"ok": False, "error": "client_identity_required"})
+                    await _realtime_send(outbound, {
+                        "v": 1, "type": "command.result", "request_id": frame.get("request_id"),
+                        "payload": result,
+                    }, principal, last_acked_cursor)
+                elif message_type in {"history.page", "history.around"}:
+                    request_id = frame.get("request_id")
+                    valid_request_id = isinstance(request_id, str) and 1 <= len(request_id) <= 128
+                    if valid_request_id:
+                        try:
+                            request_id.encode("utf-8")
+                        except UnicodeEncodeError:
+                            valid_request_id = False
+                    if not valid_request_id:
+                        await _realtime_send(outbound, {
+                            "v": 1, "type": "error", "payload": {"code": "invalid_request_id"},
+                        }, principal, last_acked_cursor)
+                    elif not principal or len(history_tasks) >= _REALTIME_HISTORY_QUERY_LIMIT:
+                        error = "client_identity_required" if not principal else "history_query_busy"
+                        await _realtime_send(outbound, _history_query_frame(request_id, {
+                            "ok": False, "error": error}), principal, last_acked_cursor)
+                    else:
+                        history_tasks.add(asyncio.create_task(
+                            _run_history_query(frame, outbound, principal, last_acked_cursor)))
                 elif message_type == "history.check":
                     payload = frame.get("payload")
                     ids = payload.get("ids") if isinstance(payload, dict) else None
@@ -5072,6 +5170,8 @@ async def realtime_v1(websocket: WebSocket):
         for task in (receive_task, notify_task, heartbeat_task, output_task):
             if task is not None:
                 task.cancel()
+        for task in history_tasks:
+            task.cancel()
         sender_task.cancel()
 
 

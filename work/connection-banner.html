@@ -1,0 +1,40 @@
+<div id="squid-banner-preview" class="viz-dotted-background">
+<style>
+#squid-banner-preview {padding:20px 0;color-scheme:light dark;font:14px/1.5 system-ui,sans-serif;color:light-dark(#242424,#ededed)}
+#squid-banner-preview .window {max-width:650px;margin:auto;background:light-dark(#fff,#191919);border:1px solid light-dark(#ddd,#393939);border-radius:12px;overflow:hidden}
+#squid-banner-preview header {padding:14px 18px;border-bottom:1px solid light-dark(#eee,#333);font-weight:500}
+#squid-banner-preview .banner {padding:12px 18px;background:light-dark(#fff3db,#392d19);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+#squid-banner-preview .status {flex:1;min-width:180px}
+#squid-banner-preview .sub {font-size:12px;color:light-dark(#655536,#d6c4a1)}
+#squid-banner-preview button,#squid-banner-preview select {font:inherit;color:inherit;background:light-dark(#fff,#252525);border:1px solid light-dark(#d7d1c5,#62543c);border-radius:6px;padding:7px 10px;cursor:pointer}
+#squid-banner-preview .chat {padding:24px 18px;display:grid;gap:18px;min-height:130px}
+#squid-banner-preview .who {font-size:12px;opacity:.6;margin-bottom:4px}
+#squid-banner-preview .draft {margin:0 18px 18px;padding:12px;border:1px solid light-dark(#ddd,#444);border-radius:9px;color:light-dark(#666,#bbb)}
+#squid-banner-preview .help {padding:16px 18px;border-bottom:1px solid light-dark(#ddd,#444)}
+#squid-banner-preview .help p {margin:10px 0 0}
+#squid-banner-preview .states {display:flex;flex-wrap:wrap;gap:8px;max-width:650px;margin:14px auto 0}
+</style>
+<div class="window">
+<header>Squid · squid</header>
+<div class="banner" role="status" aria-live="polite"><i data-lucide="wifi-off" aria-hidden="true"></i><div class="status"><strong id="sb-title">Connection lost</strong><div class="sub" id="sb-sub">Showing loaded history · last synced 14 minutes ago</div></div><button id="sb-help" type="button" aria-expanded="false">Connection help</button></div>
+<div class="help" id="sb-guide" hidden><label for="sb-method">Connecting through </label><select id="sb-method"><option value="ts">Tailscale</option><option value="ssh">SSH forwarding</option><option value="local">Local access</option></select><p id="sb-advice">Check Tailscale is connected on both devices, the host is awake, and Squid is running.</p></div>
+<div class="chat"><div><div class="who">You · 14 minutes ago</div>Can you review the latest changes?</div><div><div class="who">Squid · 14 minutes ago</div>I reviewed the changes. The checks passed.</div></div>
+<div class="draft">Your draft stays here…</div>
+</div>
+<div class="states" aria-label="Preview connection state"><button type="button" data-state="lost">Disconnected</button><button type="button" data-state="sync">Reconnecting</button><button type="button" data-state="ok">Synced</button></div>
+<script>
+const root=document.getElementById('squid-banner-preview');
+const title=root.querySelector('#sb-title'), sub=root.querySelector('#sb-sub'), guide=root.querySelector('#sb-guide'), help=root.querySelector('#sb-help');
+const state={connection:'lost',method:'ts'};
+const copy={lost:['Connection lost','Showing loaded history · last synced 14 minutes ago'],sync:['Updating history…','Connected to Squid · fetching recent messages'],ok:['Up to date','History synced just now']};
+const advice={ts:'Check Tailscale is connected on both devices, the host is awake, and Squid is running.',ssh:'Check your SSH session is still connected. Reopen the forwarding tunnel, then retry this address.',local:'Check Squid is running on this computer at the expected address and port.'};
+function render(){title.textContent=copy[state.connection][0];sub.textContent=copy[state.connection][1];root.querySelector('#sb-advice').textContent=advice[state.method];root.querySelector('#sb-method').value=state.method;root.querySelectorAll('[data-state]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.state===state.connection)));}
+function save(){window.openai?.setWidgetState?.({modelContent:state,privateContent:{help:!guide.hidden}})?.catch(()=>{});}
+root.querySelectorAll('[data-state]').forEach(b=>b.onclick=()=>{state.connection=b.dataset.state;render();save();});
+help.onclick=()=>{guide.hidden=!guide.hidden;help.setAttribute('aria-expanded',String(!guide.hidden));save();};
+root.querySelector('#sb-method').onchange=e=>{state.method=e.target.value;render();save();};
+function restore(s){if(copy[s?.modelContent?.connection])state.connection=s.modelContent.connection;if(advice[s?.modelContent?.method])state.method=s.modelContent.method;guide.hidden=!s?.privateContent?.help;help.setAttribute('aria-expanded',String(!guide.hidden));render();}
+restore(window.openai?.widgetState);
+window.addEventListener('openai:set_globals',e=>{if(e.detail?.globals?.widgetState)restore(e.detail.globals.widgetState);});
+</script>
+</div>

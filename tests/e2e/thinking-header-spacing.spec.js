@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { installConnectionSocket } = require('./ws-health-mock');
 
 // These tests mock the application backend and must not trigger SW reloads.
 test.use({ serviceWorkers: 'block' });
@@ -16,6 +17,7 @@ const SSE_HEADERS = {
 };
 
 async function mockBackend(page) {
+  await installConnectionSocket(page);
   await page.route('**/health', r => r.fulfill({ json: { status: 'ok' } }));
   await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
   await page.route('**/quota**', r => r.fulfill({ json: {} }));
@@ -193,10 +195,15 @@ test('history reload retains the client boot banner', async ({ page }) => {
   await expect(page.locator('.boot-banner[data-retained-banner="yes"]')).toHaveCount(1);
 });
 
-test('explicit refresh follows the full logo after sync layout changes', async ({ page }) => {
+test('explicit refresh replaces old branding with one fresh timestamped logo', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
   await page.evaluate(() => Promise.all([initialHistoryReady, historyBootstrapSettled, bootBannerSettled]));
+  await page.evaluate(() => {
+    window.__squidBootLogoVariant = 2;
+    window.refreshMessageCount = 0;
+    currentBootMessage = async () => `Fresh fun message ${++window.refreshMessageCount}`;
+  });
   await page.evaluate(async () => {
     const filler = document.createElement('div');
     filler.style.cssText = 'height:2500px;flex-shrink:0';
@@ -212,7 +219,13 @@ test('explicit refresh follows the full logo after sync layout changes', async (
     try { await syncConnectionHistory(true, true); }
     finally { recoverPendingBubbles = originalRecover; }
   });
-  await expect(page.locator('.boot-banner').last()).toContainText('refreshed just now');
+  const marker = page.locator('.history-refresh-marker');
+  await expect(marker).toHaveCount(1);
+  await expect(marker).toContainText('History refreshed · ');
+  await expect(marker.locator('time')).toHaveAttribute('datetime', /T/);
+  await expect(marker.locator('.boot-logo-icon')).toHaveCount(1);
+  await expect(marker.locator('.boot-logo-bubble')).toHaveText('Fresh fun message 1');
+  await expect(page.locator('.boot-banner')).toHaveCount(1);
   const position = await page.locator('#messages').evaluate(el => ({
     gap: el.scrollHeight - el.scrollTop - el.clientHeight,
     logoBottom: el.querySelector('.boot-banner:last-child').getBoundingClientRect().bottom,
@@ -220,6 +233,46 @@ test('explicit refresh follows the full logo after sync layout changes', async (
   }));
   expect(position.gap).toBeLessThanOrEqual(1);
   expect(position.logoBottom).toBeLessThanOrEqual(position.paneBottom);
+  await marker.evaluate(el => { el.dataset.previousRefresh = 'yes'; });
+  await page.evaluate(() => syncConnectionHistory(true, true));
+  await expect(marker).toHaveCount(1);
+  await expect(page.locator('[data-previous-refresh]')).toHaveCount(0);
+  await expect(page.locator('.boot-banner')).toHaveCount(1);
+  await expect(marker.locator('.boot-logo-bubble')).toHaveText('Fresh fun message 2');
+  const timestamp = await marker.locator('time').getAttribute('datetime');
+  await page.evaluate(() => reloadHistory());
+  await expect(marker).toHaveCount(1);
+  await expect(marker.locator('time')).toHaveAttribute('datetime', timestamp);
+});
+
+test('latest refresh alone retains the randomly selected full banner', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.evaluate(() => Promise.all([initialHistoryReady, historyBootstrapSettled, bootBannerSettled]));
+  for (const variant of [0, 1, 2]) {
+    await page.locator('.boot-banner').evaluateAll(banners => {
+      banners.forEach(el => { el.dataset.oldBanner = 'yes'; });
+    });
+    await page.evaluate(async variant => {
+      delete window.__squidBootLogoVariant;
+      const random = Math.random;
+      Math.random = () => (variant + 0.5) / 3;
+      currentBootMessage = async () => `Updated fun message ${variant}`;
+      try { await syncConnectionHistory(true, true); }
+      finally { Math.random = random; }
+    }, variant);
+    const banner = page.locator('.boot-banner');
+    await expect(banner).toHaveCount(1);
+    await expect(page.locator('[data-old-banner]')).toHaveCount(0);
+    await expect(page.locator('#messages > .boot-banner:last-child')).toHaveCount(1);
+    await expect(banner.locator('time')).toHaveAttribute('datetime', /T/);
+    await expect(banner.locator('.boot-art')).toHaveCount(variant === 0 ? 1 : 0);
+    await expect(banner.locator('.boot-logo-squid-only')).toHaveCount(variant === 1 ? 1 : 0);
+    await expect(banner.locator('.boot-logo-talking-squid')).toHaveCount(variant === 2 ? 1 : 0);
+    if (variant === 2) {
+      await expect(banner.locator('.boot-logo-bubble')).toHaveText('Updated fun message 2');
+    }
+  }
 });
 
 test('pull-up near the edge requests refresh without enabling incoming-message following', async ({ page }) => {

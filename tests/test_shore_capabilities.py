@@ -146,3 +146,14 @@ def test_a_device_with_no_granted_capabilities_is_denied_every_type():
 def test_history_check_does_not_widen_dashboard_read_grant():
     with pytest.raises(ShoreProtocolError, match="shore_capability_denied"):
         authorize_capability_frame(CAPS, {"v": 1, "type": "history.check", "payload": {"ids": [1]}})
+
+
+def test_health_query_does_not_widen_dashboard_read_grant():
+    with pytest.raises(ShoreProtocolError, match="shore_capability_denied"):
+        authorize_capability_frame(CAPS, {"v": 1, "type": "health.check", "payload": {}})
+
+
+@pytest.mark.parametrize('kind', ['history.page', 'history.around'])
+def test_history_queries_do_not_widen_dashboard_read_grant(kind):
+    with pytest.raises(ShoreProtocolError, match='shore_capability_denied'):
+        authorize_capability_frame(CAPS, {'v': 1, 'type': kind, 'payload': {}})

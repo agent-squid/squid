@@ -944,7 +944,7 @@ body {
 #messages::-webkit-scrollbar-thumb { background: #2a2a40; border-radius: 3px; }
 
 .msg { padding: 0.6rem 0.9rem; border-radius: 8px; max-width: 90%; }
-.msg.user { background: var(--raised); align-self: flex-end; white-space: pre-wrap; }
+.msg.user { background: var(--surface-2); align-self: flex-end; white-space: pre-wrap; line-height: 1.6; overflow-wrap: anywhere; }
 .route-chain-marker {
   align-self: stretch;
   border-bottom: 1px solid #3a3a50;
@@ -1145,6 +1145,9 @@ body {
 
 /* thinking / status bubble */
 .msg.assistant.msg-thinking {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
   font-size: var(--text-md);
   font-style: italic;
   color: var(--text-mid);
@@ -4901,8 +4904,12 @@ button {
     overflow-wrap: anywhere;
   }
 
-  .msg.assistant {
+  .msg.assistant,
+  .msg.user {
     box-sizing: border-box;
+  }
+
+  .msg.assistant {
     max-width: 100%;
   }
 

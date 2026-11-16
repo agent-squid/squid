@@ -144,9 +144,11 @@ The [scroll/WS migration plan](../plans/chat-scroll-stability-and-ws-migration.m
 records targeted stabilization, not completion of the sole-transport decision:
 
 - Automatic HTTP history rebuilds were removed from startup, foreground,
-  network recovery and the periodic check. HTTP `/health` still runs every
-  15 seconds and on recovery; successful reachability is separate from history
-  recovery and protocol compatibility. Other HTTP/SSE Chat callers remain.
+  network recovery and the periodic check. Connection health now uses local WS
+  `health.check`, returning status, boot time, and version; its 15-second HTTP
+  probe timer is removed. WS heartbeat expiry reconnects the socket. Reachability,
+  application health replies, and history recovery remain separate states.
+  Startup/settings/provider health metadata and other HTTP/SSE callers remain.
 - Local WS `history.check` is a bounded, correlated read for up to 100 exact
   rendered IDs, with optional bookmark/bad filters. Oversized batches split;
   a single oversized row or failed check exposes explicit refresh. Pending
@@ -156,15 +158,26 @@ records targeted stabilization, not completion of the sole-transport decision:
   metadata recovery must not invoke new-completion placement. New completions
   retain their own ordering/reveal semantics. SSE turn streaming also uses the
   WS lifecycle feed for discovery during the transition.
-- Shore knows the query type but its existing `dashboard.read.v1` capability
-  denies it. No grant was widened. This is not direct/Shore Chat query parity.
+- Local `history.page` and `history.around` handlers are implemented as bounded
+  correlated reads, with strict query/request-ID validation and full-envelope
+  size checks. Reads run outside the receive loop with two admission slots per
+  socket, five-second timeout/error replies and late-result suppression. Socket
+  receive/auth output readers survive query-completion wakeups. Browser history
+  callers have not switched; transfer support remains open.
+- Shore knows `history.check`, `health.check`, `history.page` and `history.around`,
+  but its existing `dashboard.read.v1` capability denies these queries. No grant
+  was widened. This is not direct/Shore Chat query parity.
 - Serving a newer UI against an older running backend was observed to produce
   `unsupported_type` for this query while HTTP health succeeded. Restarting the
   backend resolved that probe; coordinated rollout/compatibility verification
   remains necessary.
 
-The latest targeted scroll/recovery validation passed 18 Node UI tests and 75
-browser checks. The full HTTP request audit, remaining query/file migration,
+Recorded frontend validation passed 18 Node UI tests and 79 browser checks
+(connection recovery, thinking/scroll, pagination and WS health), using mocked
+HTTP/WS services against the UI rather than live backend/Shore integration. The latest
+backend query review passed 121 realtime, Shore capability and parity tests.
+These runs do not establish the full migration gates. The full HTTP request
+audit, remaining query/file migration,
 capability-reviewed Shore parity, and WS-only verification below remain open.
 
 ### Implementation status (2026-08-15)

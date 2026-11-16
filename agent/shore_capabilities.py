@@ -27,7 +27,7 @@ from .shore_crypto import ShoreProtocolError
 # both fail closed either way.
 ADR0040_BROWSER_TO_HOST_TYPES = frozenset({
     "subscribe", "unsubscribe", "ack", "ping", "pong",
-    "chat.start", "chat.cancel", "history.check",
+    "chat.start", "chat.cancel", "history.check", "health.check", "history.page", "history.around",
     "auth.start", "auth.input", "auth.resize", "auth.cancel",
     "worktree.auto_resolve",
 })

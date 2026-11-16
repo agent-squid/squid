@@ -1865,12 +1865,16 @@ async def run_cursor(
         CURSOR_PATH, "--print",
         "--output-format", "stream-json",
         "--stream-partial-output",
-        "--trust",
     ]
     has_workspace_arg = any(arg == "--workspace" or arg.startswith("--workspace=") for arg in backend_args)
     if cwd and not has_workspace_arg:
         cmd += ["--workspace", cwd]
     cmd += list(backend_args)
+    # Headless trust + run-everything; cli-config allowlist still wins without --force.
+    if "--trust" not in backend_args:
+        cmd.append("--trust")
+    if "--force" not in backend_args and "--yolo" not in backend_args:
+        cmd.append("--force")
     if resume_session_id:
         cmd += ["--resume", resume_session_id]
     if model:

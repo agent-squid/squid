@@ -237,6 +237,29 @@ the WS global lifecycle feed for discovery. Shore recognizes `history.check`
 as a protocol type but its existing `dashboard.read.v1` grant does **not**
 authorize it; no remote capability is widened by this query.
 
+## Connection health
+
+Local `health.check` is a correlated read with an empty payload and a required
+subscribed client identity. `command.result` returns `ok`, `status: "ok"`,
+`boot_time`, and `version`; missing identity returns `client_identity_required`.
+This is a lightweight application-server status reply, not the full provider,
+harness or settings metadata returned by the legacy HTTP health endpoint.
+It creates no durable event or mutation/idempotency record.
+
+The browser connection probe has no HTTP fallback or periodic HTTP health timer.
+It queries on subscription and explicit recovery/navigation, coalesces concurrent
+requests on the same socket, and ignores obsolete replies after reconnect.
+Server heartbeats are answered with `pong`; missing traffic for two advertised
+heartbeat intervals plus one second triggers reconnect (suspended pages resume
+through foreground recovery). Socket liveness does not imply history recovery
+or application-health query success. Connection-state messages preserve the
+reading position and never rebuild history. History verification remains a
+separate callback on subscription/heartbeat.
+
+Shore recognizes the query but does not grant it through `dashboard.read.v1`.
+Existing authorized ping/pong behavior and remote capability grants are unchanged.
+Other HTTP health metadata consumers remain migration debt under ADR-0040.
+
 ## Compatibility and errors
 
 Only protocol version 1 is defined; the supported-version set is centralized so
@@ -255,3 +278,41 @@ involving a non-coalescible event sends a best-effort `slow_consumer` error
 (`resumable: true`) and closes with code 1013, after which the client resumes
 from the cursor it sends in `subscribe`. An oversized inbound frame closes with
 `frame_too_large` and code 1009. A heartbeat timeout closes with code 1001.
+
+### Bounded history query preparation
+
+Local `history.page` and `history.around` queries return correlated
+`command.result` payloads with `ok` and the same history fields as the existing
+history handlers. They require an established client identity. Paging uses
+`offset`/`limit` or completion-time cursors, independently of replay event IDs.
+Page limits are 1–100; around-window `before`/`after` counts are 0–100. Unknown
+fields and invalid types fail with `invalid_history_query`. Oversized results
+fail with `history_result_too_large`; there is no truncation or HTTP fallback
+inside the query handler. Queries are read-only and may be retried.
+
+These handlers prepare the browser migration; the browser still uses HTTP
+history, and oversized-result transfers remain unimplemented. Shore recognizes
+these types but its existing capability grants do not authorize them. Browser
+rollout must include stale-result handling, bounded-transfer support and remote
+capability parity before retiring HTTP callers.
+
+History page/around request IDs must be nonempty strings of at most 128
+UTF-8-encodable characters; invalid IDs receive `error` / `invalid_request_id`
+without echoing the invalid value. The complete outbound JSON envelope is checked against the
+frame limit, including the ID and UTF-8 encoding.
+
+Each socket admits at most two concurrent history page/around reads. Additional
+queries receive correlated `history_query_busy` results. Reads run separately
+from the receive loop so health, heartbeat, and control frames remain responsive.
+A read taking longer than five seconds receives `history_query_timeout`; an
+unexpected read failure receives `history_query_failed`. Timed-out reads retain
+their admission slot until the underlying operation finishes, and their late
+results are discarded. Disconnect cancels connection-owned query tasks; an
+already-running database thread may finish after disconnect. These limits do
+not provide transfer chunking or query cancellation commands.
+
+The socket receive and authentication-output queue reader remain alive across
+history-query completion wakeups. Only consumed readers are replaced; changing
+authentication sessions cancels the old session's reader. This prevents a frame
+or output chunk arriving after the wait snapshot from being discarded during
+pending-task cleanup.

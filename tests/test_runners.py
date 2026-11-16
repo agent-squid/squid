@@ -1554,6 +1554,8 @@ def test_codex_oneshot_fresh_vs_resume_command_shape():
 def test_cursor_oneshot_resume_uses_structured_print_resume_events():
     async def fake_stream_lines(cmd, **kwargs):
         assert cmd[:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
+        assert "--trust" in cmd
+        assert "--force" in cmd
         assert "--workspace" in cmd
         assert cmd[cmd.index("--workspace") + 1] == "/tmp"
         assert "--resume" in cmd
@@ -1630,10 +1632,13 @@ def test_cursor_oneshot_fresh_vs_resume_command_shape():
         asyncio.run(collect())
 
     assert captured[0][:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
+    assert "--trust" in captured[0]
+    assert "--force" in captured[0]
     assert captured[0][captured[0].index("--workspace") + 1] == "/tmp"
     assert "--resume" not in captured[0]
     assert captured[0][-1] == "fresh"
     assert captured[1][:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
+    assert "--force" in captured[1]
     assert captured[1][captured[1].index("--workspace") + 1] == "/tmp"
     assert "--resume" in captured[1]
     assert captured[1][-2:] == ["thread-1", "next"]

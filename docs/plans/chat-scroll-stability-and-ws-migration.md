@@ -23,13 +23,17 @@ workflow; this plan is not publication authorization.
 
 Phase 1 is partially implemented; do not restart from the original investigation
 below or treat all validation gates as complete. The latest ordering fix is in
-`ui/app.js`; PWA asset versions are `20261115-043`.
+`ui/app.js`; current PWA asset versions are `20261115-050`.
 
 Implemented:
 
 - Automatic startup, foreground, view-switch, network, and 15-second checks no
-  longer fetch/rebuild HTTP history. They still probe HTTP `/health`, retry
-  failed prompt-history bootstrap, and trigger bounded WS verification.
+  longer fetch/rebuild HTTP history. Connection probes now use local WS
+  `health.check`; the browser's 15-second HTTP probe timer is removed. WS
+  subscription/close and heartbeat expiry drive liveness and reconnect;
+  heartbeat delivery separately triggers bounded history verification. Failed
+  prompt-history bootstrap is retried after a successful WS health reply.
+  Startup/settings/provider metadata still have HTTP `/health` callers.
 - Local `history.check` verifies exact rendered IDs, including bookmark/bad
   annotation membership and prompt-only rows. It uses correlated command
   replies, validates inputs, splits oversized batches, rejects stale-scope
@@ -45,6 +49,13 @@ Implemented:
   new-completion sorting: that reproduced `[old response, new prompt, new WIP]`
   becoming `[new prompt, new WIP, old response]`, hiding the submitted prompt
   when bottom-following resumed. Prompt-only replacements retain their renderer.
+- Local `history.page` and `history.around` handlers now reuse history logic with
+  strict input validation, identity checks, bounded request IDs and full-envelope
+  response sizing. Two reads per socket may run outside the receive loop; five-
+  second timeout/error replies do not close the socket. Timed-out reads retain
+  admission until the read finishes and discard late results. Receive and auth
+  output readers persist across query-completion wakeups to prevent message loss.
+  Browser history still uses HTTP; these handlers are preparation, not rollout.
 - Newly completed/discovered rows still use completion-time ordering. History
   insertion around live turns preserves completed order when IDs disagree.
 - A frontend/backend mismatch was confirmed separately: the old running backend
@@ -52,12 +63,18 @@ Implemented:
   Restarting it resolved that probe. Host reachability is not proof of protocol
   compatibility or successful history recovery.
 
-Latest validation: 18 Node UI tests, JavaScript syntax checking, and 75 browser
-checks passed across connection recovery, thinking/scroll, and pagination. The
-browser checks include local submission followed by two quota-metadata updates
+Recorded frontend validation: 18 Node UI tests, JavaScript syntax checking, and
+79 browser checks passed across connection recovery, thinking/scroll, pagination,
+and WS health/heartbeat behavior. These browser suites use mocked service
+responses and socket fixtures against the UI; they are not live backend/Shore
+integration tests. The browser checks include local submission followed by two quota-metadata updates
 to the older response, a recovered live group, prompt/WIP identity and visibility,
 footer counts, bottom gap, filtered recovery, and prompt-only reading position.
-Backend validation and earlier reproductions are recorded in the
+The latest backend query review passed 121 realtime, Shore capability and parity
+tests, including completion-boundary races, invalid IDs, timeout/error handling,
+frame limits and admission limits. These are separate test runs, not one full
+end-to-end migration audit. Backend validation and earlier reproductions are
+recorded in the
 [postmortem](../postmortems/2026-11-15-transcript-scroll-drift.md).
 
 Next work:
@@ -71,11 +88,14 @@ Next work:
    The screenshot matches the reproduced ordering defect, but its exact
    production metadata-trigger field was not captured. The original delayed
    scroll recording also lacks a conclusive production callback trace.
-3. Execute Phase 2's request inventory and migration. HTTP health/bootstrap,
+3. Execute Phase 2's request inventory and migration. HTTP health metadata/bootstrap,
    history/search/navigation, status lookups and other application callers,
    plus SSE compatibility, remain migration debt. `history.check` is local;
    Shore recognizes but denies it under the existing `dashboard.read.v1` grant.
    Remote parity requires explicit capability design without widening grants.
+   The same restriction applies to `health.check`, `history.page` and
+   `history.around`. Use the [request inventory](ws-request-inventory.md) as a
+   starting point; dynamic URLs and form/download ownership still need audit.
 4. Review the final changes before any separately authorized publication.
    ADR-0056 remains proposed; incident closure and WS-only completion are not
    claimed by these fixes.
@@ -231,3 +251,71 @@ remains proposed unless explicitly accepted. Keep the two phases and their
 remaining debt visible in review. Do not report either migration or incident
 closure merely because the targeted tests pass, and do not publish without the
 separate review requested by the user.
+
+### History query preparation
+
+Implemented local correlated `history.page` and `history.around` handlers,
+reusing the current history handlers with strict parameter validation and
+bounded result sizes. Identity is required; invalid/oversized queries fail
+explicitly. Shore recognizes the names without widening existing grants.
+Browser history callers have not switched yet: transfer support and remote
+capability parity remain rollout prerequisites. This is preparation for Phase 2,
+not completion of the WS migration.
+
+The [static browser call-site inventory](ws-request-inventory.md) records direct
+fetch/EventSource calls, including non-Chat operations. Dynamic URLs and
+helper/form/download ownership still require manual audit.
+
+Initial query-preparation checkpoint: 114 realtime, Shore capability, and Shore
+parity tests passed,
+including identity rejection, HTTP result parity, invalid query types/bounds,
+oversized results, and explicit Shore denials. Python compilation passed.
+
+### Query handling publication review follow-up
+
+Fixed a completion-boundary race: history-query completion must not cancel a
+pending socket receive or authentication queue reader, since either can consume
+a message after the wait snapshot. Both readers now persist until consumed (or,
+for authentication output, the session changes). Request-ID validation also
+rejects lone Unicode surrogates before constructing a UTF-8 reply.
+
+Validation: 121 realtime, Shore capability and parity tests passed, including
+deterministic arrival-at-completion tests for socket frames and authentication
+output. Python compilation passed. This review covers the bounded history-query
+preparation; browser HTTP removal, transfer support and remote parity remain
+outstanding. No publication or backend restart was performed.
+
+### Reproducing recorded validation
+
+Run from the current isolated Squid code root, not an old turn's absolute path:
+
+```sh
+node --check ui/app.js
+node --test tests/ui/*.test.cjs
+uv run --no-project --with pytest --with pytest-asyncio --with-editable . python -m pytest tests/test_realtime.py tests/test_shore_capabilities.py tests/test_shore_realtime_parity.py -q
+```
+
+Run the focused browser suite from `tests/e2e`. With a fresh checkout, install
+its locked dependencies and Chromium first:
+
+```sh
+npm ci
+npx playwright install chromium
+```
+
+Ensure port 3456 is free before running: `playwright.config.js` serves this
+worktree's UI there, but outside CI it reuses an existing server. An unrelated
+server on that port can silently serve another checkout. The browser tests use
+mocked HTTP/WS services; no running Squid backend is required.
+
+Then run:
+
+```sh
+npx playwright test connection-history.spec.js thinking-header-spacing.spec.js history-pagination.spec.js --workers=3
+```
+
+The recorded counts above refer to earlier execution against the corresponding
+implementation checkpoints. This documentation review checked source consistency
+and document links; it did not rerun runtime tests. The focused suites do not
+cover all application HTTP requests, remote query parity, transfer interruption,
+or every Phase 1 scroll acceptance gate.

@@ -1483,3 +1483,241 @@ def test_history_check_respects_existing_row_filter_membership(tmp_path, monkeyp
         assert _receive_command_result(ws)['items'] == []
         ws.send_json({**query, 'payload': {'ids': [msg_id], filter_name: 'true'}})
         assert _receive_command_result(ws)['error'] == 'invalid_ids'
+
+
+def test_ws_health_query_requires_identity_and_reports_boot_version(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+        ws.receive_json()
+        query = {'v': 1, 'type': 'health.check', 'request_id': 'health-check', 'payload': {}}
+        ws.send_json(query)
+        assert _receive_command_result(ws) == {'ok': False, 'error': 'client_identity_required'}
+        ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
+            'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
+        assert ws.receive_json()['type'] == 'subscribed'
+        assert ws.receive_json()['type'] == 'snapshot'
+        ws.send_json(query)
+        result = _receive_command_result(ws)
+        assert result == {'ok': True, 'status': 'ok', 'boot_time': server.BOOT_TIME, 'version': server.SQUID_VERSION}
+        # Health reads do not create durable mutation/idempotency records.
+        ws.send_json(query)
+        assert _receive_command_result(ws) == result
+
+
+@pytest.mark.parametrize('kind', ['history.page', 'history.around'])
+def test_ws_history_queries_require_identity_and_match_http(tmp_path, monkeypatch, kind):
+    _fresh_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message('squid', 'codex', 'hello')
+    msg_id = stats_db.insert_assistant_message('squid', 'codex', user_id)
+    stats_db.update_assistant_message(msg_id, 'world', None)
+    payload = {'topic': 'squid', 'limit': 5}
+    if kind == 'history.around':
+        payload['msg_id'] = msg_id
+    with TestClient(server.app) as client:
+        expected = client.get('/history' + ('/around' if kind.endswith('around') else ''), params=payload).json()
+        with client.websocket_connect('/ws/v1') as ws:
+            ws.receive_json()
+            query = {'v': 1, 'type': kind, 'request_id': 'history-query', 'payload': payload}
+            ws.send_json(query)
+            assert _receive_command_result(ws)['error'] == 'client_identity_required'
+            ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
+                'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
+            assert ws.receive_json()['type'] == 'subscribed'
+            assert ws.receive_json()['type'] == 'snapshot'
+            ws.send_json(query)
+            assert _receive_command_result(ws) == {'ok': True, **expected}
+            for invalid in ({'limit': True}, {'limit': 101}, {'offset': -1}, {'topic': []},
+                            {'bookmarked': 'true'}, {'unknown': 1}):
+                ws.send_json({**query, 'payload': invalid})
+                assert _receive_command_result(ws)['error'] == 'invalid_history_query'
+
+
+@pytest.mark.asyncio
+async def test_ws_history_queries_reject_oversized_results(monkeypatch):
+    monkeypatch.setattr(server, 'history', AsyncMock(return_value=server.JSONResponse({'items': ['x' * 5000]})))
+    monkeypatch.setattr(server, '_REALTIME_MAX_FRAME_BYTES', 8192)
+    assert await server._realtime_history_query('history.page', {}) == {
+        'ok': False, 'error': 'history_result_too_large'}
+
+
+def test_history_query_frame_sizes_complete_unicode_envelope(monkeypatch):
+    monkeypatch.setattr(server, '_REALTIME_MAX_FRAME_BYTES', 256)
+    frame = server._history_query_frame('é' * 50, {'ok': True, 'items': ['x' * 100]})
+    assert frame['payload']['error'] == 'history_result_too_large'
+    assert len(json.dumps(frame, ensure_ascii=False, separators=(',', ':')).encode()) <= 256
+
+
+def test_ws_history_rejects_unbounded_request_ids(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+        ws.receive_json()
+        for request_id in (None, '', 123, 'x' * 129, 'x' * 131072, '\ud800'):
+            ws.send_text(json.dumps({'v': 1, 'type': 'history.page', 'request_id': request_id, 'payload': {}}))
+            assert ws.receive_json() == {'v': 1, 'type': 'error', 'payload': {'code': 'invalid_request_id'}}
+        ws.send_json({'v': 1, 'type': 'ping'})
+        assert ws.receive_json()['type'] == 'pong'
+
+
+def test_slow_history_queries_preserve_socket_liveness_and_admission(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    release = threading.Event()
+    started = threading.Event()
+    async def slow_query(*args):
+        started.set()
+        while not release.is_set():
+            await asyncio.sleep(.005)
+        return {'ok': True, 'items': []}
+    monkeypatch.setattr(server, '_realtime_history_query', slow_query)
+    monkeypatch.setattr(server, '_REALTIME_HISTORY_QUERY_LIMIT', 1)
+    monkeypatch.setattr(server, '_REALTIME_HISTORY_QUERY_TIMEOUT', .1)
+    try:
+        with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+            ws.receive_json()
+            ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
+                'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
+            assert ws.receive_json()['type'] == 'subscribed'
+            assert ws.receive_json()['type'] == 'snapshot'
+            query = {'v': 1, 'type': 'history.page', 'request_id': 'slow', 'payload': {}}
+            ws.send_json(query)
+            assert started.wait(2)
+            ws.send_json({'v': 1, 'type': 'health.check', 'request_id': 'health', 'payload': {}})
+            assert _receive_command_result(ws)['status'] == 'ok'
+            ws.send_json({'v': 1, 'type': 'ping'})
+            assert ws.receive_json()['type'] == 'pong'
+            ws.send_json({**query, 'request_id': 'busy'})
+            assert _receive_command_result(ws)['error'] == 'history_query_busy'
+            assert _receive_command_result(ws)['error'] == 'history_query_timeout'
+            # Timeout must not release admission while the underlying read runs.
+            ws.send_json({**query, 'request_id': 'still-busy'})
+            assert _receive_command_result(ws)['error'] == 'history_query_busy'
+            release.set()
+            ws.send_json({'v': 1, 'type': 'ping'})
+            assert ws.receive_json()['type'] == 'pong'
+    finally:
+        release.set()
+
+
+def test_history_query_failure_does_not_close_socket(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, '_realtime_history_query', AsyncMock(side_effect=RuntimeError('db unavailable')))
+    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+        ws.receive_json()
+        ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
+            'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
+        assert ws.receive_json()['type'] == 'subscribed'
+        assert ws.receive_json()['type'] == 'snapshot'
+        ws.send_json({'v': 1, 'type': 'history.page', 'request_id': 'failure', 'payload': {}})
+        assert _receive_command_result(ws) == {'ok': False, 'error': 'history_query_failed'}
+        ws.send_json({'v': 1, 'type': 'ping'})
+        assert ws.receive_json()['type'] == 'pong'
+
+
+@pytest.mark.asyncio
+async def test_history_timeout_discards_late_result_and_disconnect_cancels_worker(monkeypatch):
+    release = asyncio.Event()
+    stopped = asyncio.Event()
+    async def read(*args):
+        try:
+            await release.wait()
+            return {'ok': True, 'items': ['late']}
+        finally:
+            stopped.set()
+    send = AsyncMock()
+    monkeypatch.setattr(server, '_realtime_history_query', read)
+    monkeypatch.setattr(server, '_realtime_send', send)
+    monkeypatch.setattr(server, '_REALTIME_HISTORY_QUERY_TIMEOUT', .01)
+    frame = {'type': 'history.page', 'request_id': 'late', 'payload': {}}
+    task = asyncio.create_task(server._run_history_query(frame, None, 'local:test', 0))
+    for _ in range(100):
+        if send.call_count:
+            break
+        await asyncio.sleep(.005)
+    assert send.call_count == 1
+    assert send.call_args.args[1]['payload']['error'] == 'history_query_timeout'
+    assert not task.done()
+    release.set()
+    await task
+    assert send.call_count == 1  # No late success after timeout.
+    release.clear()
+    stopped.clear()
+    task = asyncio.create_task(server._run_history_query(frame, None, 'local:test', 0))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.wait_for(stopped.wait(), 1)
+
+
+def test_query_completion_keeps_inflight_receive(tmp_path, monkeypatch):
+    """Deliver ping after wait's done snapshot, before pending-task cleanup."""
+    _fresh_db(tmp_path, monkeypatch)
+    original_wait = asyncio.wait
+    boundary = threading.Event()
+    delivered = threading.Event()
+    async def wait_at_boundary(tasks, **kwargs):
+        done, pending = await original_wait(tasks, **kwargs)
+        if any(getattr(task.get_coro(), '__name__', '') == '_run_history_query' for task in done):
+            boundary.set()
+            for _ in range(1000):
+                receive = next((task for task in pending
+                                if getattr(task.get_coro(), '__name__', '') == 'receive_text'), None)
+                if receive is not None and receive.done():
+                    delivered.set()
+                    break
+                await asyncio.sleep(.001)
+        return done, pending
+    monkeypatch.setattr(server.asyncio, 'wait', wait_at_boundary)
+    monkeypatch.setattr(server, '_realtime_history_query', AsyncMock(return_value={'ok': True, 'items': []}))
+    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+        ws.receive_json()
+        ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
+            'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
+        assert ws.receive_json()['type'] == 'subscribed'
+        assert ws.receive_json()['type'] == 'snapshot'
+        ws.send_json({'v': 1, 'type': 'history.page', 'request_id': 'boundary', 'payload': {}})
+        assert _receive_command_result(ws)['ok']
+        assert boundary.wait(2)
+        ws.send_json({'v': 1, 'type': 'ping'})
+        assert delivered.wait(2)
+        # A second ping bounds the regression: old code drops the first and
+        # answers only the second, so the health result arrives before pong #2.
+        ws.send_json({'v': 1, 'type': 'ping'})
+        ws.send_json({'v': 1, 'type': 'health.check', 'request_id': 'after', 'payload': {}})
+        assert ws.receive_json()['type'] == 'pong'
+        assert ws.receive_json()['type'] == 'pong'
+        assert _receive_command_result(ws)['status'] == 'ok'
+
+
+def test_query_completion_keeps_inflight_auth_output(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    original_wait = asyncio.wait
+    queues = []
+    delivered = threading.Event()
+    async def attach(*args):
+        queue = asyncio.Queue()
+        queues.append(queue)
+        return 'test-session', queue
+    async def wait_at_boundary(tasks, **kwargs):
+        done, pending = await original_wait(tasks, **kwargs)
+        if any(getattr(task.get_coro(), '__name__', '') == '_run_history_query' for task in done):
+            getter = next((task for task in pending
+                           if getattr(task.get_coro(), '__name__', '') == 'get'), None)
+            assert getter is not None
+            queues[0].put_nowait(b'boundary-output')
+            await original_wait({getter})
+            delivered.set()
+        return done, pending
+    monkeypatch.setattr(server.asyncio, 'wait', wait_at_boundary)
+    monkeypatch.setattr(server, '_handle_realtime_mutation', attach)
+    monkeypatch.setattr(server, '_realtime_history_query', AsyncMock(return_value={'ok': True, 'items': []}))
+    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+        _subscribe_auth(ws)
+        ws.send_json({'v': 1, 'type': 'auth.start', 'request_id': 'attach', 'payload': {}})
+        ws.send_json({'v': 1, 'type': 'history.page', 'request_id': 'boundary', 'payload': {}})
+        assert _receive_command_result(ws)['ok']
+        assert delivered.wait(2)
+        ws.send_json({'v': 1, 'type': 'ping'})
+        frame = ws.receive_json()
+        assert frame['type'] == 'auth.output'
+        assert base64.b64decode(frame['payload']['data']) == b'boundary-output'
+        assert ws.receive_json()['type'] == 'pong'

@@ -132,15 +132,21 @@ implemented paths and unresolved gates. Current code preserves captured
 bottom-following, restores after synchronous history decorations, verifies
 rendered rows through bounded local WS queries, and replaces existing rows in
 place. Bookmark/bad and prompt-only recovery are covered. Automatic HTTP
-history rebuilds have been removed; HTTP health checks and other HTTP/SSE
-application traffic remain pending ADR-0040 migration.
+history rebuilds have been removed. Connection probes use local WS
+`health.check` with heartbeat-based liveness; startup/settings/provider health
+metadata and other HTTP/SSE application traffic remain pending ADR-0040 migration.
+Connection feedback preserves transcript position and does not rebuild history.
+Prepared WS page/around query handlers have not replaced browser HTTP history.
 
 The latest browser reproduction changed only an older response's quota metadata
 after actual submission. Recovery incorrectly moved that response below the new
 prompt/WIP. The correction preserves the original sibling boundary. Tests cover
 both fresh local submission and a recovered live group, repeated metadata
 updates, prompt/WIP identity, visibility, footer counts and bottom gap. Latest
-validation passed 18 Node UI tests and 75 browser checks, plus JS syntax checking.
+recorded frontend validation passed 18 Node UI tests and 79 browser checks,
+including later WS health/heartbeat checks, plus JS syntax checking. The separate
+backend query review passed 121 tests; backend transport coverage does not
+establish the remaining visual/reader-intent gates.
 
 These targeted fixes do not establish complete footer-inclusive fit measurement,
 reader intent tracking across every asynchronous layout path, WIP control

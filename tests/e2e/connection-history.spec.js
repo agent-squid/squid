@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { routeHealth, respondHealth, installConnectionSocket } = require('./ws-health-mock');
 
 // Backend-mocked tests must not reload under a newly installed service worker.
 test.use({ serviceWorkers: 'block' });
@@ -9,7 +10,8 @@ async function setup(page) {
     if (/\.(js|css|png|jpg|woff2?)$/.test(url.pathname) || url.pathname === '/') return route.continue();
     return route.fulfill({ json: [] });
   });
-  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await routeHealth(page, r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await installConnectionSocket(page);
 }
 test('failed history sync preserves messages and recovery displays latest without duplicates', async ({ page }) => {
   await setup(page);
@@ -54,12 +56,12 @@ test('unreachable host retains draft and reconnects on browser online event', as
   await page.goto('/');
   await expect(page.locator('#connection-status')).toContainText('Squid reachable');
   await page.locator('#input').fill('keep my draft');
-  await page.route('**/health', r => r.abort('connectionrefused'));
+  await routeHealth(page, r => r.abort('connectionrefused'));
   await page.evaluate(() => { void syncConnectionHistory(); });
   await expect(page.locator('#connection-status')).toContainText('Connection lost');
   await expect(page.locator('#input')).toHaveValue('keep my draft');
   await expect(page.locator('.assistant[data-msg-id="1"]')).toHaveCount(1);
-  await page.route('**/health', r => r.fulfill({ json: { status: 'ok' } }));
+  await routeHealth(page, r => r.fulfill({ json: { status: 'ok' } }));
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect(page.locator('#connection-status')).toContainText('Squid reachable');
   await expect(page.locator('#input')).toHaveValue('keep my draft');
@@ -264,7 +266,7 @@ for (const width of [320, 390, 768, 1280]) {
     await expect(page.locator('#connection-status')).toContainText('Squid reachable');
     await expect(page.locator('#connection-banner')).toBeHidden();
     await expect(page.locator('#connection-snackbar')).toBeHidden();
-    await page.route('**/health', r => r.abort('connectionrefused'));
+    await routeHealth(page, r => r.abort('connectionrefused'));
     await page.evaluate(() => syncConnectionHistory());
     await expect(page.locator('#connection-banner')).toBeVisible();
     await expect(page.locator('#connection-retry')).toBeVisible();
@@ -276,7 +278,7 @@ for (const width of [320, 390, 768, 1280]) {
     expect(geometry).toEqual({ belowHeader: true, separateActions: true, fits: true });
     await page.locator('#connection-help').click();
     await expect(page.locator('#connection-guide')).toBeVisible();
-    await page.route('**/health', r => r.fulfill({ json: { status: 'ok' } }));
+    await routeHealth(page, r => r.fulfill({ json: { status: 'ok' } }));
     await page.evaluate(() => window.dispatchEvent(new Event('online')));
     await expect(page.locator('#connection-banner')).toBeHidden();
     await expect(page.locator('#connection-guide')).toBeHidden();
@@ -303,7 +305,7 @@ for (const width of [320, 390, 1280]) {
     await page.route('**/history?**', r => r.fulfill({ json: { items: [{ ...item(1), content: 'Long history paragraph\n\n'.repeat(100) }], has_more: false } }));
     await page.goto('/');
     await expect(page.locator('#connection-status')).toContainText('Squid reachable');
-    await page.route('**/health', r => r.abort('connectionrefused'));
+    await routeHealth(page, r => r.abort('connectionrefused'));
     await page.evaluate(() => syncConnectionHistory());
     await page.evaluate(() => { messages.scrollTop = 300; });
     const geometry = () => page.locator('#messages').evaluate(el => ({ top: el.getBoundingClientRect().top, height: el.clientHeight, scroll: el.scrollTop }));
@@ -370,11 +372,11 @@ test('failed boot health does not leave an unreachable message after unchanged-h
   await page.route('**/history?**', route => route.fulfill({ json: { items: [item(1)], has_more: false } }));
   await page.goto('/');
   await expect(page.locator('#connection-status')).toContainText('Squid reachable');
-  await page.route('**/health', route => route.abort('connectionrefused'));
+  await routeHealth(page, route => route.abort('connectionrefused'));
   await page.evaluate(async () => { await showBootBanner(); await syncConnectionHistory(); });
   await expect(page.locator('#connection-banner')).toBeVisible();
   await expect(page.locator('#messages .boot-offline')).toHaveCount(0);
-  await page.route('**/health', route => route.fulfill({ json: { status: 'ok' } }));
+  await routeHealth(page, route => route.fulfill({ json: { status: 'ok' } }));
   await page.evaluate(() => syncConnectionHistory());
   await expect(page.locator('#connection-snackbar')).toHaveText('Back online · history updated');
   await expect(page.locator('#connection-banner')).toBeHidden();
@@ -408,12 +410,12 @@ test('background checks preserve the offline banner until confirmed recovery', a
   await page.route('**/history?**', route => route.fulfill({ json: { items: [item(1)], has_more: false } }));
   await page.goto('/');
   await expect(page.locator('#connection-status')).toContainText('Squid reachable');
-  await page.route('**/health', route => route.abort('connectionrefused'));
+  await routeHealth(page, route => route.abort('connectionrefused'));
   await page.evaluate(() => syncConnectionHistory());
   const before = await page.locator('#connection-banner').evaluate(el => el.outerHTML);
   let release;
   const gate = new Promise(resolve => { release = resolve; });
-  await page.route('**/health', async route => { await gate; return route.abort('connectionrefused'); });
+  await routeHealth(page, async route => { await gate; return route.abort('connectionrefused'); });
   await page.evaluate(() => { void syncConnectionHistory(); });
   expect(await page.locator('#connection-banner').evaluate(el => el.outerHTML)).toBe(before);
   release();
@@ -445,10 +447,10 @@ test('recovery during search retains the warning until history is synced', async
   await expect(page.locator('#connection-status')).toContainText('Squid reachable');
   await page.evaluate(() => startSearch('#all matching'));
   await expect(page.locator('.assistant.search-result-item')).toHaveCount(1);
-  await page.route('**/health', r => r.abort('connectionrefused'));
+  await routeHealth(page, r => r.abort('connectionrefused'));
   await page.evaluate(() => syncConnectionHistory());
   await expect(page.locator('#connection-banner')).toBeVisible();
-  await page.route('**/health', r => r.fulfill({ json: { status: 'ok' } }));
+  await routeHealth(page, r => r.fulfill({ json: { status: 'ok' } }));
   await page.evaluate(() => syncConnectionHistory());
   await expect(page.locator('#connection-banner')).toBeVisible();
   await expect(page.locator('#connection-status')).toContainText('clear search to sync history');
@@ -521,6 +523,7 @@ test('SSE lifecycle recovery updates and deletes exact rows without rebuilding u
     socket = ws;
     ws.onMessage(raw => {
       const frame = JSON.parse(raw);
+      if (frame.type === 'health.check') { void respondHealth(page, ws, frame); return; }
       if (frame.type === 'subscribe') {
         ws.send(JSON.stringify({ v: 1, type: 'subscribed', payload: {} }));
         ws.send(JSON.stringify({ v: 1, type: 'snapshot', event_id: 1, payload: { cursor_reset: true, conversations: [] } }));
@@ -593,6 +596,7 @@ for (const mode of ['bookmarked', 'marked_bad']) {
     await page.routeWebSocket('**/ws/v1', ws => {
       ws.onMessage(raw => {
         const frame = JSON.parse(raw);
+      if (frame.type === 'health.check') { void respondHealth(page, ws, frame); return; }
         if (frame.type === 'subscribe') {
           ws.send(JSON.stringify({ v: 1, type: 'subscribed', payload: {} }));
         } else if (frame.type === 'history.check') {
@@ -633,6 +637,7 @@ test('prompt-only recovery updates and deletes rows while preserving presentatio
     socket = ws;
     ws.onMessage(raw => {
       const frame = JSON.parse(raw);
+      if (frame.type === 'health.check') { void respondHealth(page, ws, frame); return; }
       if (frame.type === 'subscribe') ws.send(JSON.stringify({ v: 1, type: 'subscribed', payload: {} }));
       if (frame.type === 'history.check') {
         checks++;
@@ -691,6 +696,7 @@ for (const streaming of ['local', 'recovered']) {
     await page.routeWebSocket('**/ws/v1', ws => {
       ws.onMessage(raw => {
         const frame = JSON.parse(raw);
+      if (frame.type === 'health.check') { void respondHealth(page, ws, frame); return; }
         if (frame.type === 'subscribe') ws.send(JSON.stringify({ v: 1, type: 'subscribed', payload: {} }));
         if (frame.type === 'history.check') ws.send(JSON.stringify({ v: 1, type: 'command.result', request_id: frame.request_id,
           payload: { ok: true, items: [previous] } }));
@@ -731,3 +737,86 @@ for (const streaming of ['local', 'recovered']) {
     }
   });
 }
+
+test('connection probes use WS only and never rebuild or move the transcript', async ({ page }) => {
+  await setup(page);
+  await page.route('**/history?**', r => r.fulfill({ json: { items: [{ ...item(1), content: 'Reading response\n\n'.repeat(100) }], has_more: false } }));
+  await page.goto('/');
+  await page.evaluate(() => Promise.all([initialHistoryReady, historyBootstrapSettled, bootBannerSettled]));
+  await expect(page.locator('#connection-status')).toContainText('Squid reachable');
+  await page.evaluate(() => {
+    window.healthReadingRow = messages.querySelector('.assistant[data-msg-id="1"]');
+    messages.scrollTop = 200;
+    // Foreground quota metadata is a separate caller, already loaded here.
+    _providerMetadata = { mock: { gauge: { type: 'none' } } };
+  });
+  let httpHealth = 0, httpHistory = 0;
+  await page.route('**/health', r => { httpHealth++; return r.abort(); });
+  await page.route('**/history?**', r => { httpHistory++; return r.abort(); });
+  const before = await page.evaluate(() => healthReadingRow.getBoundingClientRect().top);
+  await page.evaluate(async () => {
+    await checkConnectionHealth();
+    window.dispatchEvent(new Event('online'));
+    recoverForegroundState();
+  });
+  await expect(page.locator('#connection-status')).toContainText('Squid reachable');
+  await expect.poll(() => page.evaluate(() => connectionHealthPending === null)).toBe(true);
+  expect(await page.evaluate(() => healthReadingRow.isConnected && healthReadingRow.getBoundingClientRect().top)).toBe(before);
+  expect(httpHealth).toBe(0);
+  expect(httpHistory).toBe(0);
+});
+
+test('WS heartbeats keep connection live; silence reconnects and WS health clears the warning', async ({ page }) => {
+  await page.clock.install();
+  await setup(page);
+  await page.route('**/history?**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  const sockets = [];
+  let replyHealth = true, releaseHealth;
+  let pongs = 0;
+  await page.routeWebSocket('**/ws/v1', ws => {
+    sockets.push(ws);
+    ws.onMessage(raw => {
+      const frame = JSON.parse(raw);
+      if (frame.type === 'subscribe') ws.send(JSON.stringify({ v: 1, type: 'subscribed', payload: {} }));
+      if (frame.type === 'health.check') {
+        const reply = () => ws.send(JSON.stringify({ v: 1, type: 'command.result', request_id: frame.request_id,
+          payload: { ok: true, status: 'ok', boot_time: 'new-server', version: 'test' } }));
+        if (replyHealth) reply(); else releaseHealth = reply;
+      }
+      if (frame.type === 'pong') pongs++;
+    });
+    ws.send(JSON.stringify({ v: 1, type: 'hello', payload: { heartbeat_seconds: 1 } }));
+  });
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Squid reachable');
+  await page.clock.runFor(2000);
+  sockets.at(-1).send(JSON.stringify({ v: 1, type: 'ping', payload: {} }));
+  await expect.poll(() => pongs).toBeGreaterThan(0);
+  await page.clock.runFor(2000);
+  await expect(page.locator('#connection-banner')).toBeHidden();
+  const previousConnections = sockets.length;
+  replyHealth = false;
+  await page.clock.runFor(1001);
+  await expect.poll(() => sockets.length).toBeGreaterThan(previousConnections);
+  await expect(page.locator('#connection-status')).toContainText('Connection lost');
+  await expect.poll(() => typeof releaseHealth).toBe('function');
+  replyHealth = true;
+  releaseHealth();
+  await expect(page.locator('#connection-banner')).toBeHidden();
+  await expect(page.locator('#connection-snackbar')).toHaveText('Back online');
+});
+
+test('an unsupported WS health query reports compatibility failure without HTTP fallback', async ({ page }) => {
+  await setup(page);
+  await page.route('**/history?**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Squid reachable');
+  let httpHealth = 0;
+  await page.route('**/health', r => { httpHealth++; return r.abort(); });
+  await page.evaluate(async () => {
+    realtimeV1.health = async () => ({ ok: false, error: 'unsupported_type' });
+    await checkConnectionHealth();
+  });
+  await expect(page.locator('#connection-status')).toContainText('Health check unavailable');
+  expect(httpHealth).toBe(0);
+});

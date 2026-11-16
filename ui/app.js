@@ -8712,6 +8712,17 @@ const realtimeV1 = (() => {
   let reconnectDelay = 500;
   let needsSnapshot = true;
   let subscribed = false;
+  let heartbeatTimer = null;
+  let heartbeatMs = 30000;
+  let socketGeneration = 0;
+  const armHeartbeat = () => {
+    clearTimeout(heartbeatTimer);
+    heartbeatTimer = setTimeout(() => {
+      if (document.hidden) return;
+      connectionMessage('lost', 'Connection lost · reconnecting to Squid');
+      realtimeV1?.resume();
+    }, heartbeatMs * 2 + 1000);
+  };
   let cursor = Number(localStorage.getItem('squid-realtime-v1-cursor') || 0);
   let globalEnabled = false;
   let onDiscover = null;
@@ -8841,20 +8852,27 @@ const realtimeV1 = (() => {
     const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const connectingSocket = new WebSocket(`${scheme}//${location.host}/ws/v1`);
     socket = connectingSocket;
+    socketGeneration++;
     connectingSocket.onopen = () => {
       reconnectDelay = 500;
+      armHeartbeat();
       for (const watch of watches.values()) watch.onAvailable?.();
     };
     connectingSocket.onmessage = event => {
       if (socket !== connectingSocket) return;
       let frame;
       try { frame = JSON.parse(event.data); } catch { return; }
+      if (frame.type === 'hello' && Number(frame.payload?.heartbeat_seconds) > 0) {
+        heartbeatMs = Number(frame.payload.heartbeat_seconds) * 1000;
+      }
+      armHeartbeat();
       if (frame.type === 'hello') {
         subscribe(needsSnapshot);
         needsSnapshot = false;
       }
       else if (frame.type === 'subscribed') {
         subscribed = true;
+        void checkConnectionHealth();
         void reconcileRenderedHistory();
         for (const watch of watches.values()) watch.onAvailable?.();
         for (const command of commands.values()) {
@@ -8899,11 +8917,19 @@ const realtimeV1 = (() => {
       else if (frame.type === 'auth.output' || frame.type === 'auth.done') {
         onAuthFrame?.(frame);
       }
-      else if (frame.type === 'ping') socket.send(JSON.stringify({ v: 1, type: 'pong', payload: {} }));
+      else if (frame.type === 'ping') {
+        socket.send(JSON.stringify({ v: 1, type: 'pong', payload: {} }));
+        // Liveness and transcript verification are separate from application health.
+        void reconcileRenderedHistory();
+      }
     };
     connectingSocket.onclose = () => {
       if (socket !== connectingSocket) return;
       socket = null;
+      socketGeneration++;
+      clearTimeout(heartbeatTimer);
+      connectionHealthPending = null;
+      if (!document.hidden) connectionMessage('lost', 'Connection lost · reconnecting to Squid');
       if (globalEnabled) {
         realtimeTransportMode.then(mode => {
           if (mode !== 'websocket') releaseRealtimeProcessState();
@@ -8970,15 +8996,19 @@ const realtimeV1 = (() => {
   };
 
   return {
+    generation() { return socketGeneration; },
     isActive() {
       return subscribed && socket?.readyState === WebSocket.OPEN;
     },
     resume() {
+      connectionHealthPending = null;
       if (!globalEnabled && !watches.size && !commands.size) return;
       needsSnapshot = true;
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
+      clearTimeout(heartbeatTimer);
       if (socket) {
+        socketGeneration++;
         const staleSocket = socket;
         socket = null;
         subscribed = false;
@@ -9002,6 +9032,11 @@ const realtimeV1 = (() => {
         subscribe(true);
         needsSnapshot = false;
       }
+    },
+    health() {
+      return sendCommand({ type: 'health.check', payload: {},
+        topic: '__global_lifecycle__', reuseSubscription: true,
+        timeoutMessage: 'WebSocket health check timed out.' });
     },
     checkHistory(ids, filters = {}) {
       return sendCommand({ type: 'history.check', payload: { ids, ...filters },
@@ -16183,6 +16218,19 @@ async function appendBootBannerAtBottom(el, { followBottom = false, beforePendin
   }
 }
 
+async function currentBootMessage() {
+  const insightsPromise = fetchInsights();
+  const streak = getStreak();
+  const now = new Date();
+  const insights = await insightsPromise;
+  const values = (await resolveInsightMeasures(insights)) || {};
+  // Always seed clock sources even if measures block is absent
+  if (!values.streak) values.streak = streak;
+  if (values.hour === undefined) values.hour = now.getHours();
+  if (values.dow === undefined) values.dow = now.getDay();
+  return pickBootMessage(insights, values);
+}
+
 async function showBootBanner() {
   try {
     const res = await fetch('/health');
@@ -16197,17 +16245,7 @@ async function showBootBanner() {
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
     const bootTime = data.boot_time ? fmtTime(data.boot_time) : '';
 
-    // Dynamic boot message
-    const insightsPromise = fetchInsights();
-    const streak = getStreak();
-    const now = new Date();
-    const insights = await insightsPromise;
-    const values = (await resolveInsightMeasures(insights)) || {};
-    // Always seed clock sources even if measures block is absent
-    if (!values.streak) values.streak = streak;
-    if (values.hour === undefined) values.hour = now.getHours();
-    if (values.dow === undefined) values.dow = now.getDay();
-    const bubbleText = pickBootMessage(insights, values);
+    const bubbleText = await currentBootMessage();
 
     const el = document.createElement('div');
     el.className = 'boot-banner';
@@ -20569,20 +20607,35 @@ function connectionMessage(state, text) {
   }
   restoreTranscriptPosition(position);
 }
-// Automatic recovery is owned by realtime replay/snapshots. A health probe
-// updates connectivity feedback without replacing the reader's transcript.
+// Connection probing uses the shared WS query channel. HTTP health metadata
+// callers elsewhere remain separate migration work; no HTTP fallback here.
+let connectionHealthPending = null;
 async function checkConnectionHealth() {
   if (document.hidden) return;
-  try {
-    const response = await fetch('/health', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
-    if (!response.ok) throw new Error('Host unavailable');
-    await response.json();
-    void loadPromptHistory();
-    void reconcileRenderedHistory();
-    if (currentView !== 'chat' || !resolveInitialHistoryReady) connectionMessage('reachable', 'Squid reachable');
-  } catch {
-    connectionMessage('lost', 'Squid unreachable · showing previously loaded content');
-  }
+  const generation = realtimeV1?.generation();
+  if (connectionHealthPending?.generation === generation) return connectionHealthPending.promise;
+  const request = { generation, promise: null };
+  connectionHealthPending = request;
+  request.promise = (async () => {
+    try {
+      if (!realtimeV1) throw new Error('WebSocket is unavailable');
+      const pending = realtimeV1.health();
+      request.generation = realtimeV1.generation();
+      const result = await pending;
+      if (connectionHealthPending !== request || document.hidden) return;
+      if (!result.ok || result.status !== 'ok') throw new Error(result.error || 'Invalid health reply');
+      void loadPromptHistory();
+      if (currentView !== 'chat' || !resolveInitialHistoryReady) connectionMessage('reachable', 'Squid reachable');
+    } catch {
+      if (connectionHealthPending !== request || document.hidden) return;
+      connectionMessage('lost', realtimeV1?.isActive()
+        ? 'Health check unavailable · reconnect or update Squid'
+        : 'Connection lost · reconnecting to Squid');
+    } finally {
+      if (connectionHealthPending === request) connectionHealthPending = null;
+    }
+  })();
+  return request.promise;
 }
 async function syncConnectionHistory(forceLatest = false, showRefreshBanner = false) {
   if (connectionSyncBusy || document.hidden) return;
@@ -20590,9 +20643,8 @@ async function syncConnectionHistory(forceLatest = false, showRefreshBanner = fa
   const generation = historyGeneration;
   try {
     // Keep the current warning and layout stable while probing in background.
-    const health = await fetch('/health', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
-    if (!health.ok) throw new Error('Host unavailable');
-    await health.json();
+    const health = await realtimeV1?.health();
+    if (!health?.ok || health.status !== 'ok') throw new Error('Host unavailable');
     void loadPromptHistory();
     if (currentView !== 'chat') {
       connectionLatest.hidden = true;
@@ -20668,13 +20720,23 @@ async function syncConnectionHistory(forceLatest = false, showRefreshBanner = fa
     connectionMessage('ok', 'Up to date');
     recoverPendingBubbles();
     if (showRefreshBanner) {
+      await bootBannerSettled;
+      const bubbleText = await currentBootMessage();
+      messages.querySelectorAll(':scope > .boot-banner').forEach(el => el.remove());
       const el = document.createElement('div');
-      el.className = 'boot-banner';
+      el.className = 'boot-banner history-refresh-marker';
       el.setAttribute('role', 'status');
-      el.innerHTML = bootLogoHtml('History refreshed') +
-        '<div class="boot-meta">AgentSquid · refreshed just now</div>';
-      // An explicit refresh follows its logo even if sync status/layout changes
-      // moved the bottom between resetting history and inserting the banner.
+      el.innerHTML = bootLogoHtml(bubbleText);
+      const refreshedAt = new Date().toISOString();
+      const label = document.createElement('div');
+      label.className = 'boot-meta';
+      label.appendChild(document.createTextNode('History refreshed · '));
+      const time = document.createElement('time');
+      time.dateTime = refreshedAt;
+      time.textContent = fmtTime(refreshedAt);
+      label.appendChild(time);
+      el.appendChild(label);
+      // Follow the latest refresh marker even if sync changed the layout.
       await appendBootBannerAtBottom(el, { followBottom: true });
     } else if (forceLatest) {
       scrollToBottom(true);
@@ -20688,7 +20750,8 @@ async function syncConnectionHistory(forceLatest = false, showRefreshBanner = fa
 }
 document.getElementById('connection-retry').onclick = () => {
   document.querySelector(`#load-errors > [data-view="${currentView}"]`)?._retry?.();
-  void syncConnectionHistory();
+  realtimeV1?.resume();
+  void checkConnectionHealth();
 };
 connectionLatest.onclick = () => syncConnectionHistory(true);
 const connectionGuide = document.getElementById('connection-guide');
@@ -20744,7 +20807,6 @@ window.addEventListener('offline', () => {
   // Local servers and tunnels may still be reachable despite this browser hint.
   void checkConnectionHealth();
 });
-setInterval(() => { void checkConnectionHealth(); }, 15000);
 initialHistoryReady.then(() => checkConnectionHealth());
 
 // Keep fast refreshes silent, including while initial history is loading.

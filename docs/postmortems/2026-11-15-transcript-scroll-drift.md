@@ -328,3 +328,58 @@ passed (connection recovery, thinking/scroll, and history pagination), including
 both new metadata-after-submission regressions. JavaScript syntax checking
 passed. PWA cache versions were bumped together to `20261115-043`. This change
 is frontend-only; no backend restart or publication was performed.
+
+
+## WS connection-probe migration (2026-11-15)
+
+Connection health now uses the existing correlated WS query channel via local
+`health.check` (status, boot time, version), with no HTTP fallback. The browser's
+15-second HTTP connection-probe timer is removed; subscription, close, and
+heartbeat expiry drive connectivity, while subscription/heartbeat callbacks
+verify stored history separately. Reader position is preserved across status
+changes. Stale health replies cannot clear warnings from a newer connection.
+Health-query incompatibility is shown distinctly from a lost socket.
+
+The startup/settings/provider metadata HTTP health callers are separate remaining
+migration work; this does not claim every HTTP health caller or Chat operation
+has been migrated. Shore recognizes the query but existing capability grants
+deny it. The updated backend must be running before the new UI's health probe
+can succeed; no backend restart was performed by this edit turn.
+
+
+## Current migration and scroll handoff (2026-11-15)
+
+Scroll stabilization and transport migration remain separate work. Existing-row
+metadata recovery preserves the original sibling boundary, preventing an older
+response from moving below a newly submitted prompt/WIP. Connection status
+changes and bounded rendered-ID verification preserve reading position. Recorded
+frontend validation is 18 Node UI tests and 79 focused browser checks, including
+connection recovery, thinking/scroll, pagination and WS health behavior. These
+browser checks use mocked services and do not establish live backend or Shore
+integration. Earlier
+75-check results above describe the ordering-fix checkpoint, not the latest run.
+
+Local WS `history.page`/`history.around` preparation now includes identity and
+parameter checks, bounded UTF-8 request IDs, full-envelope response sizing,
+two concurrent reads per socket and five-second timeout/error replies. A timeout
+retains admission until the underlying read finishes and suppresses late output.
+Review found that query completion could cancel a receive/auth-output task after
+it had consumed data outside the wait snapshot. Persistent readers fix that
+boundary race; deterministic regressions cover both paths. The latest backend
+review passed 121 realtime, Shore capability and parity tests; compilation passed.
+
+Browser history/search/jumps/refresh, health metadata and other application
+operations still have HTTP callers; SSE compatibility remains. Shore recognizes
+the new query names without granting them. Transfers, remote capability parity,
+manual completion of the request inventory and WS-only runtime audit remain open.
+Whole-presentation fit, asynchronous reader intent, once-only tall-response reveal
+and WIP-control reachability still need the plan's acceptance evidence. The
+production delayed-scroll callback trace remains unresolved; incident closure,
+ADR-0056 acceptance and WS-only completion are not claimed.
+
+Current source PWA assets use `20261115-050`; this is not proof the running server
+or browser has loaded them. No runtime restart, browser validation, or publication
+was performed during this documentation update. See the
+[plan](../plans/chat-scroll-stability-and-ws-migration.md),
+[request inventory](../plans/ws-request-inventory.md), and
+[protocol](../realtime-protocol-v1.md#bounded-history-query-preparation).
