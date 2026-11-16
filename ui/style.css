@@ -2866,7 +2866,10 @@ body {
 }
 .fv-root-row button { white-space: nowrap; }
 .fv-root-status { min-height: 1.4em; color: var(--text-mid); }
-.fv-filter-wrap { padding: 0.4rem 1.4rem 0.25rem; }
+.fv-filter-wrap {
+  padding: 0.4rem 1.4rem 0.25rem;
+  font-family: system-ui, sans-serif;
+}
 .fv-filter {
   width: 100%;
   box-sizing: border-box;
@@ -2874,7 +2877,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--text);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: inherit;
   font-size: var(--text-sm);
   padding: 0.3rem 0.6rem;
 }
@@ -2882,7 +2885,7 @@ body {
 .fv-upload-status {
   margin-top: 0.25rem;
   color: var(--text-dim);
-  font-size: var(--text-xs);
+  font-size: inherit;
 }
 .fv-upload-status[hidden] { display: none; }
 .fv-upload-status.fv-uploading { color: var(--text); }
