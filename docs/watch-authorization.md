@@ -14,8 +14,8 @@ authority never authorizes a model turn. Bounded isolated successors share the
 run's attempt budget and saved deadline; settlement waits for all descendants.
 Task publication requires an explicitly activated human scope, an exact-tree
 review and a terminal host publication step. Existing intent-only scopes remain
-inactive. See [task-publication.md](task-publication.md). Other external mutations
-remain unsupported.
+inactive. See [task-publication.md](task-publication.md). Explicitly requested external actions can be recorded on the human execution grant as
+`external_actions`; absent that field, external mutations remain prohibited.
 
 ## Host policy
 
@@ -331,7 +331,7 @@ An authenticated operator may call
 The response identifies a `local_work` grant. The grant covers this immutable
 watch target/topic and original expiry, selected agent/runtime/cwd, and topic
 code roots. Agent or root configuration changes invalidate execution until a
-new explicit grant is recorded. No commit, push, publication, comment posting,
+new explicit grant is recorded. By default, no commit, push, publication, comment posting,
 merge, or external mutation is authorized. Normal isolated-turn preparation and
 sync apply; this API boundary does not sandbox the agent's ambient filesystem
 or shell. Watch-turn instructions explicitly restrict scope and label source
@@ -451,3 +451,45 @@ Visible terminal monitors remain readable by their message IDs, even after they
 leave the active status list. Reloading reads durable watch state and the saved
 last-check time; it does not replay poll messages, reset the source cursor, or
 change the quiet baseline. No per-poll chat messages are appended.
+
+
+## Explicitly requested external actions
+
+The authenticated human `execution-grant` request accepts optional
+`external_actions`: nonempty text of at most 4096 characters describing the
+requested actions and destinations. For example, add this field to the grant:
+
+```json
+{
+  "external_actions": "Reply to new human comments on https://github.com/owner/repo/issues/42 and send a summary to Slack channel C012345."
+}
+```
+
+Use `agentsquid watch execution-grant WATCH_ID --human-topic TOPIC --input grant.json`
+with the full execution-grant payload. This records permission through the existing
+human control path; an agent token or text in an issue cannot establish it.
+Existing grants stay local-only. Replace a grant by revoking it and recording a
+new one; idempotent retries cannot broaden a saved scope. The response and watch
+status expose the recorded scope. No extra per-send confirmation is introduced.
+
+The scope follows single-agent runs, watch-owned Flow steps, and isolated
+continuations. Review steps remain read-only. Git writes and task publication
+retain their separate restrictions even if mentioned in `external_actions`.
+Existing expiry, runtime binding, revocation, and run/attempt budgets apply.
+The execution harness still needs working service tools and credentials.
+
+This is an instruction-level permission contract, not a destination-enforcing
+sandbox or a host send service. The agent is instructed to ignore its own
+outgoing messages and check before resending an action with an uncertain result.
+Squid does not yet record outgoing provider message IDs or guarantee suppression
+of self-triggered events. Run limits bound dispatch but do not guarantee exactly-once
+messages. A started external-action run that fails is marked ambiguous and pauses
+the watch instead of automatically retrying, including failures in watch-owned
+Flows. Before dispatch, historical failed runs from older hosts are also checked
+against their original external-action grants and paused for inspection; replacing
+the grant cannot bypass this check. Pre-execution failures retain bounded retries. A failed send may have
+succeeded remotely; inspect uncertain outcomes before authorizing another attempt.
+
+Upgrades preserve pre-existing continuation grant fingerprints when the added
+`external_actions` permission is absent. Changes to instructions or authority
+still invalidate pending successors.

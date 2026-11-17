@@ -1078,6 +1078,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE watch_execution_grants ADD COLUMN flow_route TEXT")
         if "publication_json" not in _table_columns(conn, "watch_execution_grants"):
             conn.execute("ALTER TABLE watch_execution_grants ADD COLUMN publication_json TEXT")
+        if "external_actions" not in _table_columns(conn, "watch_execution_grants"):
+            conn.execute("ALTER TABLE watch_execution_grants ADD COLUMN external_actions TEXT")
         if "publication_enabled" not in _table_columns(conn, "watch_execution_grants"):
             conn.execute("ALTER TABLE watch_execution_grants ADD COLUMN publication_enabled INTEGER NOT NULL DEFAULT 0")
         if "flow_run_id" not in _table_columns(conn, "watch_runs"):

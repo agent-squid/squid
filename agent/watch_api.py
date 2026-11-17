@@ -40,7 +40,7 @@ async def watch_status(request: Request, include_messages: str = ""):
             placeholders = ','.join('?' for _ in message_ids) or 'NULL'
             rows = conn.execute(f'''SELECT w.id,w.topic,w.target,w.status,w.version,
                 w.next_poll,w.expires_at,w.lease_until,w.last_error,w.pause_reason,
-                g.agent,g.flow_route,g.instructions,m.msg_id AS monitor_msg_id,m.last_checked_at,
+                g.agent,g.flow_route,g.instructions,g.external_actions,m.msg_id AS monitor_msg_id,m.last_checked_at,
                 (SELECT r.assistant_msg_id FROM watch_runs r WHERE r.watch_id=w.id
                  ORDER BY r.created_at DESC,r.id DESC LIMIT 1) AS latest_msg_id,
                 (SELECT r.state FROM watch_runs r WHERE r.watch_id=w.id
@@ -54,7 +54,7 @@ async def watch_status(request: Request, include_messages: str = ""):
         result = []
         for row in rows:
             item = {k: row[k] for k in ('id','topic','target','status','version','next_poll',
-                                       'agent','flow_route','instructions','pause_reason','latest_msg_id','latest_run_state','monitor_msg_id','last_checked_at')}
+                                       'agent','flow_route','instructions','external_actions','pause_reason','latest_msg_id','latest_run_state','monitor_msg_id','last_checked_at')}
             if row['expires_at'] <= now and item['status'] in {'active', 'paused', 'proposed'}:
                 item['status'] = 'expired'
             item['polling'] = row['lease_until'] is not None and row['lease_until'] > now
@@ -177,17 +177,17 @@ async def invoke(request, operation, watch_id=None, *, human_topic=None):
             fields(body, ('adapter', 'target', 'request_key'), ('poll_interval', 'expires_at'))
             return await call(service.create, token, **body)
         if operation == 'execution-grant' and human_topic is not None:
-            fields(body, ('instructions', 'max_runs', 'max_attempts', 'request_key'), ('agent', 'flow_route', 'publication', 'enable_publication'))
+            fields(body, ('instructions', 'max_runs', 'max_attempts', 'request_key'), ('agent', 'flow_route', 'publication', 'enable_publication', 'external_actions'))
             from .watch_runs import execution_grant
             audit = json.dumps(dict(id=turn, principal='host-control:' + expected.hex()[:16],
-                                    action='grant_task_publication' if body.get('enable_publication') else 'grant_publication_intent' if body.get('publication') is not None else 'grant_local_work',
+                                    action='grant_task_publication' if body.get('enable_publication') else 'grant_publication_intent' if body.get('publication') is not None else 'grant_external_actions' if body.get('external_actions') else 'grant_local_work',
                                     topic=human_topic, watch_id=watch_id))
             grant = await call(execution_grant, service, topic=human_topic, watch_id=watch_id,
                                user_action=audit, **body)
-            return dict(grant_id=grant['id'], scope='task_publication' if grant['publication_enabled'] else 'local_work', watch_id=watch_id,
+            return dict(grant_id=grant['id'], scope='task_publication' if grant['publication_enabled'] else 'external_actions' if grant['external_actions'] else 'local_work', watch_id=watch_id,
                         agent=grant['agent'] if not grant['flow_route'] else None, flow_route=grant['flow_route'], max_runs=grant['max_runs'], max_attempts=grant['max_attempts'],
                         revoked=grant['revoked_at'] is not None,
-                        publication_recorded=grant['publication_json'] is not None, publication_enabled=bool(grant['publication_enabled']))
+                        external_actions=grant['external_actions'], publication_recorded=grant['publication_json'] is not None, publication_enabled=bool(grant['publication_enabled']))
         if operation == 'execution-revoke' and human_topic is not None:
             fields(body, ('grant_id',))
             from .watch_runs import revoke_execution

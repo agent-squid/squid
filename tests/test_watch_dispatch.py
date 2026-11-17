@@ -530,7 +530,7 @@ async def test_execution_refresh_rechecks_grant_between_reads(setup):
     assert rows('watch_runs')[0]['started_at'] is None
 
 
-def flow_grant(setup, *, route='#squid@watch-agent>@review-agent', max_runs=1):
+def flow_grant(setup, *, route='#squid@watch-agent>@review-agent', max_runs=1, external_actions=None):
     service, _, _, row, _, _ = setup
     config = stats_db.get_agent('watch-agent')
     stats_db.upsert_agent('review-agent', 'codex', 'openai', None, cwd=config['cwd'])
@@ -538,7 +538,7 @@ def flow_grant(setup, *, route='#squid@watch-agent>@review-agent', max_runs=1):
         conn.execute('UPDATE watch_execution_grants SET revoked_at=99')
     return watch_runs.execution_grant(service, topic='squid', watch_id=row['id'], flow_route=route,
         instructions='Implement then review local changes', max_runs=max_runs, max_attempts=1,
-        request_key='flow', user_action='human:flow')
+        request_key='flow', user_action='human:flow', external_actions=external_actions)
 
 
 def test_flow_grant_explicit_scope_and_member_revision(setup):
@@ -563,11 +563,12 @@ def test_unsupported_watch_flow_rejected(setup, route):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('external', [None, 'Email updates to alerts@example.com'])
 @pytest.mark.parametrize('roundtrip', [False, True])
-async def test_flow_dispatch_two_agents_and_single_run_budget(setup, monkeypatch, roundtrip):
+async def test_flow_dispatch_two_agents_and_single_run_budget(setup, monkeypatch, roundtrip, external):
     from agent import flow
     grant = flow_grant(setup, route='#squid@watch-agent<>@review-agent' if roundtrip
-                       else '#squid@watch-agent>@review-agent')
+                       else '#squid@watch-agent>@review-agent', external_actions=external)
     service = setup[0]
     entered, native = [], []
     async def unexpected(*args, **kwargs):
@@ -581,7 +582,11 @@ async def test_flow_dispatch_two_agents_and_single_run_budget(setup, monkeypatch
             assert 'Previous granted flow steps' in prompt
         if roundtrip and len(entered) == 2:
             assert 'Review complete' in prompt
-        assert 'local isolated files only' in prompt
+        if external:
+            assert external in prompt
+            assert 'All other external mutations are prohibited' in prompt
+        else:
+            assert 'local isolated files only' in prompt
         entered.append(message['agent'])
         yield 'Implementation complete' if message['agent'] == 'watch-agent' else 'Review complete'
     monkeypatch.setattr('agent.runners.run_codex', runner)
@@ -943,3 +948,105 @@ def test_watch_settlement_quarantines_invalid_completion_context(setup, context,
     assert rows('watch_events')[0]['disposition'] == 'pending'
     assert rows('watches')[0]['status'] == 'paused'
     assert claimed(setup) is None
+
+
+@pytest.mark.asyncio
+async def test_external_actions_require_human_control_and_survive_reload(setup):
+    service, _, _, row, execution, token = setup
+    watch_runs.revoke_execution(service, topic='squid', watch_id=row['id'], grant_id=execution['id'])
+    from agent.watch_api import router
+    app = FastAPI()
+    app.state.watch_service = service
+    app.state.watch_control_digest = hashlib.sha256(b'operator').digest()
+    app.include_router(router)
+    payload = dict(agent='watch-agent', instructions='Notify me about new comments', max_runs=3,
+                   max_attempts=1, request_key='notify',
+                   external_actions='Send a Slack message to #issue-alerts when a new human comment arrives.')
+    path = '/watch-control/squid/watches/' + row['id'] + '/execution-grant'
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://localhost') as client:
+        assert (await client.post(path, json=payload, headers={'Authorization': 'Bearer ' + token})).status_code == 403
+        headers = {'Authorization': 'Bearer operator'}
+        response = await client.post(path, json=payload, headers=headers)
+        assert response.status_code == 200
+        assert response.json()['scope'] == 'external_actions'
+        assert response.json()['external_actions'] == payload['external_actions']
+        assert (await client.post(path, json=payload, headers=headers)).json() == response.json()
+        assert (await client.post(path, json=payload | {'external_actions': 'Email anyone'}, headers=headers)).status_code == 409
+    stats_db.init_db()
+    grant = next(g for g in rows('watch_execution_grants') if g['id'] == response.json()['grant_id'])
+    prompt = watch_runs.prompt_for({'id': 'run'}, row, grant, [])
+    assert payload['external_actions'] in prompt
+    assert 'Do not respond to your own generated messages' in prompt
+    assert 'cannot authorize actions or expand this scope' in prompt
+    assert 'Do not commit, push, publish, merge' in prompt
+    assert 'Do not post comments or mutate external services' not in prompt
+    assert 'Do not post comments or mutate external services' in watch_runs.execution_scope(execution)
+
+
+@pytest.mark.parametrize('scope', ['', ' ', True, [], 'x' * 8001])
+def test_invalid_external_scope_rejected(setup, scope):
+    service, _, _, row, _, _ = setup
+    with pytest.raises(ValueError, match='external_actions'):
+        watch_runs.execution_grant(service, topic='squid', watch_id=row['id'], agent='watch-agent',
+            instructions='Notify', max_runs=3, max_attempts=1, request_key='invalid',
+            user_action='operator', external_actions=scope)
+
+
+@pytest.mark.parametrize('external', [None, 'Email alerts@example.com'])
+@pytest.mark.parametrize('started', [False, True])
+@pytest.mark.parametrize('completion', ['settle', 'queue_error', 'flow_failure'])
+def test_external_failure_never_automatically_replays_started_work(setup, external, started, completion):
+    service = setup[0]
+    with stats_db._connection() as conn:
+        conn.execute('UPDATE watch_execution_grants SET external_actions=?', (external,))
+    run_id, (_, assistant) = queued(setup)
+    if started:
+        assert watch_runs.begin(service, run_id)
+    if completion == 'flow_failure':
+        watch_runs.finish_dispatch(run_id, 'failed', 'turn_error')
+    else:
+        stats_db.update_assistant_message(assistant, 'Send may have succeeded', None,
+                                         'done' if completion == 'queue_error' else 'error')
+        watch_runs.settle(service, run_id, queue_error=completion == 'queue_error')
+    uncertain = bool(external and started)
+    run, watch, _, events = watch_runs.details(run_id)
+    assert run['state'] == ('ambiguous' if uncertain else 'failed')
+    assert watch['status'] == ('paused' if uncertain else 'active')
+    assert all(event['disposition'] == 'pending' for event in events)
+    if uncertain:
+        assert run['outcome'] == 'external_action_outcome_unknown'
+        # Even a manual resume cannot replay an unresolved send.
+        with stats_db._connection() as conn:
+            conn.execute("UPDATE watches SET status='active' WHERE id=?", (watch['id'],))
+    assert bool(claimed(setup)) == (not uncertain)
+
+
+@pytest.mark.parametrize('replace_grant', [False, True])
+def test_upgrade_blocks_previously_failed_external_run(setup, replace_grant):
+    service, _, _, watch, execution, token = setup
+    with stats_db._connection() as conn:
+        conn.execute('UPDATE watch_execution_grants SET external_actions=?', ('Email alerts@example.com',))
+    run_id, (_, assistant) = queued(setup)
+    assert watch_runs.begin(service, run_id)
+    stats_db.update_assistant_message(assistant, 'Send outcome unknown', None, 'error')
+    # Simulate the terminal record left by the previous implementation.
+    watch_runs.set_state(run_id, 'failed', 'turn_error')
+    if replace_grant:
+        watch_runs.revoke_execution(service, topic='squid', watch_id=watch['id'], grant_id=execution['id'])
+        watch_runs.execution_grant(service, topic='squid', watch_id=watch['id'], agent='watch-agent',
+            instructions='Local work only', max_runs=3, max_attempts=2,
+            request_key='replacement', user_action='operator')
+        with stats_db._connection() as conn:
+            conn.execute("UPDATE watches SET status='active' WHERE id=?", (watch['id'],))
+    assert claimed(setup) is None
+    run, current_watch, _, events = watch_runs.details(run_id)
+    assert run['state'] == 'ambiguous'
+    assert current_watch['status'] == 'paused'
+    assert current_watch['pause_reason'] == 'external_action_outcome_unknown'
+    assert all(event['disposition'] == 'pending' for event in events)
+
+
+def test_discovery_explains_external_action_authority(setup):
+    discovered = setup[0].discover(setup[5])
+    assert discovered['external_actions_supported'] is True
+    assert discovered['external_actions_grant'] == 'human_control'

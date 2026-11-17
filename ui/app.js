@@ -16495,7 +16495,9 @@ function showCtxPopup(spanEl) {
         if (path) {
           const text = await fetch('/localfile?' + new URLSearchParams({ path, _t: Date.now() })).then(r => r.text());
           _closeCtxPopup(popup);
-          openLogViewer(sessionId, _parseJsonlEntries(text), undefined, turns, rowMsgId, path);
+          openLogViewer(sessionId, _parseJsonlEntries(text),
+            source === 'agy-ndjson' ? 'AGY output captured by Squid. Includes submitted prompts and native events from when capture began.' : undefined,
+            turns, rowMsgId, path);
         } else if (entries) {
           _closeCtxPopup(popup);
           openLogViewer(
@@ -16845,11 +16847,23 @@ function _parseJsonlEntries(text) {
     seq += 1;
     let data;
     try { data = JSON.parse(line); } catch { data = { _unparsed: raw }; }
-    const type = (data && typeof data === 'object') ? (data.type || data.role || null) : null;
+    const type = (data && typeof data === 'object') ? (data.type || data.role || data.event || null) : null;
     let time_created = null;
     if (data && typeof data === 'object' && data.timestamp) {
       const t = Date.parse(data.timestamp);
       if (!Number.isNaN(t)) time_created = t;
+    }
+    // Squid envelopes preserve AGY stdout and supply receipt timestamps.
+    if (data && data.event === 'squid_agy_stdout') {
+      try {
+        const native = JSON.parse(data.raw);
+        const step = native && native.step_update;
+        entries.push({ kind: 'agy', type: step ? `${native.event} · ${step.step_type || ''} · ${step.state || ''}` : (native && native.event),
+          seq, time_created, data: native });
+      } catch {
+        entries.push({ kind: 'agy', type: 'unparsed stdout', seq, time_created, data });
+      }
+      continue;
     }
     entries.push({ kind: 'line', type, seq, time_created, data });
   }

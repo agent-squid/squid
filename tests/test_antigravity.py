@@ -273,3 +273,170 @@ def test_legacy_native_gauge_upgrades_but_custom_gauge_survives():
     assert _validate_provider('antigravity', raw).gauge.type == 'antigravity'
     raw['gauge'] = {'type': 'static', 'text': 'Custom'}
     assert _validate_provider('antigravity', raw).gauge.type == 'static'
+
+
+def test_capture_raw_events_resume_and_failed_turn(tmp_path, monkeypatch):
+    from agent.agy_logs import session_log_path
+    monkeypatch.setenv('SQUID_LOG_DIR', str(tmp_path))
+    events = [
+        {'event': 'init', 'conversation_id': 'conversation-1'},
+        {'event': 'step_update', 'step_update': {'step_type': 'tool', 'state': 'DONE',
+         'step_index': 1, 'tool_info': {'name': 'run_command', 'parameters': {'CommandLine': 'pwd'},
+                                     'output': '/workspace'}}},
+        result(),
+    ]
+    collect(monkeypatch, events, agent='agy')
+    path = session_log_path('agy', 'conversation-1')
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert rows[0]['message']['content'] == 'next'
+    assert [json.loads(row['raw']) for row in rows[1:]] == events
+    assert all(row['timestamp'] for row in rows)
+    assert path.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(runners.CLIError):
+        collect(monkeypatch, [result(status='ERROR')], agent='agy', resume_session_id='conversation-1')
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert rows[-2]['event'] == 'squid_prompt'
+    assert json.loads(rows[-1]['raw'])['result']['status'] == 'ERROR'
+    assert session_log_path('other-agent', 'conversation-1') != path
+
+
+def test_capture_retains_non_json_and_rejects_unsafe_ids(tmp_path, monkeypatch):
+    from agent.agy_logs import Capture, session_log_path
+    monkeypatch.setenv('SQUID_LOG_DIR', str(tmp_path))
+    capture = Capture('agy', 'session-1', 'full prompt', 7)
+    capture.record('not json')
+    rows = [json.loads(line) for line in session_log_path('agy', 'session-1').read_text().splitlines()]
+    assert rows[-1]['raw'] == 'not json'
+    with pytest.raises(ValueError):
+        session_log_path('agy', '../escape')
+
+
+def test_session_log_finds_only_captured_agy_logs(tmp_path, monkeypatch):
+    from agent import server
+    from agent.agy_logs import Capture, session_log_path
+    monkeypatch.setenv('SQUID_LOG_DIR', str(tmp_path))
+    assert server._find_session_log('antigravity', 'older-session', '', 'agy') is None
+    Capture('agy', 'session-1', 'prompt', 1)
+    assert server._find_session_log('antigravity', 'session-1', '', 'agy') == session_log_path('agy', 'session-1')
+    assert server._find_session_log('antigravity', '../escape', '', 'agy') is None
+
+
+def test_capture_never_splits_a_turn_between_conversations(tmp_path, monkeypatch):
+    from agent.agy_logs import Capture, session_log_path
+    monkeypatch.setenv('SQUID_LOG_DIR', str(tmp_path))
+    capture = Capture('agy', 'original', 'prompt', 7)
+    capture.record(json.dumps({'event': 'init', 'conversation_id': 'different'}))
+    capture.record(json.dumps(result()))
+    assert capture.disabled
+    assert not session_log_path('agy', 'different').exists()
+    assert not session_log_path('agy', 'conversation-1').exists()
+    rows = session_log_path('agy', 'original').read_text().splitlines()
+    assert len(rows) == 1
+
+
+def test_failed_result_attaches_log_without_init(tmp_path, monkeypatch):
+    monkeypatch.setenv('SQUID_LOG_DIR', str(tmp_path))
+    attachments = []
+    async def stream(*args, **kwargs):
+        yield json.dumps(result(status='ERROR', error='failed'))
+    monkeypatch.setattr(runners, 'AGY_PATH', '/test/agy')
+    monkeypatch.setattr(runners, '_stream_lines', stream)
+    monkeypatch.setattr(runners, '_attach_session', lambda *args: attachments.append(args))
+    async def run():
+        return [c async for c in runners.run_antigravity('prompt', agent='agy', msg_id=7)]
+    with pytest.raises(runners.CLIError):
+        asyncio.run(run())
+    assert attachments == [(7, 'conversation-1')]
+
+
+def test_capture_write_failure_does_not_fail_run(tmp_path, monkeypatch):
+    root = tmp_path / 'not-a-directory'
+    root.write_text('blocked')
+    monkeypatch.setenv('SQUID_LOG_DIR', str(root))
+    chunks, _ = collect(monkeypatch, [result()], agent='agy')
+    assert chunks[0] == 'answer'
+
+
+def test_agy_session_log_endpoint_and_file_read(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from agent import server
+    from agent.agy_logs import Capture
+    monkeypatch.setenv('SQUID_LOG_DIR', str(tmp_path))
+    stats_db.upsert_agent('agy-log-review', 'antigravity', 'antigravity', None, None)
+    capture = Capture('agy-log-review', 'session-review', 'submitted prompt', 1)
+    capture.record(json.dumps({'event': 'init', 'conversation_id': 'session-review'}))
+    client = TestClient(server.app)
+    response = client.get('/session-log', params={'agent': 'agy-log-review', 'session_id': 'session-review'})
+    assert response.status_code == 200
+    body = response.json()
+    assert body['source'] == 'agy-ndjson'
+    transcript = client.get('/localfile', params={'path': body['path']})
+    assert transcript.status_code == 200
+    assert json.loads(transcript.text.splitlines()[0])['message']['content'] == 'submitted prompt'
+
+
+def test_truncated_subprocess_capture_is_linked_from_step(tmp_path, monkeypatch):
+    from agent.agy_logs import session_log_path
+    monkeypatch.setenv('SQUID_LOG_DIR', str(tmp_path / 'logs'))
+    monkeypatch.setattr(runners, 'AGY_PATH', sys.executable)
+    attachments = []
+    monkeypatch.setattr(runners, '_attach_session', lambda *args: attachments.append(args))
+    event = {'event': 'step_update', 'step_update': {
+        'conversation_id': 'truncated-session', 'step_type': 'agent_response',
+        'state': 'ACTIVE', 'text_delta': 'partial answer'}}
+    # Emit native NDJSON, then exit without init or result. This exercises
+    # the real stdout reader, not the mocked _stream_lines helper.
+    script = 'import sys; print(' + repr(json.dumps(event)) + ', flush=True); sys.exit(3)'
+    chunks = []
+    async def run():
+        async for chunk in runners.run_antigravity(
+                'full prompt', agent='agy', msg_id=99, cwd=str(tmp_path),
+                backend_args=('-c', script)):
+            chunks.append(chunk)
+    with pytest.raises(runners.CLIError, match='CLI exited 3'):
+        asyncio.run(run())
+    assert chunks == ['partial answer']
+    assert attachments == [(99, 'truncated-session')]
+    rows = [json.loads(line) for line in session_log_path('agy', 'truncated-session').read_text().splitlines()]
+    assert rows[0]['message']['content'] == 'full prompt'
+    assert json.loads(rows[1]['raw']) == event
+    assert not any(info['msg_id'] == 99 for info in runners._proc_registry.values())
+
+
+def test_session_attachment_occurs_once_for_many_stream_steps(tmp_path, monkeypatch):
+    monkeypatch.setenv('SQUID_LOG_DIR', str(tmp_path))
+    attachments = []
+    async def stream(*args, **kwargs):
+        yield json.dumps({'event': 'init', 'conversation_id': 'conversation-1'})
+        for index in range(50):
+            yield json.dumps({'event': 'step_update', 'step_update': {
+                'conversation_id': 'conversation-1', 'step_type': 'agent_response',
+                'state': 'ACTIVE', 'step_index': index, 'text_delta': 'x'}})
+        yield json.dumps(result())
+    monkeypatch.setattr(runners, 'AGY_PATH', '/test/agy')
+    monkeypatch.setattr(runners, '_stream_lines', stream)
+    monkeypatch.setattr(runners, '_attach_session', lambda *args: attachments.append(args))
+    async def run():
+        return [c async for c in runners.run_antigravity('prompt', agent='agy', msg_id=7)]
+    asyncio.run(run())
+    assert attachments == [(7, 'conversation-1')]
+
+
+def test_resumed_failure_before_stdout_still_links_capture(tmp_path, monkeypatch):
+    from agent.agy_logs import session_log_path
+    monkeypatch.setenv('SQUID_LOG_DIR', str(tmp_path))
+    attachments = []
+    async def stream(*args, **kwargs):
+        raise runners.CLIError('failed before stdout')
+        yield  # async generator
+    monkeypatch.setattr(runners, 'AGY_PATH', '/test/agy')
+    monkeypatch.setattr(runners, '_stream_lines', stream)
+    monkeypatch.setattr(runners, '_attach_session', lambda *args: attachments.append(args))
+    async def run():
+        return [c async for c in runners.run_antigravity(
+            'prompt', agent='agy', msg_id=7, resume_session_id='conversation-1')]
+    with pytest.raises(runners.CLIError, match='before stdout'):
+        asyncio.run(run())
+    assert attachments == [(7, 'conversation-1')]
+    rows = session_log_path('agy', 'conversation-1').read_text().splitlines()
+    assert json.loads(rows[0])['message']['content'] == 'prompt'

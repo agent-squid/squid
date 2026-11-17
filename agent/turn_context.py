@@ -35,14 +35,15 @@ def sources_for_turn(msg_id):
             # Flow-owned continuations retain their existing scoped prompt.
             if owner['kind'] in {'human', 'watch'}:
                 if owner['kind'] == 'watch':
-                    from .watch_runs import details
+                    from .watch_runs import details, execution_scope
                     _, _, grant, _ = details(owner['run_id'])
                     source = 'agent/runtime/continuation-watch.md'
                     template = files('agent').joinpath('runtime/continuation-watch.md').read_text(encoding='utf-8')
                     instructions.append(dict(asdict(load_template(template, source).render(
-                        {'instructions': grant['instructions']})), delivery='injected'))
+                        {'instructions': grant['instructions'], 'scope': execution_scope(grant)})), delivery='injected'))
                     request_id = (origin or {}).get('reply_to')
-                instructions.append(continuation_instruction(row['mode']))
+                if owner['kind'] != 'watch' or row['mode'] != 'isolated' or not grant.get('external_actions'):
+                    instructions.append(continuation_instruction(row['mode']))
                 sources.extend([
                     dict(message_id=request_id, label='original request',
                          session_id=(origin or {}).get('session_id')),

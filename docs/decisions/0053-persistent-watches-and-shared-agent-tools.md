@@ -737,3 +737,20 @@ permission preservation, concurrent registrations, stale editor rejection, and
 YAML alias preservation. No live host configuration or grants were changed by
 this verification. Registration does not activate monitoring or authorize local
 work or publication; those retain their separate recorded grant/review paths.
+
+
+### Explicit external-action scope (2026-11-16)
+
+The human-authenticated watch execution grant now accepts optional
+`external_actions`, describing explicitly requested actions and destinations
+such as issue replies, Slack messages, or email. This updates the local-only
+restriction for those recorded actions without introducing provider-specific
+workflow actions or per-send confirmation. Omitted scope retains local-only
+behavior; external observations cannot grant or expand authority. Existing
+budgets, expiry, revocation, and descendant authority checks still apply.
+Git/publication restrictions and separate task review remain unchanged.
+
+The scope is delivered as agent instructions, not an enforced tool allowlist.
+Outgoing message-ID tracking and deterministic self-event suppression are not
+implemented. See [watch authorization](../watch-authorization.md#explicitly-requested-external-actions)
+for setup and limitations.

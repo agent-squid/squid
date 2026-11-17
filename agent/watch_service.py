@@ -208,7 +208,9 @@ class WatchService:
                         min_poll_seconds=policy.min_poll_seconds,
                         max_lifetime_seconds=policy.max_lifetime_seconds,
                         max_runs=policy.max_runs, max_attempts=policy.max_attempts,
-                        execution_scope='local_work' if policy.execution_enabled else None)
+                        execution_scope='local_work' if policy.execution_enabled else None,
+                        external_actions_supported=policy.execution_enabled,
+                        external_actions_grant='human_control' if policy.execution_enabled else None)
 
     def _plan_adapter(self, token):
         from .watch_plans import PlanError

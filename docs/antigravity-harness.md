@@ -81,3 +81,18 @@ the tooltip lists all buckets and reset times. Recorded changes cover the interv
 per-turn consumption:
 shared account activity and backend reporting delays can affect them.
 The former default Native badge automatically upgrades; custom gauges remain intact.
+
+## Conversation logs
+
+Squid captures submitted prompts (including injected history/context) and native
+AGY stdout lines under `~/.squid/logs/agy/<agent-hash>/<conversation-id>.jsonl`
+(or beneath `SQUID_LOG_DIR`). Each JSONL record carries a receipt timestamp;
+`squid_agy_stdout` records preserve the native line in `raw`, and `squid_prompt`
+records contain the submitted message and Squid message ID. Files are created
+with owner-only permissions, appended across resumed turns, and flushed for each
+event. Capture failures warn without failing the model turn.
+
+The context popup's session link opens these captures in the common log viewer,
+with search, event labels, and Squid turn dividers. Capture begins with this
+version; earlier turns and conversations run outside Squid are not imported from
+AGY's SQLite storage. Logs persist until removed manually.

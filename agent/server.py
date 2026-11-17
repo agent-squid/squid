@@ -4098,6 +4098,13 @@ def _find_session_log(harness: str, session_id: str, cwd: str, agent: str = "") 
         return None
     home = sandbox_home.sandbox_home_path(agent) if agent and sandbox_home.current_home_mode(agent) == "blank_home" else Path.home()
     try:
+        if harness == "antigravity":
+            from .agy_logs import session_log_path
+            try:
+                path = session_log_path(agent, session_id)
+            except ValueError:
+                return None
+            return path if path.is_file() else None
         if harness == "claudecode":
             base = home / ".claude" / "projects"
             direct = base / _encode_cwd_dashes(cwd) / f"{session_id}.jsonl"
@@ -4162,7 +4169,7 @@ async def session_log(agent: str, session_id: str, cwd: str = ""):
     return JSONResponse({
         "path": str(path) if path else None,
         "entries": None,
-        "source": "file" if path else None,
+        "source": ("agy-ndjson" if harness == "antigravity" else "file") if path else None,
         "turns": turns,
     })
 

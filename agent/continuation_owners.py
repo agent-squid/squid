@@ -138,8 +138,17 @@ def valid(conn, encoded, *, topic, agent, service=None):
     """Recheck persisted provenance; missing/unknown owners never gain authority."""
     try:
         owner = json.loads(encoded)
-        return (isinstance(owner, dict) and owner.get('kind') in {'human', 'human_flow', 'watch', 'route'}
-                and owner.get('topic') == topic and owner.get('agent') == agent
-                and capture(conn, owner.get('parent_id'), service=service) == owner)
+        if (not isinstance(owner, dict) or owner.get('kind') not in {'human', 'human_flow', 'watch', 'route'}
+                or owner.get('topic') != topic or owner.get('agent') != agent):
+            return False
+        current = capture(conn, owner.get('parent_id'), service=service)
+        if current and current['kind'] == 'watch' and current != owner:
+            grant = dict(conn.execute('SELECT * FROM watch_execution_grants WHERE id=?',
+                                      (current['grant_id'],)).fetchone())
+            # Pre-external-actions proofs omitted this column. Accept that exact
+            # legacy digest only while the new permission is still absent.
+            if grant.pop('external_actions') is None and owner.get('grant_digest') == _digest(grant):
+                current['grant_digest'] = owner['grant_digest']
+        return current == owner
     except (TypeError, ValueError, RecursionError):
         return False

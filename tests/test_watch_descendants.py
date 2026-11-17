@@ -410,12 +410,13 @@ def test_sequence_settlement_uses_links_when_wall_clock_moves_backwards(enabled)
     assert rows('watch_events')[0]['disposition'] == 'handled'
 
 
-def test_final_watch_settlement_rechecks_frozen_instruction_proof(enabled):
+@pytest.mark.parametrize('field', ['instructions', 'external_actions'])
+def test_final_watch_settlement_rechecks_frozen_instruction_proof(enabled, field):
     run_id, parent, _, _ = start(enabled)
     for _ in range(2):
         finish(link(c.claim(set())))
     with db._connection() as conn:
-        conn.execute("UPDATE watch_execution_grants SET instructions='Changed instructions'")
+        conn.execute(f"UPDATE watch_execution_grants SET {field}=?", ('Changed authority',))
     runs.settle(enabled[0], run_id)
     assert runs.details(run_id)[0]['state'] == 'partial'
     assert rows('watch_events')[0]['disposition'] == 'pending'
@@ -553,3 +554,28 @@ async def test_native_flow_launch_blocks_missing_bound_plan(enabled, monkeypatch
     await TopicWorker('squid')._process(item)
     assert not attempts
     assert db.get_message(parent)['status'] == 'error'
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_nullable_external_scope_migration_preserves_pending_authority(enabled, legacy):
+    import json
+    run_id, parent, _, record = start(enabled)
+    with db._connection() as conn:
+        owner = json.loads(record['owner_json'])
+        if legacy:
+            grant = dict(conn.execute('SELECT * FROM watch_execution_grants').fetchone())
+            grant.pop('external_actions')
+            owner['grant_digest'] = owners._digest(grant)
+            conn.execute('UPDATE continuations SET owner_json=? WHERE id=?',
+                         (json.dumps(owner), record['id']))
+            conn.execute('ALTER TABLE watch_execution_grants DROP COLUMN external_actions')
+    db.init_db()
+    with db._connection() as conn:
+        assert c.sequence_owner_valid(conn, parent, service=enabled[0])
+        # Compatibility must never permit changed instructions or new authority.
+        for field in ('instructions', 'external_actions'):
+            original = conn.execute(f'SELECT {field} FROM watch_execution_grants').fetchone()[0]
+            conn.execute(f'UPDATE watch_execution_grants SET {field}=?', ('Changed authority',))
+            assert not c.sequence_owner_valid(conn, parent, service=enabled[0])
+            conn.execute(f'UPDATE watch_execution_grants SET {field}=?', (original,))
+    assert c.claim(set())['id'] == record['id']

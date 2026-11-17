@@ -29,6 +29,7 @@ def main(argv):
                'grant needs expires_at; revoke needs grant_id; execution-grant needs exactly one of agent/flow_route, instructions, '
                'max_runs, max_attempts, request_key; optional publication records repo scope with '
                'repository (canonical code-root repo path), remote, base_branch, push:true and pull_request:true. '
+               'external_actions optionally describes explicitly authorized external actions and destinations (human control only). '
                'enable_publication:true explicitly activates host task publication; existing intent-only grants stay disabled. '
                'execution-revoke needs grant_id. runs lists durable outcomes.')
     parser.add_argument('--api-url', help='Explicit Squid instance URL (overrides SQUID_API_URL)')

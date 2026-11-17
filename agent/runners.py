@@ -1993,8 +1993,13 @@ async def run_antigravity(
         cmd += ["--model", model]
     cmd += ["-p", prompt if resume_session_id else _build_prompt(prompt, history)]
 
+    from .agy_logs import Capture
+    capture = Capture(agent, resume_session_id, cmd[-1], msg_id)
+
     start_ms = time.monotonic() * 1000
     session_id = resume_session_id
+    attach_session = _session_attacher(msg_id)
+    attach_session(session_id)
     streamed_text = False
     completed_tools = set()
     tool_error = None
@@ -2004,6 +2009,7 @@ async def run_antigravity(
         msg_id=msg_id, response_timeout=response_timeout, prompt=prompt,
         prompt_preview=prompt_preview, extra_env=backend_env,
     ):
+        capture.record(line)
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
@@ -2013,11 +2019,16 @@ async def run_antigravity(
         kind = event.get("event")
         if kind == "init":
             session_id = event.get("conversation_id") or session_id
-            _attach_session(msg_id, session_id)
+            attach_session(session_id)
         elif kind == "step_update":
             step = event.get("step_update")
             if not isinstance(step, dict):
                 continue
+            # A truncated stream may identify its session only in a step.
+            # Attach before yielding so cancellation cannot orphan its log.
+            if isinstance(step.get("conversation_id"), str) and step["conversation_id"]:
+                session_id = step["conversation_id"]
+                attach_session(session_id)
             if step.get("step_type") == "agent_response":
                 text = step.get("text_delta")
                 if isinstance(text, str) and text:
@@ -2049,12 +2060,13 @@ async def run_antigravity(
                     yield {"_tool": _tool_data(name, json.dumps(parameters))}
         elif kind == "result":
             result = event.get("result")
+            if isinstance(result, dict):
+                session_id = result.get("conversation_id") or session_id
+                attach_session(session_id)
             if not isinstance(result, dict) or result.get("status") != "SUCCESS":
                 detail = (result.get("error") or result.get("status")
                           if isinstance(result, dict) else "invalid result")
                 raise CLIError(f"Antigravity run failed: {detail}")
-            session_id = result.get("conversation_id") or session_id
-            _attach_session(msg_id, session_id)
             if not streamed_text and result.get("response"):
                 yield result["response"]
             elif not streamed_text and tool_error:

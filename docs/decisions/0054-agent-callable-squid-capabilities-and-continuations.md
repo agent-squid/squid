@@ -217,3 +217,20 @@ remain outside the delivered scope.
 - [ADR-0042: durable Flow execution](0042-durable-squid-flow-execution-store.md)
 - [ADR-0046: runtime context delivery](0046-layered-runtime-and-user-context-injection.md)
 - [ADR-0053: shared tools and watches](0053-persistent-watches-and-shared-agent-tools.md)
+
+
+### Explicit external-action scope (2026-11-16)
+
+The human-authenticated watch execution grant now accepts optional
+`external_actions`, describing explicitly requested actions and destinations
+such as issue replies, Slack messages, or email. This updates the local-only
+restriction for those recorded actions without introducing provider-specific
+workflow actions or per-send confirmation. Omitted scope retains local-only
+behavior; external observations cannot grant or expand authority. Existing
+budgets, expiry, revocation, and descendant authority checks still apply.
+Git/publication restrictions and separate task review remain unchanged.
+
+The scope is delivered as agent instructions, not an enforced tool allowlist.
+Outgoing message-ID tracking and deterministic self-event suppression are not
+implemented. See [watch authorization](../watch-authorization.md#explicitly-requested-external-actions)
+for setup and limitations.
