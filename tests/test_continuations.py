@@ -2003,3 +2003,16 @@ def test_competing_claims_and_cancellation_freeze_before_dispatch(setup):
     assert saved['child_id'] is None
     assert store._dispatch_authorization(row) == (False, None)
     assert store.claim(set()) is None
+
+
+@pytest.mark.parametrize('mode', [None, 'isolated', 'backing_git', 'task_review'])
+def test_durable_read_checks_work_without_realtime_schema(tmp_path, monkeypatch, mode):
+    monkeypatch.setattr(db, '_DB_PATH', tmp_path / 'legacy.db')
+    monkeypatch.setattr(store, '_enabled', False)
+    # Worktree promotion also runs before continuation/realtime initialization.
+    if mode is not None:
+        with db._connection() as conn:
+            conn.execute('CREATE TABLE continuations (child_id INTEGER, mode TEXT)')
+            conn.execute('INSERT INTO continuations VALUES(?,?)', (123, mode))
+    assert store.git_only(123, durable=True) == (mode == 'backing_git')
+    assert store.read_only(123, durable=True) == (mode in {'backing_git', 'task_review'})

@@ -12,7 +12,7 @@ from .context import load_template
 
 
 def continuation_instruction(mode):
-    if mode not in {'backing_git', 'task_review', 'isolated'}:
+    if mode not in {'backing_git', 'dependency_sync', 'task_review', 'isolated'}:
         raise ValueError('unsupported continuation instruction mode')
     source = f'agent/runtime/continuation-{mode}.md'
     content = files('agent').joinpath(f'runtime/continuation-{mode}.md').read_text(encoding='utf-8')

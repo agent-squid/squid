@@ -176,6 +176,12 @@ def authorization_error(conn, row, actual=None):
         return 'sequence_deadline'
     if owner['kind'] != 'human' and row.get('mode', 'isolated') not in {'isolated','task_review','task_publication'}:
         return 'owner_mode_not_authorized'
+    if row.get('mode') == 'dependency_sync':
+        from .dependency_sync import validate_scope
+        try:
+            validate_scope(row)
+        except (ValueError, OSError):
+            return 'dependency_scope_changed'
     if row.get('mode') == 'task_publication':
         from . import task_publication, task_workspaces
         try:
@@ -369,13 +375,17 @@ def _steps(body):
         raise ValueError('invalid_continuation_request')
     if (not isinstance(steps, list) or not 1 <= len(steps) <= MAX_STEPS
             or any(not isinstance(step, dict) or set(step) != {'mode', 'prompt'}
-                   or step['mode'] not in ('isolated', 'backing_git', 'task_review', 'task_publication')
+                   or step['mode'] not in ('isolated', 'backing_git', 'dependency_sync', 'task_review', 'task_publication')
                    or not isinstance(step['prompt'], str) or not step['prompt'].strip()
                    or len(step['prompt']) > 16000 for step in steps)
             or sum(len(step['prompt']) for step in steps) > 48000):
         raise ValueError('invalid_continuation_request')
     if any(step['mode'] == 'task_publication' for step in steps[:-1]):
         raise ValueError('invalid_continuation_request')
+    from .dependency_sync import specification
+    for step in steps:
+        if step['mode'] == 'dependency_sync':
+            specification(step['prompt'])
     return steps
 
 
@@ -409,10 +419,12 @@ def create(token, body):
         if not owners.valid(conn, credential['owner_json'], topic=parent['topic'], agent=parent['agent']):
             raise PermissionError('continuation_not_authorized')
         owner = json.loads(credential['owner_json'])
-        if any(step['mode'] in {'backing_git','task_review','task_publication'} for step in steps):
+        if owner['kind'] != 'human' and any(step['mode'] == 'dependency_sync' for step in steps):
+            raise PermissionError('continuation_not_authorized')
+        if any(step['mode'] in {'backing_git','dependency_sync','task_review','task_publication'} for step in steps):
             from . import task_workspaces, task_publication
             task = task_workspaces.for_turn(parent_id)
-            if ((task and any(step['mode'] == 'backing_git' for step in steps))
+            if ((task and any(step['mode'] in {'backing_git', 'dependency_sync'} for step in steps))
                     or (not task and any(step['mode'] in {'task_review','task_publication'} for step in steps))):
                 raise PermissionError('continuation_not_authorized')
             if any(step['mode'] == 'task_publication' for step in steps):
@@ -420,6 +432,10 @@ def create(token, body):
                     task_publication.scope_for(conn, credential['owner_json'], task)
                 except (RuntimeError, ValueError):
                     raise PermissionError('continuation_not_authorized') from None
+        from .dependency_sync import validate_scope
+        for step in steps:
+            if step['mode'] == 'dependency_sync':
+                validate_scope(dict(step, parent_id=parent_id, scope_json=credential['scope_json'], owner_json=credential['owner_json']))
         member = routes.membership(conn, parent_id)
         if member:
             if any(step['mode'] != 'isolated' for step in steps):
@@ -699,6 +715,17 @@ async def dispatch(row, dispatcher):
     if reason:
         await asyncio.to_thread(fail, row['id'], reason)
         return
+    if row['mode'] == 'dependency_sync':
+        from .dependency_sync import execute
+        operation = asyncio.create_task(asyncio.to_thread(execute, row))
+        try:
+            await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            with _connection() as conn:
+                conn.execute("UPDATE continuations SET cancel_requested=1 WHERE id=?", (row['id'],))
+            await settle(operation)
+            raise
+        return
     if row['mode'] == 'task_publication':
         from .task_publication import execute
         operation = asyncio.create_task(asyncio.to_thread(execute, row))
@@ -891,7 +918,7 @@ async def cancel_descendants(dispatcher, rows=None):
 def git_only(msg_id, *, durable=False):
     if not _enabled and not durable:
         return False
-    with _connection() as conn:
+    with db._connection() as conn:
         # Promotion also runs with continuations disabled and in databases
         # created before this feature. Persisted mode still governs old work.
         if durable and not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='continuations'").fetchone():
@@ -901,12 +928,12 @@ def git_only(msg_id, *, durable=False):
 
 def read_only(msg_id, *, durable=False):
     if durable:
-        with _connection() as conn:
+        with db._connection() as conn:
             if not db._table_columns(conn, 'continuations'):
                 return False
     if git_only(msg_id, durable=durable):
         return True
-    with _connection() as conn:
+    with db._connection() as conn:
         return conn.execute("SELECT 1 FROM continuations WHERE child_id=? AND mode='task_review'", (msg_id,)).fetchone() is not None
 
 

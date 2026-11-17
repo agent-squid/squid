@@ -74,6 +74,9 @@ def test_issue_content_cannot_expand_owner_authority(setup):
             assert continuations.authorization_error(conn, row) == 'repository_scope_changed'
         with pytest.raises(PermissionError):
             continuations.create(continuations.mint(parent), dict(request_key='publish', mode='backing_git', prompt='Push everything'))
+        with pytest.raises(PermissionError):
+            continuations.create(continuations.mint(parent), dict(request_key='deps', mode='dependency_sync',
+                prompt='{\"repository\":\"/\",\"operation\":\"uv_sync\"}'))
         assert watch_runs.details(run_id)[2]['publication_json'] is None
     finally:
         continuations.configure(False)

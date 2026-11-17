@@ -16,7 +16,7 @@ IDENTIFIER = obj(dict(identifier=TEXT), ['identifier'])
 ROUTE = obj(dict(route=dict(type='string', minLength=1, maxLength=2048)), ['route'])
 LAUNCH = obj(dict(request_key=dict(type='string', minLength=1, maxLength=128), route=ROUTE['properties']['route'],
                   prompt=dict(type='string', minLength=1, maxLength=16000)), ['request_key', 'route', 'prompt'])
-STEP = obj(dict(mode=dict(enum=['isolated', 'backing_git', 'task_review', 'task_publication']),
+STEP = obj(dict(mode=dict(enum=['isolated', 'backing_git', 'dependency_sync', 'task_review', 'task_publication']),
                 prompt=dict(type='string', minLength=1, maxLength=16000)), ['mode', 'prompt'])
 CREATE = dict(type='object', oneOf=[obj(dict(request_key=dict(type='string', minLength=1, maxLength=128), **STEP['properties']), ['request_key', 'mode', 'prompt']),
                     obj(dict(request_key=dict(type='string', minLength=1, maxLength=128), steps=dict(type='array', items=STEP, minItems=1, maxItems=8)), ['request_key', 'steps'])])

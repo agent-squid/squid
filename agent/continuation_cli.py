@@ -20,6 +20,10 @@ def main(argv):
         'Sequence steps must record their outcome with result --input using {"success":true} or {"success":false}. '
         'Keep each prompt to the next action and necessary scope; do not repeat conversation history or standard execution rules. '
         'Modes: isolated (local edits/checks), backing_git (inspect/commit and explicitly user-requested push of the current branch; no file edits, tags, releases or PRs). '
+        'dependency_sync is host-executed after successful completion and sync; prompt must be JSON, e.g. {\"repository\":\"/canonical/backing/repo\",\"operation\":\"uv_sync\"}. '
+        'Operations: uv_sync (uv sync --locked --reinstall), npm_ci (npm ci), pnpm_install (pnpm install --frozen-lockfile). '
+        'Edit manifests/lockfiles in the isolated turn first. No arbitrary commands; direct human turns only, without routes or task workspaces; Watch/Flow cannot use it. '
+        'The host records exit status/output and stops successors on failure or interruption; report maintenance as queued until then. A requested restart must follow successful maintenance. '
         'task_review requires a separate read-only review and positive result. task_publication must be last and requires a recorded human grant for the saved task branch; the host commits, pushes that branch and creates/updates its PR. This records future work; it does not wait for completion. No automatic retry after uncertain execution.')
     parser.add_argument('action', choices=['create', 'list', 'show', 'cancel', 'result'])
     parser.add_argument('identifier', nargs='?')
