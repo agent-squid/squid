@@ -13,9 +13,9 @@
 
 ## Quick Start
 
-1. Install at least one supported CLI and check whether you can use it (/login):
+1. Install at least one supported coding harness CLI and check whether you can use it (/login):
 
-| Backend | CLI | Install |
+| Coding harness | CLI | Install |
 |---|---|---|
 | Claude Code | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | OpenAI Codex | `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` |
@@ -23,10 +23,13 @@
 | OpenCode | `opencode` | `curl -fsSL https://opencode.ai/install \| bash` |
 | Antigravity | `agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` |
 | Pi | `pi` | `curl -fsSL https://pi.dev/install.sh \| sh` |
-| Ollama *(optional, local models)* | `ollama` | `curl -fsSL https://ollama.com/install.sh \| sh` |
 
 For Antigravity, complete native login with `agy` in a terminal first. See
 [Antigravity harness setup](docs/antigravity-harness.md) for configuration and verification limits.
+
+Optional: install [Ollama](https://ollama.com) with
+`curl -fsSL https://ollama.com/install.sh | sh` to serve local models.
+Ollama is a model provider used through a compatible coding harness, such as Pi or OpenCode.
 
 2. Install and run AgentSquid!
 
