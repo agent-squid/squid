@@ -210,7 +210,7 @@ print(json.dumps({'harnesses': list_harnesses(), 'providers': public_providers()
         assert set(data['providers']) == {'anthropic', 'antigravity'}
         assert data['providers']['anthropic']['label'] == 'Existing Claude'
     if setup != 'custom':
-        assert provider['label'] == 'agy'
+        assert provider['label'] == 'Google'
         assert harness['label'] == 'agy'
     if setup == 'custom':
         assert provider['label'] == 'Custom AGY'

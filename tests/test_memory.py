@@ -137,7 +137,9 @@ def test_isolated_code_roots_prompt_blocks_publish_with_code_changes():
     assert "MCP" not in prompt
     assert "mcp__squid__publish" not in prompt
     assert "ToolSearch" not in prompt
+    assert "edit repository files here only" in prompt
     assert "Do not edit backing repo files directly" in prompt
+    assert "Authorized changes outside the backing repos may be made directly" in prompt
     assert "For turns with file edits" in prompt
     assert "do not run/suggest git commit, push, pull, branch, tag, PR, publish" in prompt
     assert "For git-only turns with no file edits" in prompt
@@ -146,7 +148,7 @@ def test_isolated_code_roots_prompt_blocks_publish_with_code_changes():
     assert "never use `git push --all` or `git push --mirror`" in prompt
     assert "never create or publish per-turn `sqd-*` branches" in prompt
     assert "Squid syncs isolated edits back to the backing repos after the response completes" in prompt
-    assert len(prompt.split()) <= 125
+    assert len(prompt.split()) <= 180
 
 
 def test_isolated_code_roots_prompt_forbids_git_recovery():

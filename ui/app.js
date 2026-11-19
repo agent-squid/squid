@@ -14869,7 +14869,8 @@ function renderAgentTable(agents) {
     const runtime = splitAgentRef(a.harness || ref, a.provider || null);
     if (!a.backend) a.backend = ref;
     ensureRuntimeMetadata(runtime.harness, runtime.provider);
-    const runtimeText = runtime.provider ? `${runtime.harness} / ${runtime.provider}` : runtime.harness;
+    const providerText = runtime.provider === 'antigravity' ? (_providerMetadata.antigravity?.label || 'Google') : runtime.provider;
+    const runtimeText = providerText ? `${runtime.harness} / ${providerText}` : runtime.harness;
     return { a, ref, runtime, runtimeText, runtimeSort: runtimeText || '', name: a.name || '' };
   }));
   const filterQuery = agentFilterQuery.trim().toLowerCase();

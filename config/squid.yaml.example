@@ -169,7 +169,7 @@ harnesses:
 providers:
   # Native agy login; models come from `agy models` or its configured default.
   antigravity:
-    label: agy
+    label: Google
     color: "#4285F4"
     auth: {type: subscription}
     gauge: antigravity

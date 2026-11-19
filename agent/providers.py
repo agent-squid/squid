@@ -33,7 +33,7 @@ _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # for legacy squid.yaml files that predate the `providers:` section.
 _DEFAULT_PROVIDERS: dict[str, dict[str, Any]] = {
     "antigravity": {
-        "label": "agy", "color": "#4285F4",
+        "label": "Google", "color": "#4285F4",
         "auth": {"type": "subscription"},
         "gauge": "antigravity",
         "supported_apis": ["/native/antigravity"],

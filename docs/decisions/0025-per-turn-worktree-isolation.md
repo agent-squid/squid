@@ -1,7 +1,7 @@
 ---
 status: accepted (branchless isolation implemented; prior worktree/branch mechanism superseded)
 date: 2026-07-09
-updated: 2026-11-15
+updated: 2026-11-19
 ---
 # ADR-0025: Per-Turn Git Worktree Isolation for Agent Changes
 
@@ -50,7 +50,11 @@ turn.
 User-visible Git operations happen in the backing repo, not inside the
 isolated directory. The isolated-turn prompt shows both editable
 `<squid_code_roots>` and read/write Git-operation targets in
-`<squid_backing_repos>`. Agents are told to edit only the isolated roots; for
+`<squid_backing_repos>`. Agents edit repository files only in the isolated
+roots, not directly in backing repos. Authorized changes to files outside the
+backing repos may be made directly; those files are shared state, outside the
+turn snapshot, sync, conflict detection, and turn-scoped repository diff.
+Existing execution grants and other applicable authorization still apply. For
 turns that make file edits, they must not commit, push, pull, branch, tag, PR,
 publish, or switch checkouts. For git-only turns with no file edits, they may
 run requested Git/PR operations only in the backing repos. The UI `/publish`
@@ -355,8 +359,10 @@ materialization, filesystem traversal, integration checkouts, or drift checks.
   shipped design avoids creating those user-visible commits in the first
   place. There is therefore no Squid-owned `pre-push` hook in the current
   implementation.
-- **Git operations use backing repos.** Agents are instructed to edit only
-  the isolated roots. Turns with file edits must not run commit/push/pull,
+- **Git operations use backing repos.** Agents edit repository files in the
+  isolated roots; authorized files outside backing repos can be changed
+  directly and are not covered by isolation or sync. Turns with file edits
+  must not run commit/push/pull,
   branch, tag, PR, publish, or checkout-switching commands. Git-only turns
   with no file edits may run requested status/commit/push/pull/branch/tag/PR
   commands only in the backing repos. `/publish [message]` remains the
@@ -856,7 +862,8 @@ ADR-0003). The model reaches the worktree only through the absolute paths in
 `<squid_code_roots>`. For isolated turns, the prompt also includes
 `<squid_backing_repos>` with the original topic code roots so git-only turns
 know where Git operations belong. The prompt explicitly says not to edit files
-in backing repos directly.
+in backing repos directly. Authorized changes outside backing repos may be
+made directly, without turn isolation or sync.
 
 `topic_queue._process` routes `proc_cwd` (source repo path) to the
 subprocess `cwd` and `display_cwd` to stats/session-tracking/SSE.
