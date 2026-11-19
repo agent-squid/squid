@@ -4351,6 +4351,66 @@ test('sse transport keeps the auth panel on the HTTP path', async ({ page }) => 
 const KEYCHAIN_LOCKED_OUTPUT =
   'Error: Your macOS login keychain is locked.\nRun security unlock-keychain and try again.';
 
+for (const exitCode of [0, 1]) {
+  test(`Cursor web login waits for a complete URL and handles exit ${exitCode}`, async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__authStarted = false;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          window.__ws = this;
+          this.readyState = MockWebSocket.CONNECTING;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          const frame = JSON.parse(data);
+          if (frame.type === 'subscribe') setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          if (frame.type === 'auth.start') setTimeout(() => {
+            this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+              payload: { ok: true, session_id: 'cursor-session', command: 'cursor-agent login' } });
+            window.__authStarted = true;
+          });
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    await page.route('**/auth/session/cursor-session', route => route.fulfill({ json: { state: 'running' } }));
+    await page.goto('/');
+    await page.evaluate(() => openAuthPanel('cursor', null));
+    await page.waitForFunction(() => window.__authStarted);
+    const output = text => page.evaluate(value => window.__ws.receive({ v: 1, type: 'auth.output',
+      payload: { session_id: 'cursor-session', data: btoa(value) } }), text);
+    const link = page.locator('#codex-device-link');
+    await output('Open https://cursor.com/loginDeepControl');
+    await expect.poll(() => page.evaluate(() => authPromptText(_authSession.term.buffer.active))).toContain('loginDeepControl');
+    await expect(link).toBeHidden();
+    await output('?uuid=abc');
+    await expect.poll(() => page.evaluate(() => authPromptText(_authSession.term.buffer.active))).toContain('uuid=abc');
+    await expect(link).toBeHidden();
+    await output('&challenge=def\r\n');
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute('href', 'https://cursor.com/loginDeepControl?uuid=abc&challenge=def');
+    await page.evaluate(code => window.__ws.receive({ v: 1, type: 'auth.done',
+      payload: { session_id: 'cursor-session', returncode: code } }), exitCode);
+    if (exitCode === 0) {
+      await expect(page.locator('.cmd-feedback').filter({ hasText: 'Cursor login successful.' })).toHaveCount(1);
+      await expect(page.locator('#auth-panel')).not.toHaveClass(/open/);
+    } else {
+      await expect(page.locator('#codex-device-status')).toContainText('Login did not complete');
+      await expect(page.locator('#auth-panel-retry-btn')).toBeVisible();
+    }
+  });
+}
+
 test('locked-keychain cursor login output shows the unlock affordance', async ({ page }) => {
   await page.addInitScript(() => {
     window.__authFrames = [];

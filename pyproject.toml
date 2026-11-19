@@ -68,4 +68,6 @@ testpaths = ["tests"]
 [dependency-groups]
 dev = [
     "mcp>=1.30,<2",
+    "pytest",
+    "pytest-asyncio",
 ]

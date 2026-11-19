@@ -4979,6 +4979,27 @@ function codexDevicePrompt(buffer) {
   };
 }
 
+function cursorWebPrompt(buffer) {
+  // Only consume completed terminal lines. A URL at the cursor can still be
+  // receiving query parameters in a later PTY chunk, even if its path parses.
+  let text = '';
+  const cursorLine = buffer.baseY + buffer.cursorY;
+  for (let i = 0; i < cursorLine; i++) {
+    const line = buffer.getLine(i);
+    if (line) text += (line.isWrapped ? '' : '\n') + line.translateToString(true);
+  }
+  const current = buffer.getLine(cursorLine);
+  if (current && !current.isWrapped) text += '\n';
+  const urls = [...text.matchAll(/https:\/\/[^\s<>\"]+(?=\s)/g)].map(match => match[0]);
+  const url = urls.find(value => {
+    try {
+      const parsed = new URL(value);
+      return parsed.origin === 'https://cursor.com' && parsed.pathname === '/loginDeepControl';
+    } catch { return false; }
+  });
+  return { url: url || null, code: null, success: false };
+}
+
 // Recover completion even if the browser suspended the auth event stream.
 function monitorDeviceLogin(session, finishExit) {
   let checking = false;
@@ -5038,7 +5059,8 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   panelTitle.textContent = _authPanelTitle(harness, mode, model);
   panelTerm.innerHTML = '';
   const claudeLogin = harness === 'claudecode' && mode === 'login';
-  const deviceLogin = (harness === 'codex' || claudeLogin) && mode === 'login';
+  const cursorLogin = harness === 'cursor' && mode === 'login';
+  const deviceLogin = (harness === 'codex' || claudeLogin || cursorLogin) && mode === 'login';
   const deviceUi = document.getElementById('codex-device-login');
   const deviceStatus = document.getElementById('codex-device-status');
   const deviceLink = document.getElementById('codex-device-link');
@@ -5053,7 +5075,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   claudeCodeInput.value = '';
   claudeCodeInput.disabled = false;
   claudeCodeSubmit.disabled = false;
-  deviceLink.textContent = claudeLogin ? 'Open Claude login page ↗' : 'Open activation page ↗';
+  deviceLink.textContent = claudeLogin ? 'Open Claude login page ↗' : cursorLogin ? 'Open Cursor login page ↗' : 'Open activation page ↗';
   claudeCodeSubmit.onclick = async () => {
     const session = _authSession;
     const code = claudeCodeInput.value.trim();
@@ -5094,7 +5116,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   deviceCode.textContent = '';
   deviceCopy.textContent = 'Copy code';
   deviceCopy.disabled = false;
-  deviceStatus.textContent = claudeLogin ? 'Preparing Claude login…' : 'Preparing device login…';
+  deviceStatus.textContent = claudeLogin ? 'Preparing Claude login…' : cursorLogin ? 'Preparing Cursor login…' : 'Preparing device login…';
   deviceDetails.textContent = 'Show terminal details';
   deviceDetails.setAttribute('aria-expanded', 'false');
   deviceDetails.onclick = () => {
@@ -5128,7 +5150,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   term.open(panelTerm);
   if (deviceLogin) term.onWriteParsed(() => {
     if (_authSession?.term !== term || !_authSession.running) return;
-    const prompt = claudeLogin ? claudeWebPrompt(term.buffer.active) : codexDevicePrompt(term.buffer.active);
+    const prompt = claudeLogin ? claudeWebPrompt(term.buffer.active) : cursorLogin ? cursorWebPrompt(term.buffer.active) : codexDevicePrompt(term.buffer.active);
     if (prompt.success) {
       // Leave xterm's parser callback before disposing its terminal. Codex has
       // saved credentials, but may still be exiting: do not cancel that process.
@@ -5141,6 +5163,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
       if (claudeLogin && _authSession.running && !claudeCodeInput.value && !claudeCodeSubmit.disabled) {
         deviceStatus.textContent = 'Sign in using the link, then paste the full authorization code below, including any # suffix.';
       }
+      if (cursorLogin) deviceStatus.textContent = 'Open the Cursor login page and complete sign in. Waiting for approval…';
     }
     if (prompt.code) {
       deviceCode.textContent = prompt.code;
@@ -5266,7 +5289,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
         fitTerminal();
       } else if (deviceLogin) {
         const session = _authSession;
-        const label = claudeLogin ? 'Claude' : 'Codex';
+        const label = claudeLogin ? 'Claude' : cursorLogin ? 'Cursor' : 'Codex';
         panelTitle.textContent = `Signed in to ${label} ✓`;
         deviceStatus.textContent = `${label} login successful.`;
         deviceLink.hidden = true;
