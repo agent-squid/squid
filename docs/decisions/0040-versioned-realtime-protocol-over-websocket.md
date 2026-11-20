@@ -151,8 +151,9 @@ records targeted stabilization, not completion of the sole-transport decision:
   Startup/settings/provider health metadata and other HTTP/SSE callers remain.
 - Local WS `history.check` is a bounded, correlated read for up to 100 exact
   rendered IDs, with optional bookmark/bad filters. Oversized batches split;
-  a single oversized row or failed check exposes explicit refresh. Pending
-  prompt-only rows participate without attaching response streams. See the
+  single oversized rows are transferred in bounded WebSocket chunks. Failed
+  checks expose explicit refresh. Pending prompt-only rows participate without
+  attaching response streams. See the
   [protocol reference](../realtime-protocol-v1.md#history-boundary) for its schema.
 - Existing-row verification preserves row position relative to live groups;
   metadata recovery must not invoke new-completion placement. New completions

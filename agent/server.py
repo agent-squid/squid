@@ -42,7 +42,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
-from typing import Any, AsyncGenerator, Literal, Optional, Union
+from typing import Any, AsyncGenerator, Callable, Literal, Optional, Union
 
 import yaml
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -2026,7 +2026,7 @@ async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
         marked_bad=marked_bad,
         topic_subtree=topic_subtree,
     )
-    await asyncio.to_thread(_annotate_history_worktree_state, payload)
+    await asyncio.to_thread(_prepare_history_tools, payload)
     return JSONResponse(payload)
 
 
@@ -2040,7 +2040,7 @@ async def history_by_ids(ids: str = ""):
         return JSONResponse({"error": "invalid ids"}, status_code=400)
     parsed = parsed[:200]  # cap to prevent abuse
     payload = await asyncio.to_thread(list_history_by_ids, parsed)
-    await asyncio.to_thread(_annotate_history_worktree_state, payload)
+    await asyncio.to_thread(_prepare_history_tools, payload)
     return JSONResponse(payload)
 
 
@@ -2079,12 +2079,30 @@ async def history_around(msg_id: Optional[int] = None, flow_run_id: Optional[str
         marked_bad=marked_bad,
         topic_subtree=topic_subtree,
     )
-    await asyncio.to_thread(_annotate_history_worktree_state, payload)
+    await asyncio.to_thread(_prepare_history_tools, payload)
     return JSONResponse(payload)
 
 
 async def _realtime_history_query(message_type: str, payload: object) -> dict:
     """Bounded history reads; never use the durable replay cursor for paging."""
+    if message_type == "history.check":
+        ids = payload.get("ids") if isinstance(payload, dict) else None
+        if not (
+            isinstance(ids, list) and len(ids) <= 100
+            and all(type(value) is int and 0 < value <= 2**53 - 1 for value in ids)
+            and all(type(payload.get(key, False)) is bool for key in ("bookmarked", "marked_bad", "chunked"))
+        ):
+            return {"ok": False, "error": "invalid_ids"}
+
+        def read_exact_history() -> dict:
+            data = list_history_by_ids(
+                ids, bookmarked=payload.get("bookmarked", False), marked_bad=payload.get("marked_bad", False),
+            )
+            _prepare_history_tools(data)
+            return {"ok": True, **data}
+
+        return await asyncio.to_thread(read_exact_history)
+
     common = {"topic", "agent", "adhoc", "flow_route", "bookmarked", "marked_bad", "topic_subtree"}
     around = {"msg_id", "flow_run_id", "before", "after", "direction", "cursor_completed_at", "cursor_id", "limit"}
     allowed = common | ({"offset", "limit"} if message_type == "history.page" else around)
@@ -2126,7 +2144,8 @@ def _history_query_frame(request_id: str, result: dict) -> dict:
 
 
 async def _run_history_query(frame: dict, outbound, principal: str, last_acked_cursor: int) -> None:
-    worker = asyncio.create_task(_realtime_history_query(frame["type"], frame.get("payload")))
+    message_type, payload = frame["type"], frame.get("payload")
+    worker = asyncio.create_task(_realtime_history_query(message_type, payload))
     try:
         try:
             result = await asyncio.wait_for(asyncio.shield(worker), _REALTIME_HISTORY_QUERY_TIMEOUT)
@@ -2135,7 +2154,11 @@ async def _run_history_query(frame: dict, outbound, principal: str, last_acked_c
         except Exception:
             log.exception("Realtime history query failed")
             result = {"ok": False, "error": "history_query_failed"}
-        await _realtime_send(outbound, _history_query_frame(frame["request_id"], result), principal, last_acked_cursor)
+        if message_type == "history.check":
+            chunked = result.get("ok") and payload.get("chunked", False) and len(payload["ids"]) == 1
+            await _send_history_check_result(outbound, frame["request_id"], result, chunked, principal, last_acked_cursor)
+        else:
+            await _realtime_send(outbound, _history_query_frame(frame["request_id"], result), principal, last_acked_cursor)
         # A timed-out to_thread read cannot be stopped. Keep its admission slot
         # occupied until it finishes, and never emit its late result.
         await asyncio.gather(worker, return_exceptions=True)
@@ -2155,7 +2178,51 @@ def _tool_source_repo(tool: dict) -> str:
     return ""
 
 
-def _annotate_history_worktree_state(payload: dict) -> None:
+_TOOL_PATCH_FIELDS = {
+    "Diff": ("diff",),
+    "Edit": ("old", "new"),
+    "MultiEdit": ("edits",),
+    "Write": ("content",),
+    "Bash": ("command",),
+}
+
+
+def _defer_history_patches(tools: list) -> bool:
+    from .git_changes import MAX_INLINE_DIFF_BYTES, summarize_stored_diff
+
+    patches = []
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name")
+        fields = ("diff",) if name == "GitDiff" else _TOOL_PATCH_FIELDS.get(name, ())
+        values = [tool[field] for field in fields if tool.get(field)]
+        if values:
+            # Context is itself a JSON string in the history response.
+            wire_size = len(json.dumps(json.dumps(values)))
+            patches.append((wire_size, index, fields))
+
+    remaining = sum(size for size, _, _ in patches)
+    budget = min(MAX_INLINE_DIFF_BYTES, _REALTIME_MAX_FRAME_BYTES // 4)
+    changed = False
+    for size, index, fields in sorted(patches, reverse=True):
+        if remaining <= budget:
+            break
+        tool = tools[index]
+        if tool.get("name") == "GitDiff":
+            changed = summarize_stored_diff(tool) or changed
+        else:
+            for field in fields:
+                tool.pop(field, None)
+            if tool.get("name") != "Bash":
+                # Bash commands remain available through the thought trace.
+                tool["detail_index"] = index
+            changed = True
+        remaining -= size
+    return changed
+
+
+def _prepare_history_tools(payload: dict) -> None:
     for item in payload.get("items") or []:
         context = item.get("context")
         if not context:
@@ -2172,7 +2239,7 @@ def _annotate_history_worktree_state(payload: dict) -> None:
         if not wt_key:
             continue
         records_by_key: dict[str, list[dict]] = {}
-        changed = False
+        changed = _defer_history_patches(tools)
 
         for tool in tools:
             if not isinstance(tool, dict) or tool.get("name") not in {"GitDiff", "WorktreeSync"}:
@@ -2250,9 +2317,14 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
         topic = normalized
     limit = min(limit, 100)
     flow_route = canonical_flow_route(flow_route)
-    if role == "user":
-        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad, topic_subtree=topic_subtree, operator=operator))
-    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad, topic_subtree=topic_subtree, operator=operator))
+    search_history = search_prompts if role == "user" else search_messages
+    payload = await asyncio.to_thread(
+        search_history, q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit,
+        bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad,
+        topic_subtree=topic_subtree, operator=operator,
+    )
+    await asyncio.to_thread(_prepare_history_tools, payload)
+    return JSONResponse(payload)
 
 
 @app.get("/prompts/recent")
@@ -2902,7 +2974,7 @@ async def discard_worktree_blocker(msg_id: int, req: WorktreeDiscardRequest):
     await asyncio.to_thread(remove_worktree, repo_root, topic, wt_key)
     # Keep the row (status="discarded") instead of deleting it — a fully
     # deleted row is indistinguishable from "never had a problem" once
-    # _annotate_history_worktree_state falls back to reporting "synced" for
+    # _prepare_history_tools falls back to reporting "synced" for
     # it, which would misrepresent a discarded turn as having landed cleanly.
     await asyncio.to_thread(mark_worktree_status, topic, wt_key, str(repo_root), "discarded")
     log.info("worktree discarded topic=%s msg_id=%s repo=%s status=%s", topic, msg_id, repo_root, rec.get("status"))
@@ -3172,28 +3244,138 @@ async def _realtime_worktree_auto_resolve(payload: dict) -> dict:
             "agent": resolve_agent, "provider": resolve_provider}
 
 
-@app.get("/chat/{msg_id}/diff-file")
-async def diff_file(msg_id: int, repo: str, path: str):
-    """On-demand diff for one file this turn's stored diff omitted (too large
-    to include in full — see GitChangeTracker._truncate_diff_by_file). Recomputed
-    live from the (base, head) trees anchored at turn end for this purpose."""
-    from .git_changes import diff_for_path
+_DIFF_PAGE_CHARS = 48 * 1024
+_DIFF_PAGE_LINES = 500
 
+
+def _turn_diff_paths(gitdiff: dict, path: str) -> Optional[tuple[str, Optional[str]]]:
+    from .git_changes import unquote_git_path
+
+    file = next((file for file in gitdiff.get("files", []) if file.get("path") == path), None)
+    if not file:
+        return None
+    old_path = file.get("old_path") if file.get("status", "").startswith("R") else None
+    if "binary" not in file:
+        # Legacy metadata used Git's quoted path format.
+        path = unquote_git_path(path)
+        old_path = unquote_git_path(old_path) if old_path is not None else None
+    return path, old_path
+
+
+def _read_turn_file_patch(
+    repo: str, gitdiff: dict, path: str, *, offset: int = 0, limit: Optional[int] = None,
+    observe_prefix: Optional[Callable[[str], None]] = None,
+) -> str:
+    from .git_changes import diff_for_path, extract_file_diff
+
+    paths = _turn_diff_paths(gitdiff, path)
+    if paths is None:
+        return ""
+    path, old_path = paths
+    patch = extract_file_diff(gitdiff.get("diff") or "", path)
+    if patch:
+        if observe_prefix is not None and offset:
+            observe_prefix(patch[:offset])
+        return patch[offset:] if limit is None else patch[offset:offset + limit + 1]
+    base, head = gitdiff.get("base"), gitdiff.get("head")
     repo_root = _validate_repo_path(repo)
-    if repo_root is None:
-        return JSONResponse({"error": "invalid repo path"}, status_code=400)
+    if not base or not head or repo_root is None:
+        return ""
+    return diff_for_path(
+        repo_root, base, head, path, old_path, offset=offset, limit=limit,
+        observe_prefix=observe_prefix,
+    )
 
+
+def _valid_diff_cursor(offset: int, cursor: Optional[str]) -> bool:
+    return (offset == 0 and cursor is None) or (
+        offset > 0 and cursor is not None and re.fullmatch(r"[a-f0-9]{64}", cursor) is not None
+    )
+
+
+def _diff_page_response(patch: str, offset: int, cursor: Optional[str], prefix_hash: Any) -> JSONResponse:
+    # The cursor covers exactly the text already displayed. Git can regenerate
+    # a different patch for the same trees if worktree attributes change.
+    if offset and (not patch or prefix_hash.hexdigest() != cursor):
+        return JSONResponse({"error": "The diff changed. Reload it to continue."}, status_code=409)
+    if not patch:
+        return JSONResponse({"error": "This turn’s file diff is unavailable"}, status_code=404)
+
+    page = patch[:_DIFF_PAGE_CHARS]
+    lines = page.split("\n", _DIFF_PAGE_LINES)
+    if len(lines) > _DIFF_PAGE_LINES:
+        page = "\n".join(lines[:_DIFF_PAGE_LINES]) + "\n"
+    elif len(page) < len(patch) and "\n" in page:
+        page = page[:page.rfind("\n") + 1]
+    has_more = len(page) < len(patch)
+    prefix_hash.update(page.encode("utf-8"))
+    return JSONResponse({
+        "diff": page,
+        "next_offset": offset + len(page) if has_more else None,
+        "next_cursor": prefix_hash.hexdigest() if has_more else None,
+    })
+
+
+@app.get("/chat/{msg_id}/diff-file")
+async def diff_file(msg_id: int, repo: str, path: str, offset: int = 0, cursor: Optional[str] = None):
+    """Read a bounded page of one historical file's patch."""
+    if not _valid_diff_cursor(offset, cursor):
+        return JSONResponse({"error": "Invalid diff cursor"}, status_code=400)
     gitdiff = await asyncio.to_thread(get_message_gitdiff, msg_id, repo)
     if not gitdiff:
-        return JSONResponse({"error": "diff not found"}, status_code=404)
-    base, head = gitdiff.get("base"), gitdiff.get("head")
-    if not base or not head:
-        return JSONResponse({"error": "diff too old to recompute (no anchored trees)"}, status_code=404)
+        return JSONResponse({"error": "This turn’s file diff is unavailable"}, status_code=404)
+    prefix_hash = hashlib.sha256()
+    patch = await asyncio.to_thread(
+        _read_turn_file_patch, repo, gitdiff, path, offset=offset, limit=_DIFF_PAGE_CHARS,
+        observe_prefix=lambda chunk: prefix_hash.update(chunk.encode("utf-8")),
+    )
+    return _diff_page_response(patch, offset, cursor, prefix_hash)
 
-    diff = await asyncio.to_thread(diff_for_path, repo_root, base, head, path)
-    if not diff:
-        return JSONResponse({"error": "diff unavailable — anchor may have been pruned"}, status_code=404)
-    return JSONResponse({"diff": diff})
+
+def _read_tool_patch(msg_id: int, tool_index: int) -> Optional[str]:
+    row = get_message(msg_id)
+    if not row or row.get("role") != "assistant":
+        return None
+    try:
+        tools = json.loads(row.get("context") or "[]")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(tools, list) or not 0 <= tool_index < len(tools):
+        return None
+    tool = tools[tool_index]
+    if not isinstance(tool, dict):
+        return None
+    name = tool.get("name")
+    if name == "Diff":
+        return str(tool.get("diff") or "")
+
+    def lines(prefix: str, value: Any) -> str:
+        if not isinstance(value, str) or not value:
+            return ""
+        return "".join(prefix + line + "\n" for line in value.removesuffix("\n").split("\n"))
+
+    if name == "Write":
+        return lines("+ ", tool.get("content") or "")
+    if name == "Edit":
+        return lines("- ", tool.get("old") or "") + lines("+ ", tool.get("new") or "")
+    edits = tool.get("edits")
+    if name == "MultiEdit" and isinstance(edits, list):
+        return "\n".join(
+            lines("- ", edit.get("old_string")) + lines("+ ", edit.get("new_string"))
+            for edit in edits if isinstance(edit, dict)
+        )
+    return None
+
+
+@app.get("/chat/{msg_id}/diff-tool/{tool_index}")
+async def diff_tool(msg_id: int, tool_index: int, offset: int = 0, cursor: Optional[str] = None):
+    if not _valid_diff_cursor(offset, cursor):
+        return JSONResponse({"error": "Invalid diff cursor"}, status_code=400)
+    patch = await asyncio.to_thread(_read_tool_patch, msg_id, tool_index)
+    if patch is None:
+        return JSONResponse({"error": "This turn’s tool diff is unavailable"}, status_code=404)
+    prefix_hash = hashlib.sha256(patch[:offset].encode("utf-8"))
+    return _diff_page_response(patch[offset:offset + _DIFF_PAGE_CHARS + 1], offset, cursor, prefix_hash)
 
 
 def _validate_repo_path(repo: str) -> Optional[Path]:
@@ -3220,9 +3402,27 @@ def _worktree_diff_blocked(gitdiff: Optional[dict]) -> Optional[dict[str, str]]:
     }
 
 
+def _read_turn_revert_patch(repo_root: Path, gitdiff: dict, file_path: str) -> bytes:
+    from .git_changes import diff_bytes_for_path, extract_file_diff
+
+    paths = _turn_diff_paths(gitdiff, file_path)
+    if paths is None:
+        return b""
+    path, old_path = paths
+    patch = extract_file_diff(gitdiff.get("diff") or "", path)
+    if patch and (gitdiff.get("diff_lossless") or "\ufffd" not in patch):
+        return patch.encode("utf-8")
+    # Older inline patches may already contain replacements. Recover them from
+    # the snapshots, or fail rather than writing the replacement to disk.
+    base, head = gitdiff.get("base"), gitdiff.get("head")
+    if base and head:
+        return diff_bytes_for_path(repo_root, base, head, path, old_path)
+    return b""
+
+
 @app.post("/chat/{msg_id}/revert")
 async def revert_diff(msg_id: int, req: RevertRequest):
-    from .git_changes import extract_file_diff, apply_reverse_patch
+    from .git_changes import apply_reverse_patch
 
     repo_root = _validate_repo_path(req.repo)
     if repo_root is None:
@@ -3254,14 +3454,13 @@ async def revert_diff(msg_id: int, req: RevertRequest):
     if not this_diff:
         return JSONResponse({"error": "GitDiff not found"}, status_code=404)
 
-    full_diff = this_diff.get('diff', '')
     reverted: list[str] = []
     failed: list[dict] = []
 
     for fpath in files_to_revert:
-        file_diff = extract_file_diff(full_diff, fpath)
+        file_diff = await asyncio.to_thread(_read_turn_revert_patch, repo_root, this_diff, fpath)
         if not file_diff:
-            failed.append({'file': fpath, 'error': 'no diff text found'})
+            failed.append({'file': fpath, 'error': 'no lossless patch available'})
             continue
         ok, err = await asyncio.to_thread(apply_reverse_patch, repo_root, file_diff)
         if ok:
@@ -4423,6 +4622,8 @@ class _RealtimeOutbound:
         self._items: "OrderedDict[object, dict]" = OrderedDict()
         self._seq = 0
         self._not_empty = asyncio.Event()
+        self._drained = asyncio.Event()
+        self._drained.set()
 
     def enqueue(self, frame: dict) -> bool:
         frame_type = frame.get("type")
@@ -4436,13 +4637,26 @@ class _RealtimeOutbound:
             key = self._seq
         self._items[key] = frame
         self._not_empty.set()
+        self._drained.clear()
         return True
+
+    async def wait_until_drained(self) -> None:
+        # Bulk history leaves room in the shared queue for heartbeat and chat.
+        if self._items:
+            clock = asyncio.get_running_loop().time
+            deadline = clock() + _REALTIME_HISTORY_QUERY_TIMEOUT
+            try:
+                while self._items:
+                    await asyncio.wait_for(self._drained.wait(), deadline - clock())
+            except asyncio.TimeoutError as exc:
+                raise _RealtimeSlowConsumer() from exc
 
     async def get(self) -> dict:
         await self._not_empty.wait()
         _, frame = self._items.popitem(last=False)
         if not self._items:
             self._not_empty.clear()
+            self._drained.set()
         return frame
 
     def __len__(self) -> int:
@@ -4509,6 +4723,33 @@ async def _realtime_send(
         principal, last_acked_cursor, len(outbound),
     )
     raise _RealtimeSlowConsumer()
+
+
+async def _send_history_check_result(
+    outbound: _RealtimeOutbound, request_id: str, result: dict, chunked: bool,
+    principal: Optional[str], last_acked_cursor: int,
+) -> None:
+    frame = _history_query_frame(request_id, result)
+    if chunked and result.get("ok") and frame["payload"].get("error") == "history_result_too_large":
+        # ASCII JSON lets us cut anywhere. Escaping a chunk in its envelope
+        # costs at most two bytes per character, including quotes and backslashes.
+        encoded = json.dumps(result, separators=(",", ":"))
+        chunk_frame = {
+            "v": 1, "type": "history.chunk", "request_id": request_id,
+            "payload": {"index": len(encoded), "text": ""},
+        }
+        overhead = len(json.dumps(chunk_frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        width = (_REALTIME_MAX_FRAME_BYTES - overhead) // 2
+        if width > 0:
+            count = (len(encoded) + width - 1) // width
+            for index in range(count):
+                offset = index * width
+                chunk = {**chunk_frame, "payload": {"index": index, "text": encoded[offset:offset + width]}}
+                await outbound.wait_until_drained()
+                await _realtime_send(outbound, chunk, principal, last_acked_cursor)
+            await outbound.wait_until_drained()
+            frame = _history_query_frame(request_id, {"ok": True, "chunk_count": count})
+    await _realtime_send(outbound, frame, principal, last_acked_cursor)
 
 
 def _realtime_envelope(event: dict) -> dict:
@@ -5080,7 +5321,7 @@ async def realtime_v1(websocket: WebSocket):
                         "v": 1, "type": "command.result", "request_id": frame.get("request_id"),
                         "payload": result,
                     }, principal, last_acked_cursor)
-                elif message_type in {"history.page", "history.around"}:
+                elif message_type in {"history.page", "history.around", "history.check"}:
                     request_id = frame.get("request_id")
                     valid_request_id = isinstance(request_id, str) and 1 <= len(request_id) <= 128
                     if valid_request_id:
@@ -5099,26 +5340,6 @@ async def realtime_v1(websocket: WebSocket):
                     else:
                         history_tasks.add(asyncio.create_task(
                             _run_history_query(frame, outbound, principal, last_acked_cursor)))
-                elif message_type == "history.check":
-                    payload = frame.get("payload")
-                    ids = payload.get("ids") if isinstance(payload, dict) else None
-                    result = {"ok": False, "error": "invalid_ids"}
-                    if not principal:
-                        result["error"] = "client_identity_required"
-                    elif (isinstance(ids, list) and len(ids) <= 100
-                          and all(type(value) is int and 0 < value <= 2**53 - 1 for value in ids)
-                          and all(type(payload.get(key, False)) is bool for key in ("bookmarked", "marked_bad"))):
-                        data = await asyncio.to_thread(
-                            list_history_by_ids, ids, bookmarked=payload.get("bookmarked", False),
-                            marked_bad=payload.get("marked_bad", False))
-                        await asyncio.to_thread(_annotate_history_worktree_state, data)
-                        result = {"ok": True, **data}
-                        if len(json.dumps(result).encode("utf-8")) > _REALTIME_MAX_FRAME_BYTES:
-                            result = {"ok": False, "error": "history_result_too_large"}
-                    await _realtime_send(outbound, {
-                        "v": 1, "type": "command.result", "request_id": frame.get("request_id"),
-                        "payload": result,
-                    }, principal, last_acked_cursor)
                 elif message_type in {"chat.start", "chat.cancel", "auth.start", "worktree.auto_resolve"}:
                     if not principal:
                         await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "client_identity_required"}}, principal, last_acked_cursor)

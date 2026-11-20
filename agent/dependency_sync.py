@@ -36,7 +36,14 @@ def specification(prompt):
                 or value['operation'] not in COMMANDS):
             raise ValueError()
         root = Path(value['repository'])
-        if not root.is_absolute() or str(root.resolve()) != value['repository']:
+        if not root.is_absolute():
+            raise ValueError()
+        try:
+            resolved = root.resolve(strict=True)
+        except FileNotFoundError:
+            # Scope validation still handles a repository that is missing.
+            resolved = root.resolve()
+        if str(resolved) != value['repository']:
             raise ValueError()
     except (TypeError, ValueError, OSError, RuntimeError):
         raise ValueError('invalid_continuation_request') from None

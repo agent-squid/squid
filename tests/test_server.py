@@ -251,6 +251,164 @@ def test_revert_diff_restores_target_repo_file(tmp_path, monkeypatch):
     }
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+def test_patch_view_and_revert_ignore_git_display_config(tmp_path, monkeypatch, deferred):
+    from agent import git_changes
+    from tests.test_git_changes import git, init_repo
+
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path.resolve() / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    git(repo, "config", "diff.noprefix", "true")
+    git(repo, "config", "color.ui", "always")
+    if deferred:
+        monkeypatch.setattr(git_changes, "MAX_INLINE_DIFF_BYTES", 1)
+    user_id = stats_db.insert_user_message("squid", "codex", "change the file")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    tracker = git_changes.prepare_tracker(str(repo), topic="squid", agent="codex", adhoc=False, msg_id=msg_id)
+    path = repo / "app.txt"
+    path.write_text("changed\n")
+    event = tracker.build_event()
+    assert bool(event.get("diff_deferred")) == deferred
+    if not deferred:
+        assert event["diff"].startswith("diff --git a/app.txt b/app.txt\n")
+    stats_db.update_assistant_message(msg_id, "done", None, "done", context=json.dumps([event]))
+
+    client = TestClient(server.app)
+    preview = client.get(f"/chat/{msg_id}/diff-file", params={"repo": str(repo), "path": "app.txt"})
+    assert preview.status_code == 200
+    patch = preview.json()["diff"]
+    assert patch.startswith("diff --git a/app.txt b/app.txt\n")
+    assert "\x1b" not in patch
+    reverted = client.post(f"/chat/{msg_id}/revert", json={"repo": str(repo), "file_path": "app.txt"})
+    assert reverted.status_code == 200
+    assert reverted.json()["reverted"] == ["app.txt"]
+    assert path.read_text() == "base\n"
+
+
+@pytest.mark.parametrize("capture", ["small", "large", "old_inline", "old_inline_no_trees"])
+def test_revert_preserves_non_utf8_file_bytes(tmp_path, monkeypatch, capture):
+    from agent.git_changes import prepare_tracker
+    from tests.test_git_changes import git, init_repo
+
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path.resolve() / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    git(repo, "config", "apply.whitespace", "fix")
+    path = repo / "app.txt"
+    original = b"caf\xe9\r\n"
+    path.write_bytes(original)
+    git(repo, "add", "app.txt")
+    git(repo, "commit", "-m", "Latin-1 source")
+    user_id = stats_db.insert_user_message("squid", "codex", "change the file")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    tracker = prepare_tracker(str(repo), topic="squid", agent="codex", adhoc=False, msg_id=msg_id)
+    updated = b"plain ASCII\r\n" * (9000 if capture == "large" else 1)
+    path.write_bytes(updated)
+    event = tracker.build_event()
+    assert event["diff_deferred"] is True and event["diff"] == ""
+    if capture.startswith("old_inline"):
+        lossy_patch = subprocess.check_output(["git", "diff", "--binary"], cwd=repo)
+        event["diff"] = lossy_patch.decode("utf-8", errors="replace")
+        event.pop("diff_deferred")
+    if capture == "old_inline_no_trees":
+        event.pop("base")
+        event.pop("head")
+    stats_db.update_assistant_message(msg_id, "done", "session-1", "done", context=json.dumps([event]))
+
+    client = TestClient(server.app)
+    preview = client.get(f"/chat/{msg_id}/diff-file", params={"repo": str(repo), "path": "app.txt"})
+    assert preview.status_code == 200
+    assert "caf\ufffd" in preview.json()["diff"]
+
+    reverted = client.post(f"/chat/{msg_id}/revert", json={"repo": str(repo)})
+    if capture == "old_inline_no_trees":
+        assert reverted.status_code == 409
+        assert reverted.json()["failed"] == [{"file": "app.txt", "error": "no lossless patch available"}]
+        assert path.read_bytes() == updated
+    else:
+        assert reverted.status_code == 200
+        assert reverted.json()["reverted"] == ["app.txt"]
+        assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_large_gitdiff_history_and_paged_file_view_preserve_historical_patch(tmp_path, monkeypatch, legacy):
+    from agent.git_changes import MAX_INLINE_DIFF_BYTES, prepare_tracker
+    from tests.test_git_changes import git, init_repo
+
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    changed = repo / "app.py"
+    changed.write_text("base\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "base")
+    user_id = stats_db.insert_user_message("squid", "codex", "change app")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    tracker = prepare_tracker(str(repo), topic="squid", agent="codex", adhoc=False, msg_id=msg_id)
+    assert tracker is not None
+    changed.write_text("".join(f"changed line {i}\n" for i in range(9000)))
+    patch = git(repo, "diff", "--binary").stdout
+    assert len(patch) > MAX_INLINE_DIFF_BYTES
+    event = ({
+        "name": "GitDiff",
+        "repo": str(repo),
+        "files": [{"status": "M", "path": "app.py"}],
+        "diff": patch,
+    } if legacy else tracker.build_event())
+    stats_db.update_assistant_message(msg_id, "done", "session-1", "done", context=json.dumps([event]))
+
+    client = TestClient(server.app)
+    history = client.get(f"/history/by-ids?ids={msg_id}")
+    assert history.status_code == 200
+    tool, = json.loads(history.json()["items"][0]["context"])
+    assert tool["diff_deferred"] is True
+    assert tool["diff"] == ""
+    assert tool["files"][0]["additions"] == 9000
+    assert tool["files"][0]["deletions"] == 1
+
+    url = f"/chat/{msg_id}/diff-file"
+    params = {"repo": str(repo), "path": "app.py"}
+    first = client.get(url, params=params).json()
+    assert 0 < first["next_offset"] < len(patch)
+    assert first["diff"].endswith("\n")
+    reconstructed = [first["diff"]]
+    offset = first["next_offset"]
+    cursor = first["next_cursor"]
+    assert client.get(url, params={**params, "offset": offset}).status_code == 400
+    while offset is not None:
+        response = client.get(url, params={**params, "offset": offset, "cursor": cursor})
+        assert response.status_code == 200
+        page = response.json()
+        reconstructed.append(page["diff"])
+        assert page["next_offset"] is None or page["next_offset"] > offset
+        offset = page["next_offset"]
+        cursor = page["next_cursor"]
+    assert "".join(reconstructed) == patch
+    assert client.get(url, params={**params, "path": "other.py"}).status_code == 404
+
+    if not legacy:
+        (repo / ".gitattributes").write_text("app.py -diff\n")
+        stale_page = client.get(url, params={
+            **params, "offset": first["next_offset"], "cursor": first["next_cursor"],
+        })
+        assert stale_page.status_code == 409
+        assert "changed" in stale_page.json()["error"]
+        assert "GIT binary patch" in client.get(url, params=params).json()["diff"]
+        (repo / ".gitattributes").unlink()
+
+    reverted = client.post(f"/chat/{msg_id}/revert", json={"repo": str(repo)})
+    assert reverted.json()["reverted"] == ["app.py"]
+    assert changed.read_text() == "base\n"
+
+
 def test_discard_worktree_blocker_marks_conflict_row_discarded(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
@@ -1140,6 +1298,7 @@ def test_chat_response_exposes_message_id_header():
 
 
 def test_blocked_worktree_turn_persists_recovery_context(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "WORKTREE_ISOLATION_ENABLED", True)
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
     repo = tmp_path / "repo"

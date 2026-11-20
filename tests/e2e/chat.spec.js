@@ -1916,6 +1916,96 @@ test.describe('response bubble', () => {
     await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
   });
 
+  test('large GitDiff opens a paged viewer on demand and closes back to chat', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    const offsets = [];
+    let changed = false;
+    await page.route('**/chat/1/diff-file?**', route => {
+      const query = new URL(route.request().url()).searchParams;
+      expect(query.get('repo')).toBe('/tmp/repo');
+      expect(query.get('path')).toBe('ui/app.js');
+      const offset = query.get('offset');
+      offsets.push(offset);
+      expect(query.get('cursor')).toBe(offset === '0' ? null : 'first-cursor');
+      if (changed && offset !== '0') {
+        return route.fulfill({ status: 409, json: { error: 'The diff changed. Reload it to continue.' } });
+      }
+      return route.fulfill({
+        json: offset === '0'
+          ? { diff: '@@ -1 +1 @@\n+first page\n', next_offset: 22, next_cursor: 'first-cursor' }
+          : { diff: '+second page\n', next_offset: null, next_cursor: null },
+      });
+    });
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff', repo: '/tmp/repo', diff_deferred: true,
+          file_count: 1, additions: 9000, deletions: 1,
+          files: [{ status: 'M', path: 'ui/app.js', additions: 9000, deletions: 1, binary: false }],
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const file = page.locator('.gitdiff-file-toggle');
+    await expect(file).toContainText('M app.js  +9000 -1');
+    expect(offsets).toEqual([]);
+    await file.click();
+    const viewer = page.getByRole('dialog', { name: 'ui/app.js' });
+    await expect(viewer).toBeVisible();
+    await expect(viewer.locator('.diff-add')).toHaveText('+first page');
+    await viewer.getByRole('button', { name: 'Load more' }).click();
+    await expect(viewer.locator('.diff-add')).toHaveText(['+first page', '+second page']);
+    await expect(viewer.getByRole('button', { name: 'Load more' })).toBeHidden();
+    expect(offsets).toEqual(['0', '22']);
+    await viewer.getByRole('button', { name: 'Close' }).click();
+    await expect(viewer).toHaveCount(0);
+    await expect(file).toBeFocused();
+    await file.click();
+    await expect(viewer.locator('.diff-add')).toHaveText('+first page');
+    changed = true;
+    await viewer.getByRole('button', { name: 'Load more' }).click();
+    await expect(viewer.getByRole('status')).toContainText('The diff changed');
+    await expect(viewer.locator('.diff-add')).toHaveCount(0);
+    await viewer.getByRole('button', { name: 'Reload diff' }).click();
+    await expect(viewer.locator('.diff-add')).toHaveText('+first page');
+    await page.keyboard.press('Escape');
+    await expect(viewer).toHaveCount(0);
+    expect(offsets).toEqual(['0', '22', '0', '22', '0']);
+  });
+
+  test('deferred tool diff fetches its stored patch only when opened', async ({ page }) => {
+    let reads = 0;
+    await page.route('**/chat/1/diff-tool/0?**', route => {
+      reads++;
+      return route.fulfill({ json: {
+        diff: '@@ -1 +1 @@\n-old line\n+new line\n', next_offset: null, next_cursor: null,
+      } });
+    });
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: [{
+        id: 1, role: 'assistant', status: 'done', agent: 'codex', topic: 'default',
+        prompt: 'Change app.js', content: 'Done', timestamp: new Date().toISOString(),
+        context: JSON.stringify([{ name: 'Diff', file: 'ui/app.js', detail_index: 0 }]),
+      }],
+      has_more: false,
+    } }));
+
+    await page.reload();
+    const toggle = page.getByRole('button', { name: /Diff: ui\/app\.js$/ });
+    await expect(toggle).toBeVisible();
+    expect(reads).toBe(0);
+    await toggle.click();
+    const viewer = page.getByRole('dialog', { name: 'Diff: ui/app.js' });
+    await expect(viewer.locator('.diff-remove')).toHaveText('-old line');
+    await expect(viewer.locator('.diff-add')).toHaveText('+new line');
+    expect(reads).toBe(1);
+  });
+
   test('suppresses legacy edit list when GitDiff reports no net changes', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,
@@ -2022,21 +2112,27 @@ test.describe('response bubble', () => {
     await expect(block.locator('.diff-add')).toContainText('+new');
   });
 
-  test('GitDiff mobile labels use shortest unique file names', async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 800 });
+  test('GitDiff mobile labels shorten paths and keep long names clear of actions', async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 800 });
+    const longPath = 'tests/test_deal_2822_tipt_unplaced_security_claim_with_a_very_long_file_name.py';
+    await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
+      json: { [longPath]: 'revertable' },
+    }));
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,
       body: sse(
         META,
         { event: 'tool', data: {
           name: 'GitDiff',
-          file_count: 3,
-          additions: 1,
+          repo: '/tmp/repo',
+          file_count: 4,
+          additions: 149,
           deletions: 1,
           files: [
             { status: 'M', path: 'ui/app.js' },
             { status: 'M', path: 'src/components/Button/index.ts' },
             { status: 'M', path: 'src/pages/Button/index.ts' },
+            { status: 'A', path: longPath, additions: 148, deletions: 0, binary: false },
           ],
           diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n-old\n+new',
         } },
@@ -2051,8 +2147,29 @@ test.describe('response bubble', () => {
       'M app.js',
       'M components/Button/index.ts',
       'M pages/Button/index.ts',
+      'A ' + longPath.split('/').pop(),
     ]);
     await expect(rows.nth(1)).toHaveAttribute('title', 'src/components/Button/index.ts');
+
+    const row = page.locator('.gitdiff-file-row').last();
+    await expect(row.locator('.gitdiff-file-toggle')).toHaveAttribute('title', longPath);
+    const name = row.locator('.gitdiff-file-path');
+    const counts = row.locator('.gitdiff-file-counts');
+    const revert = row.getByRole('button', { name: 'revert', exact: true });
+    const view = row.getByRole('button', { name: `Open ${longPath} in file viewer` });
+    await expect(revert).toBeVisible();
+    await expect(view).toBeVisible();
+    await expect(counts).toHaveText('+148 -0');
+    await expect(name).toHaveCSS('text-overflow', 'ellipsis');
+    expect(await name.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+
+    const [nameBox, countsBox, revertBox, viewBox] = await Promise.all(
+      [name, counts, revert, view].map(el => el.boundingBox()),
+    );
+    expect(nameBox.x + nameBox.width).toBeLessThanOrEqual(countsBox.x);
+    expect(countsBox.x + countsBox.width).toBeLessThanOrEqual(revertBox.x);
+    expect(revertBox.x + revertBox.width).toBeLessThanOrEqual(viewBox.x);
+    expect(Math.abs(countsBox.y + countsBox.height / 2 - (viewBox.y + viewBox.height / 2))).toBeLessThan(1);
   });
 
   test('GitDiff file-open control is visible and opens the file viewer', async ({ page }) => {

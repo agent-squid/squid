@@ -227,8 +227,14 @@ missing IDs indicate deletion or failure to match the requested annotation
 filters. Invalid IDs, missing identity, and replies over
 the frame byte limit return `ok: false` with `invalid_ids`,
 `client_identity_required`, or `history_result_too_large`. Clients split large
-batches and offer explicit refresh for a single oversized row. This read does
-not advance the durable event cursor or use mutation idempotency records.
+batches. For an exact single ID, clients can request `chunked: true`. An oversized
+reply then arrives as correlated `history.chunk` frames with zero-based `index`
+and a `text` fragment of the serialized JSON result. A final `command.result`
+with `ok: true` and `chunk_count` marks completion. Clients assemble the result
+only after receiving all chunks in order. Each frame fits the same byte limit.
+Exact checks share the local history query admission and read timeout with
+paging. This read neither advances the durable event cursor nor uses mutation
+idempotency records.
 
 The UI verifies rendered completed rows after subscription and health recovery,
 updates only changed rows, and captures position after replies arrive. Pending

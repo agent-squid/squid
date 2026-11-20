@@ -1428,6 +1428,7 @@ def test_auth_status_recovers_completion_without_event_stream(monkeypatch, state
 
 
 def test_history_check_requires_identity_and_returns_exact_existing_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, '_REALTIME_OUTBOUND_QUEUE_LIMIT', 8)
     _fresh_db(tmp_path, monkeypatch)
     user_id = stats_db.insert_user_message('squid', 'codex', 'hello')
     msg_id = stats_db.insert_assistant_message('squid', 'codex', user_id)
@@ -1449,15 +1450,94 @@ def test_history_check_requires_identity_and_returns_exact_existing_ids(tmp_path
         ws.send_json(query)
         assert _receive_command_result(ws)['items'][0]['content'] == 'updated content'
         monkeypatch.setattr(server, '_REALTIME_MAX_FRAME_BYTES', 512)
-        stats_db.update_assistant_message(msg_id, 'x' * 1000, None)
+        content = ('𐍈"' + chr(92) + chr(10)) * 280
+        stats_db.update_assistant_message(msg_id, content, None)
         ws.send_json(query)
         assert _receive_command_result(ws)['error'] == 'history_result_too_large'
+        ws.send_json({**query, 'payload': {'ids': [msg_id], 'chunked': True}})
+        chunks = []
+        while True:
+            frame = ws.receive_json()
+            if frame.get('request_id') != query['request_id']:
+                continue
+            assert len(json.dumps(frame, ensure_ascii=False, separators=(',', ':')).encode()) <= 512
+            if frame['type'] == 'command.result':
+                assert frame['payload'] == {'ok': True, 'chunk_count': len(chunks)}
+                break
+            assert frame['type'] == 'history.chunk'
+            assert frame['payload']['index'] == len(chunks)
+            chunks.append(frame['payload']['text'])
+        assert len(chunks) > 1
+        item, = json.loads(''.join(chunks))['items']
+        assert item['id'] == msg_id and item['content'] == content
         stats_db.delete_topic('squid')
         ws.send_json(query)
         assert _receive_command_result(ws)['items'] == []
         for ids in [[True], ['1'], [0], [2**64], list(range(1, 102))]:
             ws.send_json({**query, 'payload': {'ids': ids}})
             assert _receive_command_result(ws)['error'] == 'invalid_ids'
+
+
+@pytest.mark.parametrize("name", ["Diff", "Bash"])
+def test_oversized_tool_patches_are_deferred_in_realtime_history(tmp_path, monkeypatch, name):
+    _fresh_db(tmp_path, monkeypatch)
+    limit = server._REALTIME_MAX_FRAME_BYTES
+    user_id = stats_db.insert_user_message("squid", "codex", "change a file")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    patch = "+old tool payload\n" * (limit // 18 + 1)
+    tool = {"name": "Diff", "file": "app.py", "diff": patch}
+    summary = {"name": "Diff", "file": "app.py", "detail_index": 0}
+    if name == "Bash":
+        tool = {"name": "Bash", "command": "apply_patch <<'PATCH'\n" + patch + "PATCH"}
+        summary = {"name": "Bash"}
+    tools = [
+        tool,
+        {"name": "GitDiff", "diff": "", "diff_deferred": True, "files": [{"path": "app.py", "status": "M"}]},
+    ]
+    stats_db.update_assistant_message(msg_id, "Reply is intact", None, "done", context=json.dumps(tools))
+    client = TestClient(server.app)
+    with client.websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        ws.send_json({"v": 1, "type": "subscribe", "payload": {
+            "client_id": CLIENT_ID, "scopes": [{"lifecycle": "global"}],
+        }})
+        assert ws.receive_json()["type"] == "subscribed"
+        assert ws.receive_json()["type"] == "snapshot"
+        for kind, payload in (
+            ("history.page", {"limit": 1}),
+            ("history.check", {"ids": [msg_id]}),
+        ):
+            ws.send_json({"v": 1, "type": kind, "request_id": kind, "payload": payload})
+            result = _receive_command_result(ws)
+            assert result["ok"] is True
+            item, = result["items"]
+            assert item["content"] == "Reply is intact"
+            assert json.loads(item["context"]) == [summary, tools[1]]
+
+    # The status response used by the thought trace still carries the full command.
+    assert json.loads(client.get(f"/chat/{msg_id}/status").json()["context"]) == tools
+    if name == "Bash":
+        return
+
+    url = f"/chat/{msg_id}/diff-tool/0"
+    first = client.get(url).json()
+    assert first["diff"] == patch[:first["next_offset"]]
+    second = client.get(url, params={
+        "offset": first["next_offset"], "cursor": first["next_cursor"],
+    }).json()
+    assert second["diff"] == patch[first["next_offset"]:second["next_offset"]]
+    assert client.get(f"/chat/{msg_id}/diff-tool/1").status_code == 404
+
+
+def test_history_shares_one_inline_budget_across_small_tool_patches(monkeypatch):
+    monkeypatch.setattr(server, "_REALTIME_MAX_FRAME_BYTES", 256 * 1024)
+    patch = "+" + "x" * 24576
+    tools = [
+        {"name": "Diff", "file": f"{i}.py", "diff": patch} for i in range(3)
+    ]
+    assert server._defer_history_patches(tools)
+    assert [tool["detail_index"] for tool in tools if "detail_index" in tool] == [2]
+    assert len([tool for tool in tools if tool.get("diff") == patch]) == 2
 
 
 @pytest.mark.parametrize('filter_name,annotation', [('bookmarked', 'bookmark'), ('marked_bad', 'bad_response')])
@@ -1547,18 +1627,20 @@ def test_history_query_frame_sizes_complete_unicode_envelope(monkeypatch):
     assert len(json.dumps(frame, ensure_ascii=False, separators=(',', ':')).encode()) <= 256
 
 
-def test_ws_history_rejects_unbounded_request_ids(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["history.page", "history.check"])
+def test_ws_history_rejects_unbounded_request_ids(tmp_path, monkeypatch, kind):
     _fresh_db(tmp_path, monkeypatch)
     with TestClient(server.app).websocket_connect('/ws/v1') as ws:
         ws.receive_json()
         for request_id in (None, '', 123, 'x' * 129, 'x' * 131072, '\ud800'):
-            ws.send_text(json.dumps({'v': 1, 'type': 'history.page', 'request_id': request_id, 'payload': {}}))
+            ws.send_text(json.dumps({'v': 1, 'type': kind, 'request_id': request_id, 'payload': {}}))
             assert ws.receive_json() == {'v': 1, 'type': 'error', 'payload': {'code': 'invalid_request_id'}}
         ws.send_json({'v': 1, 'type': 'ping'})
         assert ws.receive_json()['type'] == 'pong'
 
 
-def test_slow_history_queries_preserve_socket_liveness_and_admission(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["history.page", "history.check"])
+def test_slow_history_queries_preserve_socket_liveness_and_admission(tmp_path, monkeypatch, kind):
     _fresh_db(tmp_path, monkeypatch)
     release = threading.Event()
     started = threading.Event()
@@ -1577,7 +1659,8 @@ def test_slow_history_queries_preserve_socket_liveness_and_admission(tmp_path, m
                 'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
             assert ws.receive_json()['type'] == 'subscribed'
             assert ws.receive_json()['type'] == 'snapshot'
-            query = {'v': 1, 'type': 'history.page', 'request_id': 'slow', 'payload': {}}
+            payload = {'ids': [1], 'chunked': True} if kind == 'history.check' else {}
+            query = {'v': 1, 'type': kind, 'request_id': 'slow', 'payload': payload}
             ws.send_json(query)
             assert started.wait(2)
             ws.send_json({'v': 1, 'type': 'health.check', 'request_id': 'health', 'payload': {}})

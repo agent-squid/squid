@@ -100,7 +100,8 @@ def test_queue_listener_receives_authoritative_state_on_enqueue_and_dequeue():
 
     async def run():
         dispatcher = TopicDispatcher(lambda rows: states.append(rows))
-        with patch.object(TopicWorker, "start", lambda self: None):
+        with patch.object(TopicWorker, "start", lambda self: None), \
+             patch("agent.stats_db.mark_assistant_cancelled"):
             worker = dispatcher._get_or_create("work", "work")
             item = _make_item(0, 124)
             await worker.enqueue(item)
@@ -522,7 +523,9 @@ def test_worker_emits_git_diff_tool_event(tmp_path):
     chunks = asyncio.run(run())
     tools = [chunk["_tool"] for chunk in chunks if isinstance(chunk, dict) and "_tool" in chunk]
     assert [tool["name"] for tool in tools] == ["GitDiff"]
-    assert tools[0]["files"] == [{"status": "M", "path": "app.txt"}]
+    assert tools[0]["files"] == [
+        {"status": "M", "path": "app.txt", "binary": False, "additions": 1, "deletions": 1},
+    ]
     assert "+changed by agent" in tools[0]["diff"]
 
 

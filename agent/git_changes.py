@@ -3,6 +3,8 @@ git_changes.py - Git-backed direct watch tracking for topic code roots.
 """
 from __future__ import annotations
 
+import codecs
+import io
 import logging
 import os
 import re
@@ -10,11 +12,11 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, Union
 
 log = logging.getLogger(__name__)
 
-_MAX_DIFF_CHARS = 500_000
+MAX_INLINE_DIFF_BYTES = 64 * 1024
 
 
 def _run_git(
@@ -79,65 +81,122 @@ def _snapshot_tree(repo_root: Path, work_tree: Optional[Path] = None) -> str:
             pass
 
 
+def _read_nul_diff(repo_root: Path, option: str, base: str, head: str) -> str:
+    # Text-mode subprocess I/O normalizes CR in literal Git filenames.
+    result = subprocess.run(
+        ["git", "diff", option, "-z", base, head],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+    )
+    return result.stdout.decode("utf-8")
+
+
 def _parse_name_status(output: str) -> list[dict]:
     files: list[dict] = []
-    for line in output.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            item = {"status": parts[0], "path": parts[-1]}
-            if len(parts) > 2:
-                item["old_path"] = parts[1]
-            files.append(item)
+    entries = iter(output.rstrip("\0").split("\0")) if output else iter(())
+    for status in entries:
+        path = next(entries)
+        file = {"status": status, "path": path}
+        if status.startswith(("R", "C")):
+            file["old_path"] = path
+            file["path"] = next(entries)
+        files.append(file)
     return files
 
 
-def _parse_numstat(output: str) -> tuple[int, int]:
-    additions = 0
-    deletions = 0
-    for line in output.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 3:
-            continue
-        if parts[0].isdigit():
-            additions += int(parts[0])
-        if parts[1].isdigit():
-            deletions += int(parts[1])
-    return additions, deletions
+def _apply_numstat(files: list[dict], output: str) -> tuple[int, int]:
+    stats = {}
+    entries = iter(output.rstrip("\0").split("\0")) if output else iter(())
+    for entry in entries:
+        add, delete, path = entry.split("\t", 2)
+        old_path = None
+        if not path:
+            old_path, path = next(entries), next(entries)
+        binary = add == "-"
+        stats[(old_path, path)] = {
+            "binary": binary,
+            "additions": 0 if binary else int(add),
+            "deletions": 0 if binary else int(delete),
+        }
+    for file in files:
+        file.update(stats.get((file.get("old_path"), file["path"]), {}))
+    return (
+        sum(file.get("additions", 0) for file in files),
+        sum(file.get("deletions", 0) for file in files),
+    )
+
+
+def _patch_args(base: str, head: str, *paths: str) -> list[str]:
+    return [
+        "git", "--literal-pathspecs", "diff", "--binary", "--no-color", "--no-textconv", "--no-ext-diff",
+        "--src-prefix=a/", "--dst-prefix=b/", "--unified=3", base, head, "--", *paths,
+    ]
+
+
+def _read_inline_diff(repo_root: Path, base: str, head: str) -> Optional[str]:
+    args = _patch_args(base, head)
+    with subprocess.Popen(args, cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+        patch = proc.stdout.read(MAX_INLINE_DIFF_BYTES + 1)
+        if len(patch) > MAX_INLINE_DIFF_BYTES:
+            proc.kill()
+            return None
+        if proc.wait():
+            raise subprocess.CalledProcessError(proc.returncode, args)
+        try:
+            return patch.decode("utf-8")
+        except UnicodeDecodeError:
+            # The display decoder must never become the source of a revert.
+            return None
 
 
 def _diff_anchor_ref(msg_id: int) -> str:
     return f"refs/squid/diffs/{msg_id}"
 
 
-def _anchor_diff_trees(repo_root: Path, msg_id: Optional[int], base_tree: str, head_tree: str) -> None:
-    """Keep base_tree/head_tree reachable indefinitely so a later on-demand
-    per-file diff (e.g. a file this turn's diff omitted for size) can still be
-    recomputed from them, even after `git gc` would otherwise prune a bare,
-    ref-less tree. Best-effort: this must never fail the turn itself — chat
-    history/diffs are already retained indefinitely (ADR-0029), so once
-    created this ref is never deleted either.
-    """
+def _anchor_diff_trees(repo_root: Path, msg_id: Optional[int], base_tree: str, head_tree: str) -> bool:
+    """Keep the historical trees reachable for on-demand patches."""
     if msg_id is None:
-        return
+        return False
     try:
-        from .worktree import _commit_tree, _internal_commit_env  # local: avoid any import-time cycle
+        from .worktree import _commit_tree
 
         base_commit = _commit_tree(repo_root, base_tree, f"squid: diff base for turn {msg_id}")
         head_commit = _commit_tree(repo_root, head_tree, f"squid: diff head for turn {msg_id}", [base_commit])
-        _run_git(repo_root, "update-ref", _diff_anchor_ref(msg_id), head_commit, check=False)
+        return _run_git(repo_root, "update-ref", _diff_anchor_ref(msg_id), head_commit, check=False).returncode == 0
     except Exception:
         log.debug("diff anchor ref failed for msg_id=%s", msg_id, exc_info=True)
+        return False
 
 
-def diff_for_path(repo_root: Path, base: str, head: str, path: str) -> str:
-    """Recompute a single file's diff live from stored (base, head) tree hashes.
-    Used for files a turn's stored diff omitted for size — those still have
-    their trees anchored via _anchor_diff_trees, so this works long after the
-    turn ended. Returns '' if either tree is gone (e.g. pre-anchor history, or
-    the anchor ref was somehow removed) rather than raising.
-    """
-    result = _run_git(repo_root, "diff", "--binary", "--unified=3", base, head, "--", path, check=False)
-    return result.stdout if result.returncode == 0 else ''
+def diff_bytes_for_path(repo_root: Path, base: str, head: str, path: str, old_path: Optional[str]) -> bytes:
+    paths = [old_path, path] if old_path else [path]
+    result = subprocess.run(
+        _patch_args(base, head, *paths), cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    return result.stdout if result.returncode == 0 else b""
+
+
+def diff_for_path(
+    repo_root: Path, base: str, head: str, path: str, old_path: Optional[str] = None,
+    *, offset: int = 0, limit: Optional[int] = None,
+    observe_prefix: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Read a historical file patch, optionally stopping after a page."""
+    paths = [old_path, path] if old_path else [path]
+    args = _patch_args(base, head, *paths)
+    with subprocess.Popen(args, cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+        with io.TextIOWrapper(proc.stdout, encoding="utf-8", errors="replace", newline="") as output:
+            while offset:
+                skipped = output.read(min(offset, MAX_INLINE_DIFF_BYTES))
+                if not skipped:
+                    return ""
+                if observe_prefix is not None:
+                    observe_prefix(skipped)
+                offset -= len(skipped)
+            patch = output.read() if limit is None else output.read(limit + 1)
+            if limit is not None and len(patch) > limit:
+                proc.kill()
+                return patch
+            return patch if proc.wait() == 0 else ""
 
 
 @dataclass
@@ -198,19 +257,29 @@ class GitChangeTracker:
     def build_event(self) -> Optional[dict]:
         head_tree = _snapshot_tree(self.repo_root, self.work_tree)
         self.head_tree = head_tree
-        name_status = _run_git(self.repo_root, "diff", "--name-status", self.base_tree, head_tree).stdout
+        name_status = _read_nul_diff(self.repo_root, "--name-status", self.base_tree, head_tree)
         files = _parse_name_status(name_status)
         if not files:
             return None
 
-        numstat = _run_git(self.repo_root, "diff", "--numstat", self.base_tree, head_tree).stdout
-        additions, deletions = _parse_numstat(numstat)
-        stat = _run_git(self.repo_root, "diff", "--stat", self.base_tree, head_tree).stdout
-        full_diff = _run_git(self.repo_root, "diff", "--binary", "--unified=3", self.base_tree, head_tree).stdout
-        diff, omitted_paths = _truncate_diff_by_file(full_diff, _MAX_DIFF_CHARS)
-        truncated = bool(omitted_paths)
-        if omitted_paths:
-            _anchor_diff_trees(self.repo_root, self.msg_id, self.base_tree, head_tree)
+        numstat = _read_nul_diff(self.repo_root, "--numstat", self.base_tree, head_tree)
+        additions, deletions = _apply_numstat(files, numstat)
+        stat = _run_git(self.repo_root, "diff", "--no-color", "--stat", self.base_tree, head_tree).stdout
+        diff = _read_inline_diff(self.repo_root, self.base_tree, head_tree)
+        deferred = diff is None
+        if deferred and not _anchor_diff_trees(self.repo_root, self.msg_id, self.base_tree, head_tree):
+            # Preserve the prior stored-patch behavior if we cannot pin the trees.
+            args = _patch_args(self.base_tree, head_tree)
+            full_patch = subprocess.run(args, cwd=self.repo_root, stdout=subprocess.PIPE, check=True).stdout
+            try:
+                diff, omitted_paths = _truncate_diff_by_file(full_patch.decode("utf-8"), MAX_INLINE_DIFF_BYTES)
+                deferred = False
+            except UnicodeDecodeError:
+                # Without the anchor the trees can be pruned, but using a
+                # lossy stored patch would make a successful revert unsafe.
+                omitted_paths = []
+        else:
+            omitted_paths = []
 
         return {
             "name": "GitDiff",
@@ -219,7 +288,8 @@ class GitChangeTracker:
             "deletions": deletions,
             "files": files,
             "stat": stat,
-            "diff": diff,
+            "diff": diff or "",
+            **({"diff_deferred": True} if deferred else {"diff_lossless": True}),
             "base": self.base_tree,
             "head": head_tree,
             "cwd": str(self.event_cwd),
@@ -227,7 +297,7 @@ class GitChangeTracker:
             "repo": str(self.event_repo_root),
             "mode": "direct-watch",
             "persistent": self.persistent,
-            "truncated": truncated,
+            "truncated": bool(omitted_paths),
             "omitted_paths": omitted_paths,
             **({
                 "worktree_cwd": str(self.run_cwd),
@@ -265,15 +335,18 @@ class GitChangeTracker:
         return None
 
 
-def _iter_diff_chunks(full_diff: str):
-    """Yield (path, chunk_text) for each file section of a unified diff, in order.
+def unquote_git_path(path: str) -> str:
+    if path.startswith('"') and path.endswith('"'):
+        decoded, _ = codecs.escape_decode(path[1:-1].encode("utf-8"))
+        return decoded.decode("utf-8", errors="replace")
+    return path
 
-    chunk_text always ends with a trailing newline — git apply rejects a patch
-    whose last line has none ("corrupt patch"), which a naive line-boundary
-    split can otherwise produce at the last chunk or a truncation cut point.
-    """
+
+def _iter_diff_chunks(full_diff: str):
+    """Yield a path and a complete, independently appliable patch per file."""
     current_path: Optional[str] = None
     current_lines: list[str] = []
+    in_hunk = False
 
     def _chunk() -> str:
         text = '\n'.join(current_lines)
@@ -283,11 +356,20 @@ def _iter_diff_chunks(full_diff: str):
         if line.startswith('diff --git '):
             if current_lines:
                 yield current_path, _chunk()
-            m = re.match(r'^diff --git a/.+ b/(.+)$', line)
-            current_path = m.group(1) if m else None
+            match = re.match(r'^diff --git .+ ("b/.*"|b/.*)$', line)
+            current_path = unquote_git_path(match.group(1))[2:] if match else None
             current_lines = [line]
-        elif current_path is not None:
+            in_hunk = False
+        elif current_lines:
             current_lines.append(line)
+            if line.startswith('@@'):
+                in_hunk = True
+            if not in_hunk and line.startswith(('rename to ', 'copy to ')):
+                current_path = unquote_git_path(line.split(' to ', 1)[1])
+            if not in_hunk and line.startswith(('--- ', '+++ ')):
+                path = unquote_git_path(line[4:].removesuffix('\t'))
+                if path.startswith(('a/', 'b/')):
+                    current_path = path[2:]
 
     if current_lines:
         yield current_path, _chunk()
@@ -299,6 +381,27 @@ def extract_file_diff(full_diff: str, file_path: str) -> str:
         if path == file_path:
             return chunk
     return ''
+
+
+def summarize_stored_diff(tool: dict) -> bool:
+    """Keep large legacy patches in storage and send a small history summary."""
+    patch = tool.get("diff") or ""
+    files = tool.get("files") or []
+    if not patch:
+        return False
+    chunks = dict(_iter_diff_chunks(patch))
+    for file in files:
+        chunk = chunks.get(unquote_git_path(file.get("path", "")), "")
+        if not chunk:
+            continue
+        binary = "\nGIT binary patch\n" in chunk or "\nBinary files " in chunk
+        hunk = chunk.partition("\n@@")[2]
+        file.setdefault("binary", binary)
+        file.setdefault("additions", sum(line.startswith("+") for line in hunk.splitlines()))
+        file.setdefault("deletions", sum(line.startswith("-") for line in hunk.splitlines()))
+    tool["diff"] = ""
+    tool["diff_deferred"] = True
+    return True
 
 
 def _truncate_diff_by_file(full_diff: str, max_chars: int) -> tuple[str, list[str]]:
@@ -326,18 +429,19 @@ def _truncate_diff_by_file(full_diff: str, max_chars: int) -> tuple[str, list[st
     return ''.join(kept), omitted
 
 
-def apply_reverse_patch(repo_root: Path, patch_text: str) -> tuple[bool, str]:
-    """Apply the reverse of patch_text in repo_root. Returns (success, error_message)."""
+def apply_reverse_patch(repo_root: Path, patch: Union[str, bytes]) -> tuple[bool, str]:
+    """Apply the reverse of a lossless patch. Returns (success, error_message)."""
     fd, patch_path = tempfile.mkstemp(suffix='.patch')
     try:
-        with os.fdopen(fd, 'w') as f:
-            f.write(patch_text)
-        check = _run_git(repo_root, 'apply', '--reverse', '--check', patch_path, check=False)
-        if check.returncode != 0:
-            return False, check.stderr.strip()
-        result = _run_git(repo_root, 'apply', '--reverse', patch_path, check=False)
-        if result.returncode != 0:
-            return False, result.stderr.strip()
+        with os.fdopen(fd, 'wb') as f:
+            f.write(patch.encode('utf-8') if isinstance(patch, str) else patch)
+        args = ["git", "apply", "--reverse", "--whitespace=nowarn"]
+        for options in (["--check"], []):
+            result = subprocess.run(
+                [*args, *options, patch_path], cwd=repo_root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+            if result.returncode != 0:
+                return False, result.stderr.decode("utf-8", errors="replace").strip()
         return True, ''
     finally:
         try:

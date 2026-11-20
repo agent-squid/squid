@@ -221,17 +221,39 @@ def test_truncate_diff_by_file_under_budget_is_unchanged():
     assert omitted == []
 
 
-def test_omitted_file_diff_recoverable_via_anchored_trees(tmp_path, monkeypatch):
-    # A file too large to include in the stored diff should still be fetchable
-    # on demand, long after the turn ends, via the (base, head) trees the
-    # tracker anchors under a Squid-owned ref when it omits anything.
+def test_git_diff_keeps_carriage_return_and_line_feed_filenames_distinct(tmp_path):
+    init_repo(tmp_path)
+    cr_name = "a\rfile.txt"
+    lf_name = "a\nfile.txt"
+    for name in (cr_name, lf_name):
+        (tmp_path / name).write_text("before\n")
+    git(tmp_path, "add", "--all")
+    git(tmp_path, "commit", "-m", "Add similarly named files")
+    tracker = prepare_tracker(str(tmp_path), topic="t", agent="codex", adhoc=False, msg_id=777)
+    assert tracker is not None
+    (tmp_path / cr_name).write_text("edited CR\n")
+    (tmp_path / lf_name).write_text("edited LF\nanother line\n")
+
+    event = tracker.build_event()
+    assert {file["path"]: file["additions"] for file in event["files"]} == {cr_name: 1, lf_name: 2}
+    cr_patch = extract_file_diff(event["diff"], cr_name)
+    assert "+edited CR" in cr_patch
+    assert "+edited LF" not in cr_patch
+    ok, error = apply_reverse_patch(tmp_path, cr_patch)
+    assert ok, error
+    assert (tmp_path / cr_name).read_text() == "before\n"
+    assert (tmp_path / lf_name).read_text() == "edited LF\nanother line\n"
+
+
+def test_large_diff_keeps_metadata_and_anchors_historical_patches(tmp_path, monkeypatch):
     init_repo(tmp_path)
     (tmp_path / "small.txt").write_text("s\n")
     (tmp_path / "huge.txt").write_text("h\n")
-    git(tmp_path, "add", "small.txt", "huge.txt")
+    (tmp_path / "original name.txt").write_text("renamed content\n")
+    git(tmp_path, "add", "small.txt", "huge.txt", "original name.txt")
     git(tmp_path, "commit", "-m", "two files")
 
-    monkeypatch.setattr(git_changes, "_MAX_DIFF_CHARS", 1)  # force everything to omit
+    monkeypatch.setattr(git_changes, "MAX_INLINE_DIFF_BYTES", 1)
 
     tracker = prepare_tracker(
         str(tmp_path), topic="t", agent="codex", adhoc=False, msg_id=777,
@@ -239,9 +261,21 @@ def test_omitted_file_diff_recoverable_via_anchored_trees(tmp_path, monkeypatch)
     assert tracker is not None
     (tmp_path / "small.txt").write_text("s changed\n")
     (tmp_path / "huge.txt").write_text("h changed\n")
+    (tmp_path / "original name.txt").rename(tmp_path / "新 name.txt")
 
     event = tracker.build_event()
-    assert set(event["omitted_paths"]) == {"small.txt", "huge.txt"}
+    assert event["diff_deferred"] is True
+    assert event["files"] == [
+        {"path": "huge.txt", "status": "M", "additions": 1, "deletions": 1, "binary": False},
+        {"path": "small.txt", "status": "M", "additions": 1, "deletions": 1, "binary": False},
+        {
+            "path": "新 name.txt", "old_path": "original name.txt", "status": "R100",
+            "additions": 0, "deletions": 0, "binary": False,
+        },
+    ]
+    assert event["additions"] == event["deletions"] == 2
+    (tmp_path / "huge.txt").write_text("a later change\n")
+    git(tmp_path, "gc", "--prune=now")
     assert event["diff"] == ""
     assert event["base"] and event["head"]
 
@@ -250,4 +284,8 @@ def test_omitted_file_diff_recoverable_via_anchored_trees(tmp_path, monkeypatch)
     recovered = diff_for_path(tmp_path, event["base"], event["head"], "huge.txt")
     assert "+h changed" in recovered
     assert "small.txt" not in recovered
+    assert "a later change" not in recovered
+    rename = diff_for_path(tmp_path, event["base"], event["head"], "新 name.txt", "original name.txt")
+    assert "rename from original name.txt" in rename
+    assert extract_file_diff(rename, "新 name.txt") == rename
 

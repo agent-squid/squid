@@ -516,7 +516,9 @@ test('SSE lifecycle recovery updates and deletes exact rows without rebuilding u
   await page.route('**/history?**', r => r.fulfill({ json: { items: rows, has_more: false } }));
   let socket;
   let checks = 0;
-  let oversized = false;
+  let oversizedId = null;
+  let omitChunk = false;
+  const chunkedChecks = [];
   let holdCheck = false;
   let releaseCheck;
   await page.routeWebSocket('**/ws/v1', ws => {
@@ -529,8 +531,22 @@ test('SSE lifecycle recovery updates and deletes exact rows without rebuilding u
         ws.send(JSON.stringify({ v: 1, type: 'snapshot', event_id: 1, payload: { cursor_reset: true, conversations: [] } }));
       } else if (frame.type === 'history.check') {
         checks++;
+        if (frame.payload.ids.length === 1 && frame.payload.ids[0] === oversizedId && frame.payload.chunked) {
+          chunkedChecks.push(frame.payload);
+          const result = JSON.stringify({ ok: true, items: rows.filter(row => row.id === oversizedId) });
+          const middle = Math.floor(result.length / 2);
+          for (const [index, text] of [result.slice(0, middle), result.slice(middle)].entries()) {
+            if (!omitChunk || index === 0) {
+              ws.send(JSON.stringify({ v: 1, type: 'history.chunk', request_id: frame.request_id,
+                payload: { index, text } }));
+            }
+          }
+          ws.send(JSON.stringify({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, chunk_count: 2 } }));
+          return;
+        }
         const reply = JSON.stringify({ v: 1, type: 'command.result', request_id: frame.request_id,
-          payload: oversized ? { ok: false, error: 'history_result_too_large' }
+          payload: frame.payload.ids.includes(oversizedId) ? { ok: false, error: 'history_result_too_large' }
             : { ok: true, items: rows.filter(row => frame.payload.ids.includes(row.id)) } });
         if (holdCheck) releaseCheck = () => ws.send(reply);
         else ws.send(reply);
@@ -576,11 +592,20 @@ test('SSE lifecycle recovery updates and deletes exact rows without rebuilding u
   await expect(page.locator('.assistant[data-msg-id="3"]')).toContainText('Delayed changed response');
   await expect.poll(() => page.evaluate(() => renderedHistoryCheckBusy)).toBe(false);
   expect(await page.evaluate(() => messages.scrollTop)).toBe(readingTop);
-  oversized = true;
+  await page.route('**/history/by-ids?**', route => { historyRequests++; return route.abort(); });
+  oversizedId = 3;
+  rows = rows.map(row => row.id === 3 ? { ...row, content: 'Oversized turn recovered over WebSocket' } : row);
+  await page.evaluate(() => reconcileRenderedHistory());
+  await expect(page.locator('.assistant[data-msg-id="3"]')).toContainText('Oversized turn recovered over WebSocket');
+  expect(chunkedChecks).toEqual([{ ids: [3], bookmarked: false, marked_bad: false, chunked: true }]);
+  expect(historyRequests).toBe(0);
+  expect(await page.evaluate(() => savedReadingRow === messages.querySelector('.assistant[data-msg-id="2"]'))).toBe(true);
+
+  omitChunk = true;
   await page.evaluate(() => reconcileRenderedHistory());
   await expect(page.locator('#connection-latest')).toBeVisible();
   await expect(page.locator('#connection-status')).toContainText('History recovery unavailable');
-  oversized = false;
+  oversizedId = null;
   await page.evaluate(() => reconcileRenderedHistory());
   await expect(page.locator('#connection-banner')).toBeHidden();
 

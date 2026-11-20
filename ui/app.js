@@ -7469,6 +7469,89 @@ function _withinRevertWindow(timestamp) {
   return Number.isFinite(t) && Date.now() - t < REVERT_WINDOW_MS;
 }
 
+function openTurnDiffViewer(endpoint, label) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'turn-diff-viewer';
+  dialog.setAttribute('aria-labelledby', 'turn-diff-title');
+
+  const header = document.createElement('header');
+  const title = document.createElement('h2');
+  title.id = 'turn-diff-title';
+  title.textContent = label;
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'btn-ghost';
+  close.textContent = 'Close';
+  close.autofocus = true;
+  close.addEventListener('click', () => dialog.close());
+  header.append(title, close);
+
+  const scroll = document.createElement('div');
+  scroll.className = 'turn-diff-scroll';
+  scroll.tabIndex = 0;
+  scroll.setAttribute('aria-label', 'Diff');
+  const lines = document.createElement('div');
+  const status = document.createElement('p');
+  status.setAttribute('role', 'status');
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'btn-ghost';
+  more.hidden = true;
+  scroll.append(lines, status, more);
+  dialog.append(header, scroll);
+
+  const controller = new AbortController();
+  let offset = 0;
+  let cursor = null;
+  async function loadPage() {
+    more.disabled = true;
+    status.textContent = 'Loading diff…';
+    try {
+      const url = new URL(endpoint, location.href);
+      url.searchParams.set('offset', offset);
+      if (cursor !== null) url.searchParams.set('cursor', cursor);
+      const response = await fetch(url, { signal: controller.signal });
+      const data = await response.json();
+      if (response.status === 409) {
+        offset = 0;
+        cursor = null;
+        lines.replaceChildren();
+        status.textContent = data.error;
+        more.textContent = 'Reload diff';
+        more.hidden = false;
+        return;
+      }
+      if (!response.ok || typeof data.diff !== 'string') {
+        throw new Error(data.error || 'Unable to load diff');
+      }
+      renderUnifiedDiffLines(lines, data.diff.replace(/\n$/, ''));
+      status.textContent = '';
+      offset = data.next_offset;
+      cursor = data.next_cursor ?? null;
+      if (offset == null && document.activeElement === more) scroll.focus({ preventScroll: true });
+      more.hidden = offset == null;
+      more.textContent = 'Load more';
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      status.textContent = error.message || 'Unable to load diff';
+      more.textContent = 'Retry';
+      more.hidden = false;
+    } finally {
+      more.disabled = false;
+    }
+  }
+
+  more.addEventListener('click', loadPage);
+  dialog.addEventListener('keydown', event => event.stopPropagation());
+  dialog.addEventListener('close', () => {
+    controller.abort();
+    dialog.remove();
+  }, { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+  void loadPage();
+}
+
 function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
   const name = tool.name || '';
   const block = document.createElement('div');
@@ -7493,6 +7576,16 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
 
   const toggle = document.createElement('button');
   toggle.className = 'tool-toggle';
+  if (Number.isInteger(tool.detail_index) && msgId) {
+    toggle.textContent = toolLabel(tool);
+    toggle.setAttribute('aria-haspopup', 'dialog');
+    toggle.addEventListener('click', () => {
+      openTurnDiffViewer(`/chat/${msgId}/diff-tool/${tool.detail_index}`, toggle.textContent);
+    });
+    block.appendChild(toggle);
+    return block;
+  }
+
   const body = document.createElement('div');
   body.className = 'tool-body';
   const scroll = document.createElement('div');
@@ -7944,81 +8037,61 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
       const fileToggle = document.createElement('button');
       fileToggle.className = 'gitdiff-file-toggle';
       fileToggle.title = fullDisplayPath;
+      const statusLabel = document.createElement('span');
+      statusLabel.textContent = status + ' ';
+      const pathLabel = document.createElement('span');
+      pathLabel.className = 'gitdiff-file-path';
+      pathLabel.textContent = displayPath;
+      fileToggle.append(statusLabel, pathLabel);
 
       // git's own content-based binary detection wins when we have diff text to
       // check; only fall back to the extension guess when there's no chunk to look at
-      const isBinary = chunk ? chunk.includes('Binary files') : !_isTextPath(file.path || '');
+      const isBinary = file.binary ?? (chunk
+        ? /\n(?:Binary files |GIT binary patch)/.test(chunk)
+        : !_isTextPath(file.path || ''));
+      const needsFetch = tool.diff_deferred || isOmitted || (!chunk && file.additions != null);
+      let counts = '';
       let fileBody = null;
-      if (isOmitted) {
-        fileToggle.textContent = `${status} ${displayPath}`;
-        fileToggle.classList.add('gitdiff-file-toggle--no-diff');
-        const badge = document.createElement('span');
-        badge.className = 'gitdiff-binary-badge';
-        badge.title = 'This turn’s diff was too large — earlier files were shown in full and this one was left out entirely, not cut mid-file.';
-        badge.textContent = 'too large to show';
-        fileToggle.appendChild(badge);
-        row.appendChild(fileToggle);
-
+      if (needsFetch && file.binary !== true && (!isBinary || !chunk)) {
+        if (file.additions != null && file.deletions != null) {
+          counts = `+${file.additions} -${file.deletions}`;
+        }
         if (msgId && sourceRepo) {
-          const loadBtn = document.createElement('button');
-          loadBtn.type = 'button';
-          loadBtn.className = 'gitdiff-file-open';
-          loadBtn.textContent = 'load diff';
-          loadBtn.addEventListener('click', async e => {
-            e.stopPropagation();
-            loadBtn.disabled = true; loadBtn.textContent = '…';
-            try {
-              const res = await fetch(`/chat/${msgId}/diff-file?repo=${encodeURIComponent(sourceRepo)}&path=${encodeURIComponent(file.path)}`);
-              const data = await res.json();
-              if (!res.ok || !data.diff) {
-                loadBtn.textContent = 'load diff';
-                loadBtn.disabled = false;
-                loadBtn.title = data.error || 'failed to load';
-                return;
-              }
-              const loadedBody = document.createElement('div');
-              loadedBody.className = 'gitdiff-file-body';
-              const loadedScroll = document.createElement('div');
-              loadedScroll.className = 'diff-scroll';
-              renderUnifiedDiffLines(loadedScroll, data.diff);
-              loadedBody.appendChild(loadedScroll);
-              row.appendChild(loadedBody);
-              loadBtn.remove();
-              fileToggle.classList.remove('gitdiff-file-toggle--no-diff');
-              fileToggle.addEventListener('click', () => row.classList.toggle('gitdiff-file-expanded'));
-              row.classList.add('gitdiff-file-expanded');
-            } catch {
-              loadBtn.textContent = 'load diff';
-              loadBtn.disabled = false;
-              loadBtn.title = 'failed to load';
-            }
+          fileToggle.setAttribute('aria-haspopup', 'dialog');
+          fileToggle.addEventListener('click', () => {
+            const query = new URLSearchParams({ repo: tool.repo || sourceRepo, path: file.path });
+            openTurnDiffViewer(`/chat/${msgId}/diff-file?${query}`, fullDisplayPath);
           });
-          row.appendChild(loadBtn);
+        } else {
+          fileToggle.classList.add('gitdiff-file-toggle--no-diff');
         }
       } else if (isBinary) {
-        fileToggle.textContent = `${status} ${displayPath}`;
         fileToggle.classList.add('gitdiff-file-toggle--no-diff');
         const badge = document.createElement('span');
         badge.className = 'gitdiff-binary-badge';
         badge.textContent = 'binary';
         fileToggle.appendChild(badge);
-        row.appendChild(fileToggle);
       } else if (chunk) {
         const { add, del } = _countDiffStats(chunk);
-        fileToggle.textContent = `${status} ${displayPath}  +${add} -${del}`;
+        counts = `+${add} -${del}`;
         fileBody = document.createElement('div');
         fileBody.className = 'gitdiff-file-body';
         const fileScroll = document.createElement('div');
         fileScroll.className = 'diff-scroll';
         renderUnifiedDiffLines(fileScroll, chunk);
         fileBody.appendChild(fileScroll);
-        row.appendChild(fileToggle);
         fileToggle.addEventListener('click', () => row.classList.toggle('gitdiff-file-expanded'));
       } else {
-        fileToggle.textContent = `${status} ${displayPath}`;
         fileToggle.classList.add('gitdiff-file-toggle--no-diff');
-        row.appendChild(fileToggle);
       }
+
+      if (counts) {
+        const countsLabel = document.createElement('span');
+        countsLabel.className = 'gitdiff-file-counts';
+        countsLabel.textContent = ' ' + counts;
+        fileToggle.appendChild(countsLabel);
+      }
+      row.appendChild(fileToggle);
 
       const _absPath = file.path
         ? (file.path.startsWith('/') ? file.path : sourceRepo ? sourceRepo + '/' + file.path : null)
@@ -8930,8 +9003,32 @@ const realtimeV1 = (() => {
           }
         }
       }
+      else if (frame.type === 'history.chunk') {
+        const command = commands.get(frame.request_id);
+        if (command?.frame.type !== 'history.check' || !command.frame.payload.chunked) return;
+        const { index, text } = frame.payload || {};
+        command.historyChunks ??= [];
+        if (index !== command.historyChunks.length || typeof text !== 'string') {
+          rejectCommand(frame.request_id, 'Invalid history chunk.', true);
+          return;
+        }
+        command.historyChunks.push(text);
+        command.armTimeout();
+      }
       else if (frame.type === 'command.result' && commands.has(frame.request_id)) {
         const command = commands.get(frame.request_id);
+        let payload = frame.payload || {};
+        if (command.frame.type === 'history.check' && (command.historyChunks || payload.chunk_count != null)) {
+          try {
+            if (!payload.ok || !command.historyChunks?.length || payload.chunk_count !== command.historyChunks.length) {
+              throw new Error('Incomplete history result.');
+            }
+            payload = JSON.parse(command.historyChunks.join(''));
+          } catch {
+            rejectCommand(frame.request_id, 'Incomplete history result.', true);
+            return;
+          }
+        }
         clearTimeout(command.timeout);
         if (command.timedOut) {
           // Late arrival for a command whose own timeout already rejected the
@@ -8953,7 +9050,7 @@ const realtimeV1 = (() => {
         }
         if (!command.resolved) {
           command.resolved = true;
-          command.resolve(frame.payload || {});
+          command.resolve(payload);
         }
       }
       else if (frame.type === 'error' && frame.request_id && commands.has(frame.request_id)) {
@@ -8992,7 +9089,10 @@ const realtimeV1 = (() => {
           }
         }
       } else {
-        for (const command of commands.values()) command.sent = false;
+        for (const command of commands.values()) {
+          command.sent = false;
+          delete command.historyChunks;
+        }
       }
       if (!globalEnabled && !watches.size && !commands.size) return;
       clearTimeout(reconnectTimer);
@@ -9019,14 +9119,18 @@ const realtimeV1 = (() => {
         reject,
         timeout: null,
       };
-      command.timeout = setTimeout(() => {
-        rejectCommand(
-          requestId,
-          command.everSent ? timeoutMessage : 'WebSocket connection timed out.',
-          command.everSent,
-          command.everSent,
-        );
-      }, commandTimeoutMs);
+      command.armTimeout = () => {
+        clearTimeout(command.timeout);
+        command.timeout = setTimeout(() => {
+          rejectCommand(
+            requestId,
+            command.everSent ? timeoutMessage : 'WebSocket connection timed out.',
+            command.everSent,
+            command.everSent,
+          );
+        }, commandTimeoutMs);
+      };
+      command.armTimeout();
       commands.set(requestId, command);
     });
     if (freshScope) needsSnapshot = true;
@@ -9065,7 +9169,10 @@ const realtimeV1 = (() => {
         // reset, so do it here too or a resolved-but-kept command (e.g. a
         // live auth.start, see activeAuthRequestId) would never get resent
         // on the new connection.
-        for (const command of commands.values()) command.sent = false;
+        for (const command of commands.values()) {
+          command.sent = false;
+          delete command.historyChunks;
+        }
         staleSocket.close(1000, 'foreground resume');
       }
       connect();
@@ -9086,7 +9193,7 @@ const realtimeV1 = (() => {
         timeoutMessage: 'WebSocket health check timed out.' });
     },
     checkHistory(ids, filters = {}) {
-      return sendCommand({ type: 'history.check', payload: { ids, ...filters },
+      return sendCommand({ type: 'history.check', payload: { ids, ...filters, chunked: ids.length === 1 },
         unscoped: true, freshScope: false, reuseSubscription: true,
         timeoutMessage: 'History verification timed out.' });
     },
