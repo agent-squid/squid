@@ -46,15 +46,17 @@ def _load_frontmatter(content: str) -> dict:
 
 
 _CODE_ROOTS_HINT_LINES = [
-    "  # code_roots: absolute path(s) to this topic's repo(s) — enables code context",
-    "  #   - /absolute/path/to/repo",
+    "  # Repository paths for code context; relative paths use Squid's working directory.",
+    "  # code_roots:",
+    "  #   - ~/Work/my-repo",
 ]
 
 _PLACEHOLDER_MEMORY = (
     "---\n"
     "squid:\n"
-    "  # code_roots: absolute path(s) to this topic's repo(s) — enables code context\n"
-    "  #   - /absolute/path/to/repo\n"
+    "  # Repository paths for code context; relative paths use Squid's working directory.\n"
+    "  # code_roots:\n"
+    "  #   - ~/Work/my-repo\n"
     "  # code_roots_skipped: true  # set if this topic has no local codebase\n"
     "---\n"
 )

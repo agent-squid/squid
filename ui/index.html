@@ -342,6 +342,12 @@
           <div class="help-row"><span>Choose #all to remove the route restriction. Clearing keywords shows history within the selected route and bookmark setting. Close with ✕ or Esc to preserve results; Clear all resets route, keywords, and bookmarks.</span></div>
         </div>
         <div class="help-section">
+          <div class="help-title">Agent home and working directory</div>
+          <div class="help-row"><code>User Home</code><span>Use your existing home environment, including harness settings, plugins, skills, and login. Choose this to use your normal setup.</span></div>
+          <div class="help-row"><code>Blank Home</code><span>Use separate harness settings, plugins, skills, and history for a clean setup. Supported credentials are shared from your user home, so this does not create a separate account; its temporary files may be cleared on reboot.</span></div>
+          <div class="help-row"><code>CWD</code><span>The working directory where the agent runs. Leave it blank for Squid’s default; topic or task settings may override it. It does not select the agent’s home or login.</span></div>
+        </div>
+        <div class="help-section">
           <div class="help-title">Context curation</div>
           <div class="help-row"><code>✕ session</code><span>clear session state; next message starts fresh</span></div>
           <div class="help-row"><code><svg width="10" height="11" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M25 21v1H8v-1l2-2L11 4L9 2V1h15v1l-2 2l1 15l2 2zM16 31h1l1-8h-3l1 8z"/></svg> response</code><span>pin a response to inject as context in future adhoc turns</span></div>
@@ -820,7 +826,7 @@
                 <option value="blank_home">Blank Home</option>
               </select>
             </span>
-            <input id="af-cwd"     type="text"   placeholder="/tmp/<user>/squid/…" spellcheck="false" />
+            <input id="af-cwd" type="text" placeholder="/tmp/<user>/squid/…" spellcheck="false" aria-label="Working directory" title="Working directory where the agent runs. Leave blank to use Squid’s default directory; topic or task settings may override it." />
             <button type="submit" class="agent-save-btn" aria-label="Save agent" title="Save agent">
               <span class="agent-save-label">Save</span>
               <svg class="agent-save-icon" viewBox="0 0 24 24" aria-hidden="true">
