@@ -475,9 +475,10 @@ test('md file shows preview button and renders preview inline', async ({ page })
   await expect(page.getByRole('button', { name: 'Show Markdown source' })).toBeVisible();
 
   const diagram = page.locator('#file-modal-body .fv-md-preview .fv-mermaid');
-  const viewport = diagram.locator('.fv-mermaid-viewport');
+  const viewport = diagram.locator('.media-zoom-viewport');
   const canvas = viewport.locator(':scope > div');
   await expect(viewport.locator('svg')).toBeVisible();
+  await diagram.hover();
   await diagram.getByRole('button', { name: 'Zoom in' }).click();
   await expect(canvas).toHaveCSS('transform', 'matrix(1.25, 0, 0, 1.25, 0, 0)');
   await diagram.getByRole('button', { name: 'Zoom out' }).click();
@@ -488,9 +489,29 @@ test('md file shows preview button and renders preview inline', async ({ page })
   await diagram.getByRole('button', { name: 'Reset diagram view' }).click();
   await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
 
+  await diagram.getByRole('button', { name: 'Expand diagram' }).click();
+  const viewer = page.getByRole('dialog', { name: 'Mermaid diagram viewer' });
+  await expect(viewer.locator('.media-zoom-viewport svg')).toBeVisible();
+  await viewer.getByRole('button', { name: 'Close diagram viewer' }).click();
+  await expect(viewer).toHaveCount(0);
+  await expect(viewport.locator('svg')).toBeVisible();
   await page.getByRole('button', { name: 'Show Markdown source' }).click();
   await expect(diagram).toHaveCount(0);
   await expect(page.locator('#file-modal-body')).toContainText('# Hello');
+
+  // A file opened from chat has its own Escape handler beneath the media dialog.
+  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await page.evaluate(() => { openFileViewer('/tmp/work/README.md'); });
+  const fileModal = page.locator('#file-modal');
+  await fileModal.getByRole('button', { name: 'Preview Markdown' }).click();
+  const expand = fileModal.getByRole('button', { name: 'Expand diagram' });
+  await fileModal.locator('.fv-mermaid').hover();
+  await expand.click();
+  await expect(viewer).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(viewer).toHaveCount(0);
+  await expect(fileModal.locator('.fv-mermaid .media-zoom-viewport svg')).toBeVisible();
+  await expect(expand).toBeFocused();
 });
 
 test('html preview stays in file viewer and back returns to source', async ({ page }) => {

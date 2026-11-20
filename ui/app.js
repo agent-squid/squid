@@ -191,6 +191,7 @@ function renderAssistantMarkdown(content) {
 
 function setAssistantMarkdown(container, content) {
   container.innerHTML = renderAssistantMarkdown(content);
+  _enableResponseImageViewer(container);
   // History and completed live bubbles can still be detached at this point.
   requestAnimationFrame(() => {
     if (container.isConnected) void _renderMarkdownDiagrams(container);
@@ -14578,7 +14579,7 @@ document.addEventListener('keydown', event => {
   if (event.defaultPrevented || !(event.ctrlKey || event.metaKey)
       || event.altKey || event.key.toLowerCase() !== 'f') return;
   if (!document.getElementById('view-settings')?.classList.contains('active')
-      || document.querySelector('.modal.open') || !_configCmView
+      || document.querySelector('.modal.open, dialog.media-viewer[open]') || !_configCmView
       || !_configCmView.dom.querySelector('.config-find-input')) return;
   event.preventDefault();
   event.stopPropagation();
@@ -20403,21 +20404,88 @@ function _replaceMarkdownDiagram(code, diagram) {
   else if (aboveViewport) messages.scrollTop = previousTop + messages.scrollHeight - previousHeight;
 }
 
-function _addMermaidControls(diagram) {
+function _enableResponseImageViewer(container) {
+  for (const image of container.querySelectorAll('img')) {
+    if (image.closest('a, button')) continue;
+    const media = image.closest('picture') || image;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'response-image-button';
+    button.setAttribute('aria-label', image.alt ? `Open image: ${image.alt}` : 'Open image');
+    button.setAttribute('aria-haspopup', 'dialog');
+    const expand = () => _openResponseImageViewer(image);
+    button.addEventListener('click', expand);
+    image.draggable = false;
+    const frame = document.createElement('span');
+    frame.className = 'response-image';
+    media.replaceWith(frame);
+    button.append(media);
+    frame.append(button);
+    _addZoomControls(frame, 'Image', 'image', expand);
+  }
+}
+
+function _openResponseImageViewer(source) {
+  const image = document.createElement('img');
+  image.alt = source.alt;
+  image.draggable = false;
+  image.referrerPolicy = source.referrerPolicy;
+  image.src = source.currentSrc || source.src;
+  _openMediaViewer(image, 'Image', 'image');
+}
+
+function _expandMermaidDiagram(diagram) {
+  const svg = diagram.querySelector('.media-zoom-viewport > div > svg');
+  if (!svg) return;
+  // Move the original SVG so its IDs stay unique and keep the inline height.
+  const placeholder = document.createElement('div');
+  placeholder.style.height = getComputedStyle(svg).height;
+  svg.replaceWith(placeholder);
+  _openMediaViewer(svg, 'Mermaid diagram', 'diagram', () => placeholder.replaceWith(svg));
+}
+
+function _openMediaViewer(media, label, subject, restoreMedia) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'media-viewer';
+  dialog.setAttribute('aria-label', `${label} viewer`);
+  dialog.append(media);
+  _addZoomControls(dialog, label, subject);
+
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'media-viewer-close';
+  close.textContent = '×';
+  close.setAttribute('aria-label', `Close ${subject} viewer`);
+  close.autofocus = true;
+  close.addEventListener('click', () => dialog.close());
+  dialog.append(close);
+  dialog.addEventListener('keydown', event => event.stopPropagation());
+  dialog.addEventListener('click', event => {
+    if (event.target === dialog) dialog.close();
+  });
+  dialog.addEventListener('close', () => {
+    restoreMedia?.();
+    dialog.remove();
+  }, { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+function _addZoomControls(container, label, subject, expand) {
   const controls = document.createElement('div');
-  controls.className = 'fv-mermaid-controls';
+  controls.className = 'media-zoom-controls';
   controls.setAttribute('role', 'group');
-  controls.setAttribute('aria-label', 'Mermaid diagram controls');
+  controls.setAttribute('aria-label', `${label} controls`);
 
   const viewport = document.createElement('div');
-  viewport.className = 'fv-mermaid-viewport';
+  viewport.className = 'media-zoom-viewport';
   viewport.tabIndex = 0;
   viewport.setAttribute('role', 'group');
-  viewport.setAttribute('aria-label', 'Mermaid diagram. Use arrow keys to pan.');
+  viewport.setAttribute('aria-label', `${label}. Use arrow keys to pan.`);
   const canvas = document.createElement('div');
-  canvas.append(...diagram.childNodes);
+  canvas.append(...container.childNodes);
   viewport.append(canvas);
-  diagram.append(controls, viewport);
+  container.append(controls, viewport);
 
   let zoom = 100;
   let x = 0;
@@ -20440,6 +20508,7 @@ function _addMermaidControls(diagram) {
     canvas.style.transform = `translate(${x}px, ${y}px) scale(${zoom / 100})`;
     zoomOut.disabled = zoom <= 50;
     zoomIn.disabled = zoom >= 400;
+    if (expand) container.classList.toggle('has-adjusted-view', zoom !== 100 || x !== 0 || y !== 0);
   }
 
   function changeZoom(step) {
@@ -20454,7 +20523,7 @@ function _addMermaidControls(diagram) {
   const zoomIn = addButton('M5 12h14m-7-7v14', 'Zoom in', () => changeZoom(25));
   const panButton = addButton(
     'M12 3v18M3 12h18M9 6l3-3 3 3m-6 12 3 3 3-3M6 9l-3 3 3 3m12-6 3 3-3 3',
-    'Pan diagram',
+    `Pan ${subject}`,
     () => {
       panEnabled = !panEnabled;
       panButton.setAttribute('aria-pressed', String(panEnabled));
@@ -20462,11 +20531,16 @@ function _addMermaidControls(diagram) {
     },
   );
   panButton.setAttribute('aria-pressed', 'false');
-  addButton('M4 11a8 8 0 1 1 2 6m-2-6V5m0 6h6', 'Reset diagram view', () => {
+  addButton('M4 11a8 8 0 1 1 2 6m-2-6V5m0 6h6', `Reset ${subject} view`, () => {
     zoom = 100;
     x = y = 0;
     updateView();
   });
+  if (expand) {
+    container.classList.add('inline-zoom');
+    addButton('M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5', `Expand ${subject}`, expand)
+      .setAttribute('aria-haspopup', 'dialog');
+  }
 
   viewport.addEventListener('pointerdown', event => {
     if (!panEnabled || drag || event.button !== 0) return;
@@ -20515,7 +20589,7 @@ async function _renderMarkdownDiagrams(preview) {
         const diagram = document.createElement('div');
         diagram.className = 'fv-mermaid';
         diagram.innerHTML = svg;
-        _addMermaidControls(diagram);
+        _addZoomControls(diagram, 'Mermaid diagram', 'diagram', () => _expandMermaidDiagram(diagram));
         _replaceMarkdownDiagram(code, diagram);
       } catch (error) {
         // Keep invalid diagrams readable and continue rendering the other blocks.

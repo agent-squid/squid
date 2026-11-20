@@ -14,7 +14,7 @@ function setup(render) {
     document: { createElement: () => ({}) },
   });
   vm.runInContext(renderer, context);
-  context._addMermaidControls = diagram => { diagram.hasControls = true; };
+  context._addZoomControls = diagram => { diagram.hasControls = true; };
   return context;
 }
 
@@ -57,6 +57,7 @@ test('waits for bubble insertion before rendering and skips removed bubbles', ()
   const rendered = [];
   const context = vm.createContext({
     renderAssistantMarkdown: text => `<p>${text}</p>`,
+    _enableResponseImageViewer: () => {},
     requestAnimationFrame: callback => { frame = callback; },
     _renderMarkdownDiagrams: container => rendered.push(container),
   });

@@ -77,6 +77,61 @@ const MSG_ERROR = '.msg-error';
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
+test('response images open a zoomable viewer and return focus on close', async ({ page }) => {
+  await mockBackend(page);
+  const chat = holdChat(page);
+  await page.goto('/');
+  await sendMsg(page, 'Show an image');
+  await chat.intercepted;
+  await chat.fulfill(sse(META, {
+    data: '![Example image](/favicon.png)\n\n[![Linked image](/favicon.png)](/other-page)',
+  }, STATS, DONE));
+
+  const response = page.locator(RESPONSE);
+  const trigger = response.getByRole('button', { name: 'Open image: Example image' });
+  await expect(response.getByRole('link', { name: 'Linked image' })).toHaveAttribute('href', '/other-page');
+  const frame = response.locator('.response-image');
+  const inlineControls = frame.getByRole('group', { name: 'Image controls' });
+  const inlineCanvas = frame.locator('.media-zoom-viewport > div');
+  await page.mouse.move(0, 0);
+  await expect(inlineControls).toHaveCSS('opacity', '0');
+  await frame.hover();
+  await expect(inlineControls).toHaveCSS('opacity', '1');
+  const frameBounds = await frame.boundingBox();
+  const toolbarBounds = await inlineControls.boundingBox();
+  expect(frameBounds.x + frameBounds.width - toolbarBounds.x - toolbarBounds.width).toBeCloseTo(6);
+  expect(frameBounds.y + frameBounds.height - toolbarBounds.y - toolbarBounds.height).toBeCloseTo(6);
+  await inlineControls.getByRole('button', { name: 'Zoom in' }).click();
+  await expect(inlineCanvas).toHaveCSS('transform', 'matrix(1.25, 0, 0, 1.25, 0, 0)');
+  await page.mouse.move(0, 0);
+  await page.locator('#input').focus();
+  await expect(inlineControls).toHaveCSS('opacity', '1');
+  expect((await frame.boundingBox()).height).toBeCloseTo(frameBounds.height);
+  const expand = inlineControls.getByRole('button', { name: 'Expand image' });
+  await expand.click();
+  const viewer = page.getByRole('dialog', { name: 'Image viewer' });
+  const viewport = viewer.locator('.media-zoom-viewport');
+  const canvas = viewport.locator(':scope > div');
+  await expect(viewer.getByRole('img', { name: 'Example image' })).toBeVisible();
+  await viewer.getByRole('button', { name: 'Zoom in' }).click();
+  await expect(canvas).toHaveCSS('transform', 'matrix(1.25, 0, 0, 1.25, 0, 0)');
+  await viewport.press('ArrowRight');
+  await expect(canvas).toHaveCSS('transform', 'matrix(1.25, 0, 0, 1.25, 32, 0)');
+  await viewer.getByRole('button', { name: 'Reset image view' }).click();
+  await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
+  await page.keyboard.press('Control+f');
+  expect(await page.evaluate(() => searchPanelOpen)).toBe(false);
+  await page.keyboard.press('Escape');
+  await expect(viewer).toHaveCount(0);
+  await expect(expand).toBeFocused();
+  await expect(inlineCanvas).toHaveCSS('transform', 'matrix(1.25, 0, 0, 1.25, 0, 0)');
+  await inlineControls.getByRole('button', { name: 'Reset image view' }).click();
+  await trigger.press('Enter');
+  await expect(viewer).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(trigger).toBeFocused();
+});
+
 test('completed Mermaid chat diagrams can be zoomed, panned, and reset', async ({ page }) => {
   await mockBackend(page);
   const chat = holdChat(page);
@@ -88,14 +143,19 @@ test('completed Mermaid chat diagrams can be zoomed, panned, and reset', async (
   }, STATS, DONE));
 
   const diagram = page.locator(RESPONSE).locator('.fv-mermaid');
-  const viewport = diagram.locator('.fv-mermaid-viewport');
+  const viewport = diagram.locator('.media-zoom-viewport');
   const canvas = viewport.locator(':scope > div');
   await expect(viewport.locator('svg')).toBeVisible();
   const chartBounds = await diagram.boundingBox();
   const viewportBounds = await viewport.boundingBox();
-  const controlsBounds = await diagram.getByRole('group', { name: 'Mermaid diagram controls' }).boundingBox();
+  const controls = diagram.getByRole('group', { name: 'Mermaid diagram controls' });
+  await page.mouse.move(0, 0);
+  await expect(controls).toHaveCSS('opacity', '0');
+  await diagram.hover();
+  await expect(controls).toHaveCSS('opacity', '1');
+  const controlsBounds = await controls.boundingBox();
   expect(viewportBounds).toEqual(chartBounds);
-  expect(controlsBounds.width).toBeLessThanOrEqual(130);
+  expect(controlsBounds.width).toBeLessThanOrEqual(162);
   expect(controlsBounds.height).toBeLessThanOrEqual(34);
   expect(chartBounds.x + chartBounds.width - controlsBounds.x - controlsBounds.width).toBeCloseTo(6);
   expect(chartBounds.y + chartBounds.height - controlsBounds.y - controlsBounds.height).toBeCloseTo(6);
@@ -122,6 +182,22 @@ test('completed Mermaid chat diagrams can be zoomed, panned, and reset', async (
   await diagram.getByRole('button', { name: 'Zoom in' }).click();
   await diagram.getByRole('button', { name: 'Reset diagram view' }).click();
   await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
+
+  const expand = diagram.getByRole('button', { name: 'Expand diagram' });
+  await viewport.locator('svg').evaluate(svg => { svg.dataset.expansionTest = 'original'; });
+  await expand.click();
+  const viewer = page.getByRole('dialog', { name: 'Mermaid diagram viewer' });
+  await expect(viewer.locator('svg[data-expansion-test="original"]')).toBeVisible();
+  await expect(viewer).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(viewport.locator('svg')).toHaveCount(0);
+  expect((await viewport.boundingBox()).height).toBeCloseTo(viewportBounds.height);
+  await viewer.getByRole('button', { name: 'Zoom in' }).click();
+  await expect(viewer.locator('.media-zoom-viewport > div')).toHaveCSS('transform', 'matrix(1.25, 0, 0, 1.25, 0, 0)');
+  await page.keyboard.press('Escape');
+  await expect(viewer).toHaveCount(0);
+  await expect(viewport.locator('svg[data-expansion-test="original"]')).toBeVisible();
+  await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
+  await expect(expand).toBeFocused();
 });
 
 test('websocket transport starts and completes a new chat without POST /chat', async ({ page }) => {
