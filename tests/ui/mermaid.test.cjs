@@ -14,6 +14,7 @@ function setup(render) {
     document: { createElement: () => ({}) },
   });
   vm.runInContext(renderer, context);
+  context._addMermaidControls = diagram => { diagram.hasControls = true; };
   return context;
 }
 
@@ -35,6 +36,7 @@ test('renders valid diagrams and preserves invalid source without blocking later
   assert.equal(container.blocks[0].parentElement.title, 'Mermaid: Syntax error');
   assert.equal(container.blocks[0].parentElement.diagram, undefined);
   assert.equal(container.blocks[1].parentElement.diagram.innerHTML, '<svg></svg>');
+  assert.equal(container.blocks[1].parentElement.diagram.hasControls, true);
 });
 
 test('ignores stale blocks when a response is replaced during asynchronous rendering', async () => {

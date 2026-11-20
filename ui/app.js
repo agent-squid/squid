@@ -20403,6 +20403,103 @@ function _replaceMarkdownDiagram(code, diagram) {
   else if (aboveViewport) messages.scrollTop = previousTop + messages.scrollHeight - previousHeight;
 }
 
+function _addMermaidControls(diagram) {
+  const controls = document.createElement('div');
+  controls.className = 'fv-mermaid-controls';
+  controls.setAttribute('role', 'group');
+  controls.setAttribute('aria-label', 'Mermaid diagram controls');
+
+  const viewport = document.createElement('div');
+  viewport.className = 'fv-mermaid-viewport';
+  viewport.tabIndex = 0;
+  viewport.setAttribute('role', 'group');
+  viewport.setAttribute('aria-label', 'Mermaid diagram. Use arrow keys to pan.');
+  const canvas = document.createElement('div');
+  canvas.append(...diagram.childNodes);
+  viewport.append(canvas);
+  diagram.append(controls, viewport);
+
+  let zoom = 100;
+  let x = 0;
+  let y = 0;
+  let panEnabled = false;
+  let drag = null;
+
+  function addButton(path, label, action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.innerHTML = `<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${path}"/></svg>`;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.addEventListener('click', action);
+    controls.append(button);
+    return button;
+  }
+
+  function updateView() {
+    canvas.style.transform = `translate(${x}px, ${y}px) scale(${zoom / 100})`;
+    zoomOut.disabled = zoom <= 50;
+    zoomIn.disabled = zoom >= 400;
+  }
+
+  function changeZoom(step) {
+    const next = Math.min(400, Math.max(50, zoom + step));
+    x *= next / zoom;
+    y *= next / zoom;
+    zoom = next;
+    updateView();
+  }
+
+  const zoomOut = addButton('M5 12h14', 'Zoom out', () => changeZoom(-25));
+  const zoomIn = addButton('M5 12h14m-7-7v14', 'Zoom in', () => changeZoom(25));
+  const panButton = addButton(
+    'M12 3v18M3 12h18M9 6l3-3 3 3m-6 12 3 3 3-3M6 9l-3 3 3 3m12-6 3 3-3 3',
+    'Pan diagram',
+    () => {
+      panEnabled = !panEnabled;
+      panButton.setAttribute('aria-pressed', String(panEnabled));
+      viewport.classList.toggle('is-pannable', panEnabled);
+    },
+  );
+  panButton.setAttribute('aria-pressed', 'false');
+  addButton('M4 11a8 8 0 1 1 2 6m-2-6V5m0 6h6', 'Reset diagram view', () => {
+    zoom = 100;
+    x = y = 0;
+    updateView();
+  });
+
+  viewport.addEventListener('pointerdown', event => {
+    if (!panEnabled || drag || event.button !== 0) return;
+    viewport.setPointerCapture(event.pointerId);
+    drag = { id: event.pointerId, startX: event.clientX - x, startY: event.clientY - y };
+    viewport.classList.add('is-panning');
+  });
+  viewport.addEventListener('pointermove', event => {
+    if (event.pointerId !== drag?.id) return;
+    x = event.clientX - drag.startX;
+    y = event.clientY - drag.startY;
+    updateView();
+  });
+  viewport.addEventListener('lostpointercapture', event => {
+    if (event.pointerId !== drag?.id) return;
+    drag = null;
+    viewport.classList.remove('is-panning');
+  });
+
+  const arrows = new Map([
+    ['ArrowLeft', [-32, 0]], ['ArrowRight', [32, 0]],
+    ['ArrowUp', [0, -32]], ['ArrowDown', [0, 32]],
+  ]);
+  viewport.addEventListener('keydown', event => {
+    const offset = arrows.get(event.key);
+    if (!offset || event.target !== viewport) return;
+    event.preventDefault();
+    x += offset[0];
+    y += offset[1];
+    updateView();
+  });
+}
+
 async function _renderMarkdownDiagrams(preview) {
   const blocks = preview.querySelectorAll('pre > code.language-mermaid');
   if (!blocks.length) return;
@@ -20418,6 +20515,7 @@ async function _renderMarkdownDiagrams(preview) {
         const diagram = document.createElement('div');
         diagram.className = 'fv-mermaid';
         diagram.innerHTML = svg;
+        _addMermaidControls(diagram);
         _replaceMarkdownDiagram(code, diagram);
       } catch (error) {
         // Keep invalid diagrams readable and continue rendering the other blocks.

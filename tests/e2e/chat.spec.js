@@ -14,7 +14,8 @@ const SSE_HEADERS = {
 function sse(...events) {
   return events.map(({ event, data }) => {
     const str = typeof data === 'string' ? data : JSON.stringify(data);
-    return event ? `event: ${event}\ndata: ${str}\n\n` : `data: ${str}\n\n`;
+    const fields = str.split('\n').map(line => `data: ${line}\n`).join('');
+    return `${event ? `event: ${event}\n` : ''}${fields}\n`;
   }).join('');
 }
 
@@ -75,6 +76,53 @@ const RESPONSE  = '.msg.assistant:not(.msg-thinking)';
 const MSG_ERROR = '.msg-error';
 
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+test('completed Mermaid chat diagrams can be zoomed, panned, and reset', async ({ page }) => {
+  await mockBackend(page);
+  const chat = holdChat(page);
+  await page.goto('/');
+  await sendMsg(page, 'Show a flowchart');
+  await chat.intercepted;
+  await chat.fulfill(sse(META, {
+    data: '```mermaid\nflowchart LR\n  A[Start] --> B[Finish]\n```',
+  }, STATS, DONE));
+
+  const diagram = page.locator(RESPONSE).locator('.fv-mermaid');
+  const viewport = diagram.locator('.fv-mermaid-viewport');
+  const canvas = viewport.locator(':scope > div');
+  await expect(viewport.locator('svg')).toBeVisible();
+  const chartBounds = await diagram.boundingBox();
+  const viewportBounds = await viewport.boundingBox();
+  const controlsBounds = await diagram.getByRole('group', { name: 'Mermaid diagram controls' }).boundingBox();
+  expect(viewportBounds).toEqual(chartBounds);
+  expect(controlsBounds.width).toBeLessThanOrEqual(130);
+  expect(controlsBounds.height).toBeLessThanOrEqual(34);
+  expect(chartBounds.x + chartBounds.width - controlsBounds.x - controlsBounds.width).toBeCloseTo(6);
+  expect(chartBounds.y + chartBounds.height - controlsBounds.y - controlsBounds.height).toBeCloseTo(6);
+
+  await diagram.getByRole('button', { name: 'Zoom in' }).click();
+  await expect(canvas).toHaveCSS('transform', 'matrix(1.25, 0, 0, 1.25, 0, 0)');
+  await diagram.getByRole('button', { name: 'Zoom out' }).click();
+  await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
+
+  const pan = diagram.getByRole('button', { name: 'Pan diagram' });
+  await pan.click();
+  await expect(pan).toHaveAttribute('aria-pressed', 'true');
+  const box = await viewport.boundingBox();
+  const x = Math.round(box.x + box.width / 2);
+  const y = Math.round(box.y + box.height / 2);
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 40, y + 20);
+  await page.mouse.up();
+  await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 40, 20)');
+
+  await viewport.press('ArrowLeft');
+  await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 8, 20)');
+  await diagram.getByRole('button', { name: 'Zoom in' }).click();
+  await diagram.getByRole('button', { name: 'Reset diagram view' }).click();
+  await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
+});
 
 test('websocket transport starts and completes a new chat without POST /chat', async ({ page }) => {
   await page.addInitScript(() => {

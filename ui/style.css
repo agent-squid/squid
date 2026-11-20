@@ -3140,14 +3140,52 @@ body {
 }
 .fv-md-preview a { color: var(--accent-light); }
 .fv-mermaid {
+  position: relative;
+  isolation: isolate;
   margin: 0.65em 0;
-  padding: 1rem;
-  overflow-x: auto;
   background: #fff;
   border-radius: 6px;
   color: #333;
 }
 .fv-mermaid svg { display: block; margin: 0 auto; }
+
+.fv-mermaid-controls {
+  position: absolute;
+  z-index: 1;
+  right: 6px;
+  bottom: 6px;
+  display: flex;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 1px 4px #0002;
+}
+.fv-mermaid-controls button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #333;
+  cursor: pointer;
+}
+.fv-mermaid-controls button:focus-visible { outline: 2px solid #555; outline-offset: -2px; }
+.fv-mermaid-controls button:hover:not(:disabled) { background: #eee; }
+.fv-mermaid-controls button[aria-pressed="true"],
+.fv-mermaid-controls button[aria-pressed="true"]:hover {
+  background: #333;
+  color: #fff;
+}
+.fv-mermaid-controls button:disabled { opacity: 0.5; cursor: default; }
+@media (pointer: coarse) {
+  .fv-mermaid-controls button { width: 32px; height: 32px; }
+}
+.fv-mermaid-viewport { overflow: hidden; padding: 1rem; }
+.fv-mermaid-viewport:focus-visible { outline: 2px solid #555; outline-offset: -2px; }
+.fv-mermaid-viewport svg { max-width: 100%; height: auto; }
+.fv-mermaid-viewport.is-pannable { cursor: grab; touch-action: none; user-select: none; }
+.fv-mermaid-viewport.is-panning { cursor: grabbing; }
 
 /* file viewer — CodeMirror edit mode */
 .cm-editor {

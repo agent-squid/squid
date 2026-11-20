@@ -445,7 +445,7 @@ test('md file shows preview button and renders preview inline', async ({ page })
     return route.fulfill({
       status: 200,
       contentType: 'text/markdown',
-      body: '# Hello\n\nWorld',
+      body: '# Hello\n\nWorld\n\n```mermaid\nflowchart LR\n  A[Start] --> B[Finish]\n```',
     });
   });
 
@@ -474,7 +474,22 @@ test('md file shows preview button and renders preview inline', async ({ page })
   expect(previewFontSize).toBeGreaterThanOrEqual(15.5);
   await expect(page.getByRole('button', { name: 'Show Markdown source' })).toBeVisible();
 
+  const diagram = page.locator('#file-modal-body .fv-md-preview .fv-mermaid');
+  const viewport = diagram.locator('.fv-mermaid-viewport');
+  const canvas = viewport.locator(':scope > div');
+  await expect(viewport.locator('svg')).toBeVisible();
+  await diagram.getByRole('button', { name: 'Zoom in' }).click();
+  await expect(canvas).toHaveCSS('transform', 'matrix(1.25, 0, 0, 1.25, 0, 0)');
+  await diagram.getByRole('button', { name: 'Zoom out' }).click();
+  await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
+  await diagram.getByRole('button', { name: 'Pan diagram' }).click();
+  await viewport.press('ArrowRight');
+  await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 32, 0)');
+  await diagram.getByRole('button', { name: 'Reset diagram view' }).click();
+  await expect(canvas).toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)');
+
   await page.getByRole('button', { name: 'Show Markdown source' }).click();
+  await expect(diagram).toHaveCount(0);
   await expect(page.locator('#file-modal-body')).toContainText('# Hello');
 });
 
