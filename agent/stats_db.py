@@ -2535,7 +2535,11 @@ def get_message(msg_id: int) -> Optional[dict]:
                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                       m.session_turn_index AS session_turn_count,
                       re.payload AS stats_payload,
-                      {_marked_bad_expr("m")} AS marked_bad
+                      {_marked_bad_expr("m")} AS marked_bad,
+                      EXISTS (
+                          SELECT 1 FROM message_annotations ma
+                          WHERE ma.msg_id = m.id AND ma.kind = 'bookmark'
+                      ) AS bookmarked
                FROM chat_messages m
                LEFT JOIN chat_messages u ON m.reply_to = u.id
                {_latest_stats_event_join(msg_alias="m", outer=True)}
@@ -2573,28 +2577,15 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                       adhoc: Optional[bool] = None, offset: int = 0, limit: int = 20,
                       flow_route: Optional[str] = None, bookmarked: bool = False,
                       marked_bad: bool = False, topic_subtree: bool = False) -> dict:
-    where = "WHERE m.role = 'assistant'"
-    params: list = []
-    bookmark_join = (
-        "JOIN message_annotations ma_bookmark ON ma_bookmark.msg_id = m.id AND ma_bookmark.kind = 'bookmark'"
-        if bookmarked else ""
+    where, params, bookmark_join, marked_bad_join = _history_filter_sql(
+        topic=topic, agent=agent, adhoc=adhoc, flow_route=flow_route,
+        bookmarked=bookmarked, marked_bad=marked_bad, topic_subtree=topic_subtree,
     )
-    marked_bad_join = (
-        "JOIN message_annotations ma_bad ON ma_bad.msg_id = m.id AND ma_bad.kind = 'bad_response'"
-        if marked_bad else ""
-    )
-    if topic:
-        where += " AND " + _topic_filter_clause(topic, topic_subtree, params)
-    if agent:
-        where += " AND m.agent = ?"
-        params.append(agent)
-    if adhoc is not None:
-        where += " AND COALESCE(m.adhoc, 0) = ?"
-        params.append(1 if adhoc else 0)
-    if flow_route:
-        clause, clause_params = _flow_route_filter_clause(flow_route)
-        where += f" AND {clause}"
-        params.extend(clause_params)
+    # Keep live turns out of the bookmark offset so settling a turn cannot skip saved rows.
+    pending_where = None
+    if bookmarked and not marked_bad:
+        pending_where = where + " AND m.status = 'pending'"
+        where += " AND m.status IS NOT 'pending'"
 
     with _connection() as conn:
         total = conn.execute(
@@ -2624,6 +2615,10 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                 ORDER BY completed_at DESC, m.id DESC LIMIT ? OFFSET ?""",
             params + [limit, offset],
         ).fetchall()
+        pending_items = (
+            _history_rows(conn, pending_where, params, limit=-1)
+            if pending_where and offset == 0 else []
+        )
         raw_items = [dict(r) for r in rows]
         for row in raw_items:
             row["flow_route"] = _infer_origin_flow_route(conn, row)
@@ -2635,6 +2630,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
 
     return {
         "items": items,
+        **({"pending_items": pending_items} if pending_items else {}),
         "total": total,
         "has_more": (offset + limit) < total,
     }

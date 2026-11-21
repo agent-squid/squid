@@ -614,6 +614,103 @@ test('a completed live response not matching the filter is not added to the visi
   await expect(page.locator('.msg.assistant:not(.msg-thinking)').filter({ hasText: 'Filtered out response' })).toHaveCount(0);
 });
 
+test('bookmark history keeps the live prompt and WIP until an unbookmarked turn completes', async ({ page }) => {
+  await mockBackend(page);
+  const timestamp = new Date().toISOString();
+  await page.route('**/history?*', route => route.fulfill({ json: {
+    items: [{
+      id: 1, role: 'assistant', topic: 'default', agent: 'claude',
+      content: 'Saved anchor', status: 'done', prompt: 'Anchor task', timestamp,
+    }],
+    has_more: false,
+  }}));
+  await page.route('**/chat/2/status', route => route.fulfill({ json: { bookmarked: false } }));
+  let chatRoute;
+  await page.route('**/chat', route => { chatRoute = route; });
+
+  await page.goto('/');
+  await page.fill('#input', 'New work');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => !!chatRoute).toBe(true);
+  await page.locator('#chip-bookmark-btn').click();
+
+  const prompt = page.locator('#messages > .msg.user').filter({ hasText: 'New work' });
+  const wip = page.locator('#messages > .msg-thinking');
+  await expect(page.locator('#messages')).toContainText('Saved anchor');
+  await expect(prompt).toBeVisible();
+  await expect(wip).toBeVisible();
+
+  await chatRoute.fulfill({
+    contentType: 'text/event-stream',
+    body: 'event: meta\ndata: {"msg_id":2,"agent":"claude"}\n\ndata:Finished work\n\nevent: done\ndata: \n\n',
+  });
+
+  await expect(wip).toHaveCount(0);
+  await expect(prompt).toHaveCount(0);
+  await expect(page.locator('#messages')).not.toContainText('Finished work');
+  await expect(page.locator('#messages')).toContainText('Saved anchor');
+});
+
+for (const saveStatus of [200, 500]) {
+  test('completion waits for an in-flight bookmark write returning ' + saveStatus, async ({ page }) => {
+    await mockBackend(page);
+    await page.route('**/history?*', route => route.fulfill({ json: { items: [], has_more: false } }));
+    await page.route('**/chat/2/status', route => route.fulfill({ json: { bookmarked: false } }));
+    let saveRoute;
+    await page.route('**/bookmarks', route => {
+      if (route.request().method() === 'POST') saveRoute = route;
+      else return route.fulfill({ json: { items: [] } });
+    });
+    let chatRoute;
+    await page.route('**/chat', route => { chatRoute = route; });
+
+    await page.goto('/');
+    await page.locator('#chip-bookmark-btn').click();
+    await page.fill('#input', 'Keep this turn');
+    await page.keyboard.press('Enter');
+    await expect.poll(() => !!chatRoute).toBe(true);
+    await page.evaluate(() => { void _apiToggleBookmark(2, 'default', 'claude'); });
+    await expect.poll(() => !!saveRoute).toBe(true);
+
+    await chatRoute.fulfill({
+      contentType: 'text/event-stream',
+      body: 'event: meta\ndata: {"msg_id":2,"agent":"claude"}\n\ndata:Saved result\n\nevent: done\ndata: \n\n',
+    });
+
+    await expect(page.locator('#messages > .msg-thinking')).toBeVisible();
+    await saveRoute.fulfill({ status: saveStatus, json: {} });
+    await expect(page.locator('#messages > .msg-thinking')).toHaveCount(0);
+    const result = page.locator('#messages > .assistant.history-item').filter({ hasText: 'Saved result' });
+    await expect(result).toHaveCount(saveStatus === 200 ? 1 : 0);
+    expect(await page.evaluate(() => _bookmarkIds.has(2))).toBe(saveStatus === 200);
+  });
+}
+
+test('older bookmark pages stay ordered around recovered live turns', async ({ page }) => {
+  await mockBackend(page);
+  const item = (id, day, status = 'done') => ({
+    id, role: 'assistant', topic: 'squid', agent: 'claude',
+    content: status === 'done' ? 'Bookmark ' + id : '', status,
+    prompt: 'Prompt ' + id, timestamp: '2026-11-' + day + 'T12:00:00Z',
+  });
+  await page.route('**/history?*', route => {
+    const params = new URL(route.request().url()).searchParams;
+    if (!params.has('bookmarked')) return route.fulfill({ json: { items: [], has_more: false } });
+    const json = params.get('offset') === '0'
+      ? { items: [item(5, 20)], pending_items: [item(2, 17, 'pending')], has_more: true }
+      : { items: [item(4, 19), item(1, 16)], has_more: false };
+    return route.fulfill({ json });
+  });
+  await page.route('**/chat/2/status', route => route.fulfill({ json: { status: 'pending' } }));
+  await page.goto('/');
+  await page.locator('#chip-bookmark-btn').click();
+  await expect(page.locator('#messages > .assistant[data-msg-id="5"]')).toBeVisible();
+  await page.evaluate(() => loadHistory());
+  const rows = page.locator('#messages > .assistant[data-msg-id]');
+  await expect(rows).toHaveCount(4);
+  expect(await rows.evaluateAll(nodes => nodes.map(row => Number(row.dataset.msgId)))).toEqual([1, 2, 4, 5]);
+});
+
 test('a recovered pending item is shown only while it matches the active filter', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));

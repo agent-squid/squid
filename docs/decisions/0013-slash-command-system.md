@@ -55,7 +55,7 @@ compatibility.
 | `/f`, `/filter`      | filter history by topic/agent; `/f reset` clears   | client-only            |
 | `/s`, `/search`      | keyword search history                            | client-only            |
 | `/j`, `/jump`        | jump to a message id or `flow:<id>` and load nearby history | client-only            |
-| `/bookmarks`, `/bm`  | toggle bookmarked-responses-only view              | client-only            |
+| `/bookmarks`, `/bm`  | toggle bookmarks and live turns              | client-only            |
 | `/prompts`           | toggle user-prompts-only view                      | client-only            |
 | `/status`            | show active processes panel                        | client-only            |
 | `/help`              | open help panel                                     | client-only            |

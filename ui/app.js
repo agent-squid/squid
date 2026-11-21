@@ -2314,6 +2314,7 @@ function clearFilter() {
 // with the newer live turn and end up *below* its own re-fetched response.
 function liveGroupElements(thinking) {
   const group = [thinking];
+  if (thinking.classList.contains('history-item')) return group;
   let el = thinking.previousElementSibling;
   let sawUser = false;
   while (el) {
@@ -2368,16 +2369,12 @@ function anchorForLiveEdgePage(items) {
 
 function setLiveGroupHidden(hidden) {
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
-    // Search scope can't be matched client-side (keywords aren't tracked on the live
-    // bubble), so a search in progress forces the whole group hidden. A filter scope can
-    // be matched — only hide groups that don't belong to it. Pending groups
-    // cannot match response-only bookmark/bad filters.
-    const stayHidden = hidden && (searchActive || hasResponseOnlyFilter() || !itemMatchesFilter({
+    const stayHidden = hidden && !shouldShowPendingTurn({
       topic: thinking.dataset.topic || 'default',
       agent: thinking.dataset.agent || null,
       adhoc: ['1', 'true'].includes(thinking.dataset.adhoc),
       flow_route: thinking.dataset.flowRoute || null,
-    }, historyFilter));
+    });
     liveGroupElements(thinking).forEach(node => node.classList.toggle('live-hidden', stayHidden));
   });
 }
@@ -2442,11 +2439,29 @@ function itemMatchesFilter(item, filter) {
   return true;
 }
 
+function shouldShowPendingTurn(item) {
+  return !searchActive && !badOnlyHistory && itemMatchesFilter(item, historyFilter);
+}
+
+async function readTurnStatus(msgId, options) {
+  const id = Number(msgId);
+  const bookmarkWrite = _pendingBookmarkWrites.get(id);
+  const wasBookmarked = _bookmarkIds.has(id);
+  const res = await fetch(`/chat/${id}/status`, options);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const pending = _pendingBookmarkWrites.get(id) || bookmarkWrite;
+  // A confirmed local write can be newer than this status snapshot.
+  const saved = pending ? await pending : undefined;
+  if (saved !== undefined) data.bookmarked = saved;
+  else if (_bookmarkIds.has(id) !== wasBookmarked) data.bookmarked = _bookmarkIds.has(id);
+  return data;
+}
+
 function shouldShowNewResponse(item) {
-  if (searchActive) return false;
-  if (hasResponseOnlyFilter()) return false;
-  if (hasHistoryFilterScope()) return itemMatchesFilter(item, historyFilter);
-  return true;
+  return !searchActive && !badOnlyHistory &&
+    (!bookmarkOnlyHistory || (item.bookmarked ?? _bookmarkIds.has(Number(item.id)))) &&
+    itemMatchesFilter(item, historyFilter);
 }
 
 function removeFilterSegment(kind) {
@@ -2652,6 +2667,11 @@ function insertHistoryAtLiveEdge(items, fragment) {
   });
 }
 
+function historyItemsWithPending({ items, pending_items: pendingItems }) {
+  if (!pendingItems?.length) return items;
+  return [...items, ...pendingItems].sort((a, b) => compareCompletedTurnKeys(completedTurnKey(b), completedTurnKey(a)));
+}
+
 async function loadHistory() {
   // #view-chat is display:none while another tab is active, which collapses every
   // descendant's getBoundingClientRect() to zero — including the sentinel visibility
@@ -2690,11 +2710,23 @@ async function loadHistory() {
   if (historyOffset === 0) connectionLastSync = Date.now();
   const prevHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
-  if (historyOffset === 0) insertHistoryAtLiveEdge(items, fragment);
-  else appendHistoryItems(items, fragment);
-
-  // Older pages belong above all rendered turns, including retained streams.
-  if (historyOffset !== 0) {
+  const bookmarkPage = historyOffset !== 0 && bookmarkOnlyHistory;
+  const position = bookmarkPage ? captureTranscriptPosition() : null;
+  if (historyOffset === 0) {
+    insertHistoryAtLiveEdge(historyItemsWithPending(data), fragment);
+  } else if (bookmarkPage) {
+    const rows = [...messages.querySelectorAll(':scope > .assistant.history-item, :scope > .msg-thinking:not(.msg-thinking-done)')];
+    appendHistoryItems(items, fragment, (item, group) => {
+      const key = completedTurnKey(item);
+      const next = rows.find(row => compareCompletedTurnKeys([
+        row.dataset.orderAt || row.dataset.ts || '',
+        Number(row.dataset.msgId) || 0,
+      ], key) > 0);
+      const anchor = next?.classList.contains('msg-thinking') ? liveGroupElements(next)[0] : next;
+      messages.insertBefore(group, anchor || null);
+    });
+  } else {
+    appendHistoryItems(items, fragment);
     messages.insertBefore(fragment, topSentinel ? topSentinel.nextSibling : messages.firstChild);
   }
   restoreBootBannerPositions();
@@ -2707,7 +2739,8 @@ async function loadHistory() {
   refreshAllRevertButtons();
   evaluateAdvisory();
   refreshDateDividers();
-  messages.scrollTop += messages.scrollHeight - prevHeight;
+  if (position) restoreTranscriptPosition(position);
+  else messages.scrollTop += messages.scrollHeight - prevHeight;
 
   if (historyExhausted && topSentinel) {
     topSentinel.remove();
@@ -2851,7 +2884,7 @@ async function resetHistoryToLatest({ data = null, followLatest = true } = {}) {
 
   const items = data.items || [];
   const fragment = document.createDocumentFragment();
-  insertHistoryAtLiveEdge(items, fragment);
+  insertHistoryAtLiveEdge(historyItemsWithPending(data), fragment);
   restoreBootBannerPositions();
   historyOffset = items.length;
   historyExhausted = !data.has_more;
@@ -2968,10 +3001,10 @@ async function jumpToStatusMessage(msgId) {
   };
   const bubble = messages.querySelector(`.msg-thinking:not(.msg-thinking-done)[data-msg-id="${msgId}"]`);
   if (bubble) {
-    if (searchActive || hasResponseOnlyFilter() || promptOnlyHistory || !itemMatchesFilter({
+    if (promptOnlyHistory || !shouldShowPendingTurn({
       topic: bubble.dataset.topic || 'default', agent: bubble.dataset.agent || null,
       adhoc: ['1', 'true'].includes(bubble.dataset.adhoc), flow_route: bubble.dataset.flowRoute || null,
-    }, historyFilter)) clearForJump();
+    })) clearForJump();
     if (currentView !== 'chat') navigateView('chat');
   } else {
     await jumpToMessage(msgId, null, clearForJump);
@@ -5632,11 +5665,7 @@ async function sendMessage(text, opts = {}) {
     setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, suppressTurnCount: suppressChipTurnCount });
   }
   const sendTime = new Date().toISOString();
-  // A search scope can't be evaluated against a message that isn't in the DB yet, so keep
-  // the live group hidden while searching. A filter scope, on the other hand, can be checked
-  // client-side against this message's own topic/agent/adhoc — show it if it matches.
-  const liveHiddenByScope = searchActive ||
-    (hasHistoryFilterScope() && !itemMatchesFilter({ topic, agent, adhoc, flow_route: flowRoute }, historyFilter));
+  const liveHiddenByScope = !shouldShowPendingTurn({ topic, agent, adhoc, flow_route: flowRoute });
 
   let thinkingFrozen = false;
   let chainMarker = null;
@@ -5661,10 +5690,11 @@ async function sendMessage(text, opts = {}) {
   // immediately before the user bubble so filtering and later completion do
   // not detach the marker from the prompt it describes. Suppressed broadcast
   // heads have no user bubble; their marker stays with the response instead.
+  let userTimeEl;
   if (chainMarker && userBubble) messages.appendChild(chainMarker);
   if (userBubble) {
     messages.appendChild(userBubble);
-    const userTimeEl = addTimestamp(userBubble, sendTime, true);
+    userTimeEl = addTimestamp(userBubble, sendTime, true);
     if (liveHiddenByScope) {
       userBubble.classList.add('live-hidden');
       userTimeEl?.classList.add('live-hidden');
@@ -5681,6 +5711,7 @@ async function sendMessage(text, opts = {}) {
   // first content chunk reveals a separate response bubble below.
   const thinkingBubble = document.createElement('div');
   thinkingBubble.className = 'msg assistant msg-thinking';
+  thinkingBubble.dataset.orderAt = sendTime;
   thinkingBubble.dataset.topic = topic;
   if (flowRoute) thinkingBubble.dataset.flowRoute = flowRoute;
   if (agent) thinkingBubble.dataset.agent = agent;
@@ -5726,6 +5757,7 @@ async function sendMessage(text, opts = {}) {
   // without a clean completion is treated as a failed turn for quota purposes;
   // flipped to 'done'/'cancelled' on the completion/kill signals below.
   let turnStatus = 'error';
+  let liveBookmarkState;
 
   // Kill button — shown once msg_id is known, hidden when done
   const killBtn = document.createElement('button');
@@ -5883,11 +5915,19 @@ async function sendMessage(text, opts = {}) {
     }
   }
 
+  function removeUnbookmarkedLiveGroup() {
+    if (!bookmarkOnlyHistory || (liveBookmarkState ?? _bookmarkIds.has(msgId))) return false;
+    const position = captureTranscriptPosition(thinkingBubble);
+    for (const row of [chainMarker, userBubble, userTimeEl, thinkingBubble]) row?.remove();
+    restoreTranscriptPosition(position);
+    return true;
+  }
+
   function removeThinking() {
     thinkingFrozen = true;
     clearShellRunningStatus();
     killBtn.style.display = 'none';
-    thinkingBubble.remove();
+    if (!removeUnbookmarkedLiveGroup()) thinkingBubble.remove();
   }
 
   // A human submission explicitly requests the latest turn. Automated sends
@@ -6132,7 +6172,7 @@ async function sendMessage(text, opts = {}) {
     const errDisplay = normalizedErrorDisplay(authReq ? authReq.message : errText);
     // Don't wipe streamed content with a generic fallback message
     if (!errDisplay && raw) return;
-    if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return;
+    if (!shouldShowLiveResponse()) return;
     placeResponseBubble();
     contentDiv.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message, authReq.provider) : '')
       + `<span class="msg-error">${escapeHtml(errDisplay) || 'Response interrupted.'}</span>`;
@@ -6162,7 +6202,7 @@ async function sendMessage(text, opts = {}) {
   }
 
   function showStoredResponse(content, { reveal = true } = {}) {
-    if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return false;
+    if (!shouldShowLiveResponse()) return false;
     const wasAtBottom = isAtBottom();
     placeResponseBubble();
     raw = content || '';
@@ -6178,7 +6218,9 @@ async function sendMessage(text, opts = {}) {
   }
 
   function shouldShowLiveResponse() {
-    return shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute });
+    return shouldShowNewResponse({
+      id: msgId, bookmarked: liveBookmarkState, topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute,
+    });
   }
 
   function addCompletionTimestamp() {
@@ -6207,6 +6249,7 @@ async function sendMessage(text, opts = {}) {
   function renderCancelledThinking(label) {
     thinkingFrozen = true;
     clearShellRunningStatus();
+    if (removeUnbookmarkedLiveGroup()) return;
     killBtn.style.display = 'none';
     if (thinkingLoader.parentNode) thinkingLoader.remove();
     thinkingContent.className = '';
@@ -6361,13 +6404,13 @@ async function sendMessage(text, opts = {}) {
     const doPoll = async () => {
       count++;
       try {
-        const statusRes = await fetch(`/chat/${id}/status`);
-        if (!statusRes.ok) {
+        const data = await readTurnStatus(id);
+        if (!data) {
           if (count >= MAX_POLLS) timeoutFallback();
           return;
         }
-        const data = await statusRes.json();
         if (data.status === 'done') {
+          liveBookmarkState = data.bookmarked;
           if (completionRendered || completedFromStatus) return;
           if (adoptCompletedBubbleRenderedElsewhere()) return;
           completedFromStatus = true;
@@ -6436,10 +6479,16 @@ async function sendMessage(text, opts = {}) {
           controller.abort();
           finalizeQuotaTracking();
         } else if (data.status === 'error') {
-          if (!String(data.content || '').trim()) return;
+          if (!String(data.content || '').trim() && !bookmarkOnlyHistory) return;
           completedFromStatus = true;
           turnStatus = 'error';
           stopStatusFallback();
+          liveBookmarkState = data.bookmarked;
+          if (removeUnbookmarkedLiveGroup()) {
+            controller.abort();
+            finalizeQuotaTracking();
+            return;
+          }
           if (raw || firstDataReceived) {
             parkInterruptedPartial(data.content || raw);
           } else {
@@ -6452,6 +6501,7 @@ async function sendMessage(text, opts = {}) {
           completedFromStatus = true;
           turnStatus = 'cancelled';
           stopStatusFallback();
+          liveBookmarkState = data.bookmarked;
           renderCancelledThinking(cancelledTurnLabel(data.content));
           if (data.session_turn_count != null) {
             liveSessionTurnCount = parseInt(data.session_turn_count, 10) || liveSessionTurnCount;
@@ -6862,6 +6912,12 @@ async function sendMessage(text, opts = {}) {
             completionRendered = true;
             turnStatus = 'done';
             stopStatusFallback();
+            if (bookmarkOnlyHistory && msgId) {
+              try {
+                const status = await readTurnStatus(msgId, { signal: AbortSignal.timeout(2000) });
+                liveBookmarkState = status?.bookmarked;
+              } catch {}
+            }
             liveCtxSpan.dataset.hasTrace = (statusBuf.trim() || liveToolEvents.length) ? 'true' : 'false';
             const position = captureTranscriptPosition(thinkingBubble);
             const wasAtBottom = position.atBottom;
@@ -6879,7 +6935,7 @@ async function sendMessage(text, opts = {}) {
               }
               bubble.classList.add('history-item');
               bubble._historyContent = raw;
-              if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
+              if (shouldShowLiveResponse()) {
                 placeResponseBubble();
                 // statsEl was created back at the 'stats' event, while bubble was
                 // still detached (bubble only joins `messages` here, at 'done') —
@@ -7015,11 +7071,12 @@ async function sendMessage(text, opts = {}) {
       if (pinPanel.classList.contains('open')) renderPinPanel();
     }
     if (!detachedPolling && !userAborted && !firstDataReceived && !completedFromStatus) {
-      if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
+      if (shouldShowLiveResponse()) {
         placeResponseBubble();
         contentDiv.innerHTML = '<span class="msg-error">No response — backend may be rate-limited or unavailable.</span>';
       }
     }
+    if (!detachedPolling && turnStatus !== 'done') removeUnbookmarkedLiveGroup();
     addCompletionTimestamp();
     // A failed or rejected turn can still move the account quota meter, and the
     // before/after snapshot is already in hand — finalize (and record) it here so
@@ -8822,14 +8879,14 @@ function insertPendingHistoryItem(item) {
 // here once the turn has signalled completion and stop watching it after.
 async function replacePendingWithStoredItem(item, wipBubble, onStored = null, onSettled = null) {
   try {
-    const res = await fetch(`/chat/${item.id}/status`);
-    if (!res.ok || !wipBubble.parentNode) return;
-    const data = await res.json();
+    const data = await readTurnStatus(item.id);
+    if (!data || !wipBubble.parentNode) return;
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
-    if (data.status === 'error' && !String(data.content || '').trim()) return;
+    if (data.status === 'error' && !String(data.content || '').trim() && !bookmarkOnlyHistory) return;
     onStored?.(data);
     const position = captureTranscriptPosition(wipBubble);
-    wipBubble.remove();
+    const rows = bookmarkOnlyHistory ? liveGroupElements(wipBubble) : [wipBubble];
+    rows.forEach(row => row.remove());
     if (!shouldShowNewResponse(data)) {
       restoreTranscriptPosition(position);
       return;
@@ -9463,15 +9520,13 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
       if (delay) await new Promise(resolve => setTimeout(resolve, delay));
       if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
       try {
-        const res = await fetch(`/chat/${msgId}/status`);
-        if (res.ok) {
-          item = await res.json();
-          break;
-        }
+        item = await readTurnStatus(msgId);
+        if (item) break;
       } catch {}
     }
     if (!item) return;
-    if (messages.querySelector(`[data-msg-id="${msgId}"]`) || !shouldShowNewResponse(item)) return;
+    if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
+    if (!(item.status === 'pending' ? shouldShowPendingTurn(item) : shouldShowNewResponse(item))) return;
     if (item.status === 'pending' && !promptOnlyHistory) {
       const bubble = insertPendingHistoryItem(item);
       reconnectPendingItem(item, bubble);
@@ -9488,11 +9543,10 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
 async function attachFlowStep(msgId) {
   if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
   try {
-    const res = await fetch(`/chat/${msgId}/status`);
-    if (!res.ok) return;
-    const data = await res.json();
+    const data = await readTurnStatus(msgId);
+    if (!data) return;
     if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
-    if (!shouldShowNewResponse(data)) return;
+    if (!(data.status === 'pending' ? shouldShowPendingTurn(data) : shouldShowNewResponse(data))) return;
     if (data.status === 'pending') {
       const wipBubble = insertPendingHistoryItem(data);
       reconnectPendingItem(data, wipBubble);
@@ -18234,6 +18288,7 @@ function closePinPanel({ restoreFocus = false } = {}) {
 
 let _bookmarkItems = [];
 let _bookmarkIds = new Set();
+const _pendingBookmarkWrites = new Map();
 let _badResponseIds = new Set();
 
 function getBookmarkedItems() { return _bookmarkItems; }
@@ -18262,17 +18317,35 @@ async function _loadBookmarks() {
 }
 
 async function _apiToggleBookmark(msgId, topic, agent) {
-  if (_bookmarkIds.has(msgId)) {
-    _bookmarkIds.delete(msgId);
-    _bookmarkItems = _bookmarkItems.filter(i => i.id !== msgId);
-    fetch(`/bookmarks/${msgId}`, { method: 'DELETE' }).catch(() => {});
-    return false;
-  } else {
-    _bookmarkIds.add(msgId);
-    _bookmarkItems = [{ id: msgId, topic, agent: agent || null, saved_at: new Date().toISOString() }, ..._bookmarkItems];
-    fetch('/bookmarks', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ msg_id: msgId }) }).catch(() => {});
-    return true;
+  const existing = _pendingBookmarkWrites.get(msgId);
+  if (existing) return (await existing) ?? _bookmarkIds.has(msgId);
+
+  const bookmarked = !_bookmarkIds.has(msgId);
+  const signal = AbortSignal.timeout(8000);
+  const request = (async () => {
+    try {
+      const response = bookmarked
+        ? await fetch('/bookmarks', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ msg_id: msgId }) })
+        : await fetch(`/bookmarks/${msgId}`, { method: 'DELETE', signal });
+      if (!response.ok) return;
+      if (bookmarked) {
+        _bookmarkIds.add(msgId);
+        _bookmarkItems = [{ id: msgId, topic, agent: agent || null, saved_at: new Date().toISOString() }, ..._bookmarkItems];
+      } else {
+        _bookmarkIds.delete(msgId);
+        _bookmarkItems = _bookmarkItems.filter(item => item.id !== msgId);
+      }
+      return bookmarked;
+    } catch {
+      // Keep the last confirmed state if the write fails.
+    }
+  })();
+  _pendingBookmarkWrites.set(msgId, request);
+  try {
+    return (await request) ?? _bookmarkIds.has(msgId);
+  } finally {
+    _pendingBookmarkWrites.delete(msgId);
   }
 }
 
@@ -18291,7 +18364,7 @@ function updateBookmarkButton() {
   bookmarkBtn.classList.toggle('active', bookmarkOnlyHistory);
   updateHistoryToggleButtons();
   bookmarkBtn.setAttribute('aria-pressed', bookmarkOnlyHistory ? 'true' : 'false');
-  bookmarkBtn.title = bookmarkOnlyHistory ? 'show full thread: /bm' : 'bookmarks only: /bm';
+  bookmarkBtn.title = bookmarkOnlyHistory ? 'show full thread: /bm' : 'bookmarks and live turns: /bm';
 }
 
 function toggleBookmarkOnlyHistory() {
@@ -21170,13 +21243,14 @@ async function syncConnectionHistory(forceLatest = false, showRefreshBanner = fa
     }
     if (generation !== historyGeneration) return;
     if (historyLoading) return;
+    const latestRows = historyItemsWithPending(latest);
     const pageMembership = JSON.stringify([
-      params.toString(), promptOnlyHistory, latest.items.map(item => Number(item.id)),
+      params.toString(), promptOnlyHistory, latestRows.map(item => Number(item.id)),
     ]);
     const latestIds = new Set(latest.items.map(item => Number(item.id)));
     const removed = [...messages.querySelectorAll(':scope > .assistant.history-item[data-msg-id]:not(.msg-thinking)')]
       .some(row => row._historySnapshot !== undefined && !latestIds.has(Number(row.dataset.msgId)));
-    const changed = removed || (connectionHistoryPage !== null && connectionHistoryPage !== pageMembership) || latest.items.some(item => {
+    const changed = removed || (connectionHistoryPage !== null && connectionHistoryPage !== pageMembership) || latestRows.some(item => {
       // A turn's prompt and response share an ID. Compare the rendered snapshot,
       // rather than the first matching node (usually the prompt).
       const existing = Array.from(messages.querySelectorAll(`[data-msg-id="${Number(item.id)}"]`))

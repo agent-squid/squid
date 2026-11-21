@@ -161,6 +161,19 @@ While search is open, its route field replaces the visible filter row. Changing
 search scope leaves the history filter independent; closing search restores
 that filter. Choose Search all to widen search, or close the search bar to exit.
 
+#### Bookmark history includes live turns
+
+Bookmark history keeps saved responses available as reference points while
+work is underway. In the active history scope, show bookmarked completed
+responses alongside live turns, with each live prompt and WIP bubble kept
+together. When history restores a pending turn, its WIP header contains the
+prompt. Preserve the transcript’s ordering and scroll behavior so a reader
+can stay on an older bookmark while a turn runs.
+
+At completion, apply the bookmark filter to the finished response. Keep the
+turn visible if its response is bookmarked. Explicit bookmark-scoped keyword
+search continues to return matching bookmarked responses.
+
 ### 5. Search results use the standard history card
 
 Search results are rendered with `appendHistoryItem` — the same function used

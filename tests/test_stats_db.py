@@ -2460,6 +2460,32 @@ def test_history_can_filter_bookmarks_before_limit(tmp_path, monkeypatch):
     assert [item["id"] for item in history["items"]] == [bookmarked_id]
 
 
+def test_bookmark_history_returns_scoped_pending_turns_outside_pagination(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    anchor_id = stats_db.insert_assistant_message("squid", "codex", None)
+    stats_db.update_assistant_message(anchor_id, "saved answer", "session-1", "done")
+    stats_db.add_bookmark(anchor_id)
+
+    prompt_id = stats_db.insert_user_message("squid", "codex", "live prompt")
+    pending_id = stats_db.insert_assistant_message("squid", "codex", prompt_id)
+    stats_db.insert_assistant_message("other", "codex", None)
+
+    history = stats_db.get_messages_flat(topic="squid", bookmarked=True, limit=1)
+    assert history["total"] == 1
+    assert not history["has_more"]
+    assert [item["id"] for item in history["items"]] == [anchor_id]
+    assert [(item["id"], item["prompt"]) for item in history["pending_items"]] == [
+        (pending_id, "live prompt"),
+    ]
+    assert "pending_items" not in stats_db.get_messages_flat(topic="squid", bookmarked=True, offset=1)
+    assert "pending_items" not in stats_db.get_messages_flat(topic="squid", bookmarked=True, marked_bad=True)
+
+    stats_db.update_assistant_message(pending_id, "finished answer", "session-1", "done")
+    assert "pending_items" not in stats_db.get_messages_flat(topic="squid", bookmarked=True)
+
+
 def test_history_can_filter_marked_bad_before_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

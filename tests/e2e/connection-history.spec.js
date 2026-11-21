@@ -33,6 +33,28 @@ test('failed history sync preserves messages and recovery displays latest withou
   await page.evaluate(() => { void syncConnectionHistory(); });
   await expect(page.locator('.assistant[data-msg-id="2"]')).toHaveCount(1);
 });
+test('bookmark history recovery discovers live turns when saved responses are unchanged', async ({ page }) => {
+  await setup(page);
+  let pendingItems = [];
+  await page.route('**/history?**', route => route.fulfill({ json: {
+    items: [item(1)], pending_items: pendingItems, has_more: false,
+  }}));
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Squid reachable');
+  await page.locator('#chip-bookmark-btn').click();
+  await expect(page.locator('.assistant[data-msg-id="1"]')).toBeVisible();
+  await page.evaluate(async () => {
+    messages.scrollTop = messages.scrollHeight;
+    await syncConnectionHistory();
+  });
+
+  pendingItems = [{ ...item(2), status: 'pending', content: '', prompt: 'Started while disconnected' }];
+  await page.evaluate(() => syncConnectionHistory());
+
+  await expect(page.locator('.assistant[data-msg-id="1"]')).toHaveCount(1);
+  await expect(page.locator('.msg-thinking[data-msg-id="2"]')).toContainText('Started while disconnected');
+});
+
 test('older history stays until reader chooses latest', async ({ page }) => {
   await setup(page);
   let latest = 1;
