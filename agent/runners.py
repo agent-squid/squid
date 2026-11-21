@@ -7,6 +7,7 @@ as the last item when usage data is available (claude only).
 
 import asyncio
 import base64
+from contextlib import aclosing
 import json
 import logging
 import os
@@ -79,14 +80,17 @@ def _update_proc(pid: int, **updates) -> None:
 def _signal_process_group(pid: int, sig: signal.Signals) -> bool:
     """Signal the CLI process group; fall back to the parent PID if needed."""
     try:
-        os.killpg(os.getpgid(pid), sig)
+        group = os.getpgid(pid)
+        if group != os.getpgrp():
+            os.killpg(group, sig)
+            return True
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        os.kill(pid, sig)
         return True
     except (ProcessLookupError, PermissionError):
-        try:
-            os.kill(pid, sig)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
+        return False
 
 
 def kill_procs_by_topic(topic: str, agent: Optional[str] = None,
@@ -844,6 +848,9 @@ async def _stream_lines(
     prompt: str = "",
     prompt_preview: Optional[str] = None,
     extra_env: Optional[dict] = None,
+    codex_home: Optional[Path] = None,
+    codex_account: Optional[str] = None,
+    subscription_revision: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
     """Run cmd and yield stdout line by line.
 
@@ -851,7 +858,30 @@ async def _stream_lines(
     and blocking the subprocess before it can write to stdout.
     """
     env = _child_env(extra_env)
-    if agent:
+    guard = None
+    if codex_home is not None:
+        from . import codex_subscription
+        _apply_env_overrides(env, codex_subscription.environment(codex_home, backend))
+        guard = codex_subscription.lock(codex_home, login=False)
+        try:
+            if backend == "claudecode":
+                from .watch_async import call as settled_thread_call
+                current_account = await settled_thread_call(codex_subscription.account_identity, codex_home, backend)
+            else:
+                current_account = codex_subscription.account_identity(codex_home)
+            if (
+                subscription_revision is not None
+                and subscription_revision != codex_subscription.agent_revision(agent)
+            ):
+                raise CLIError("Subscription provider changed before launch. Resubmit the turn.")
+            if not current_account:
+                raise CLIAuthRequired(backend, "Sign in to this subscription provider.")
+            if current_account != codex_account:
+                raise CLIError("Subscription account changed before launch. Resubmit the turn.")
+        except BaseException:
+            guard.close()
+            raise
+    elif agent:
         _apply_env_overrides(env, sandbox_home.home_override_env(agent, backend))
     if topic:
         env["SQUID_TOPIC"] = topic
@@ -860,16 +890,21 @@ async def _stream_lines(
     if msg_id is not None:
         env["SQUID_MSG_ID"] = str(msg_id)
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-        cwd=cwd,
-        preexec_fn=os.setpgrp,  # new process group (killpg works) without new session (keychain stays accessible)
-        limit=8 * 1024 * 1024,  # 8 MB — default 64 KB overflows on long Claude responses
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=cwd,
+            preexec_fn=os.setpgrp,  # new process group (killpg works) without new session (keychain stays accessible)
+            limit=8 * 1024 * 1024,  # 8 MB — default 64 KB overflows on long Claude responses
+        )
+    except BaseException:
+        if guard is not None:
+            guard.close()
+        raise
 
     assert proc.stdout is not None
     assert proc.stderr is not None
@@ -891,6 +926,7 @@ async def _stream_lines(
     timeout = response_timeout if response_timeout is not None else RESPONSE_TIMEOUT
     deadline = asyncio.get_event_loop().time() + timeout
     first_byte = True
+    stdout_exhausted = False
 
     try:
         while True:
@@ -911,23 +947,33 @@ async def _stream_lines(
                 proc.kill()
                 raise CLIError("Timed out waiting for CLI response")
             if not line:
+                stdout_exhausted = True
                 break
             first_byte = False
             yield line.decode(errors="replace").rstrip("\n")
     finally:
-        _deregister_proc(pid)
         try:
-            await asyncio.wait_for(proc.wait(), timeout=30)
-        except asyncio.TimeoutError:
-            if not _signal_process_group(pid, signal.SIGKILL):
-                proc.kill()
-            await proc.wait()
-        # Wait for stderr drain to complete now that the process has exited;
-        # cancel only if it somehow stalls.
-        try:
-            await asyncio.wait_for(drain_task, timeout=3)
-        except Exception:
-            drain_task.cancel()
+            # The Codex and Claude parsers close the stream on errors and
+            # cancellation. Stop the CLI before releasing its credential lock.
+            if backend in {"codex", "claudecode"} and not stdout_exhausted:
+                if proc.returncode is None and not _signal_process_group(pid, signal.SIGKILL):
+                    proc.kill()
+            _deregister_proc(pid)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                if not _signal_process_group(pid, signal.SIGKILL):
+                    proc.kill()
+                await proc.wait()
+            # Wait for stderr drain to complete now that the process has exited;
+            # cancel only if it somehow stalls.
+            try:
+                await asyncio.wait_for(drain_task, timeout=3)
+            except Exception:
+                drain_task.cancel()
+        finally:
+            if guard is not None:
+                guard.close()
 
     if proc.returncode != 0:
         err = b"".join(stderr_buf).decode(errors="replace").strip()
@@ -1097,6 +1143,9 @@ async def run_claude(
     backend_id: str = "claudecode", backend_env: Optional[dict] = None,
     backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
     prompt_preview: Optional[str] = None,
+    codex_home: Optional[Path] = None,
+    codex_account: Optional[str] = None,
+    subscription_revision: Optional[int] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from claude CLI, then yield a stats dict."""
     if not CLAUDE_PATH:
@@ -1111,6 +1160,11 @@ async def run_claude(
         "--verbose",
         "--dangerously-skip-permissions",
     ]
+    if codex_home is not None:
+        from . import codex_subscription
+        if resume_session_id and not codex_subscription.account_verified(codex_account):
+            raise CLIError("Cannot resume without a verified Claude credential")
+        cmd += codex_subscription.config_args(codex_home, "claudecode")
     cmd += list(backend_args)
     if model:
         cmd += ["--model", model]
@@ -1125,15 +1179,21 @@ async def run_claude(
     env_for_claude = _claude_child_env(backend_id, backend_env)
 
     attach_session = _session_attacher(msg_id)
-    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=env_for_claude):
-        chunks = parser.feed_line(line)
-        # Attach before yielding this line's chunks, not after: if the
-        # consumer cancels/closes this generator while suspended at one of
-        # those yields, GeneratorExit skips everything past it, and this is
-        # the only line where parser.session_id first became available.
-        attach_session(parser.session_id)
-        for chunk in chunks:
-            yield chunk
+    async with aclosing(_stream_lines(
+        cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc,
+        msg_id=msg_id, response_timeout=response_timeout, prompt=prompt,
+        prompt_preview=prompt_preview, extra_env=env_for_claude, codex_home=codex_home,
+        codex_account=codex_account, subscription_revision=subscription_revision,
+    )) as lines:
+        async for line in lines:
+            chunks = parser.feed_line(line)
+            # Attach before yielding this line's chunks, not after: if the
+            # consumer cancels/closes this generator while suspended at one of
+            # those yields, GeneratorExit skips everything past it, and this is
+            # the only line where parser.session_id first became available.
+            attach_session(parser.session_id)
+            for chunk in chunks:
+                yield chunk
 
 
 # After ask_followup_question tool use is detected, wait this long for a result
@@ -1585,6 +1645,9 @@ async def run_codex(
     backend_id: str = "codex", backend_env: Optional[dict] = None,
     backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
     prompt_preview: Optional[str] = None,
+    codex_home: Optional[Path] = None,
+    codex_account: Optional[str] = None,
+    subscription_revision: Optional[int] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream a response from codex CLI using non-interactive exec mode."""
     if not CODEX_PATH:
@@ -1593,6 +1656,9 @@ async def run_codex(
         )
 
     config_args = _codex_config_args(backend_settings or {})
+    if codex_home is not None:
+        from . import codex_subscription
+        config_args += codex_subscription.config_args(codex_home)
     if resume_session_id:
         cmd = [CODEX_PATH, "exec", "resume", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
         cmd += config_args + list(backend_args)
@@ -1621,126 +1687,132 @@ async def run_codex(
         pending_unphased_message = None
         return chunk
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=backend_env):
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        t = event.get("type", "")
-        method = event.get("method", "")
-        params = event.get("params") if isinstance(event.get("params"), dict) else {}
-        if t == "thread.started":
-            thread_id = event.get("thread_id")
-            _attach_session(msg_id, thread_id)
-        elif t == "session_meta":
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            thread_id = payload.get("id") or thread_id
-            _attach_session(msg_id, thread_id)
-        elif t in ("event_msg", "response_item"):
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            if payload.get("type") in ("image_generation_call", "image_generation_end"):
-                image_id = str(payload.get("id") or payload.get("call_id") or "")
-                if image_id and image_id not in emitted_image_ids:
+    async with aclosing(_stream_lines(
+        cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc,
+        msg_id=msg_id, response_timeout=response_timeout, prompt=prompt,
+        prompt_preview=prompt_preview, extra_env=backend_env, codex_home=codex_home,
+        codex_account=codex_account, subscription_revision=subscription_revision,
+    )) as lines:
+        async for line in lines:
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = event.get("type", "")
+            method = event.get("method", "")
+            params = event.get("params") if isinstance(event.get("params"), dict) else {}
+            if t == "thread.started":
+                thread_id = event.get("thread_id")
+                _attach_session(msg_id, thread_id)
+            elif t == "session_meta":
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                thread_id = payload.get("id") or thread_id
+                _attach_session(msg_id, thread_id)
+            elif t in ("event_msg", "response_item"):
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                if payload.get("type") in ("image_generation_call", "image_generation_end"):
+                    image_id = str(payload.get("id") or payload.get("call_id") or "")
+                    if image_id and image_id not in emitted_image_ids:
+                        pending = flush_pending_unphased_as_status()
+                        if pending:
+                            yield pending
+                        image_count += 1
+                        markdown = _codex_image_markdown(payload, thread_id=thread_id, index=image_count)
+                        if markdown:
+                            emitted_image_ids.add(image_id)
+                            yield markdown
+                    continue
+                text, phase = _codex_agent_message(payload)
+                if text:
+                    key = (phase or "", text)
+                    if key != last_agent_message:
+                        last_agent_message = key
+                        if phase:
+                            pending = flush_pending_unphased_as_status()
+                            if pending:
+                                yield pending
+                            yield _codex_message_chunk(text, phase)
+                        else:
+                            pending = flush_pending_unphased_as_status()
+                            if pending:
+                                yield pending
+                            pending_unphased_message = text
+            elif t == "item.completed" or method == "item/completed":
+                item = event.get("item") or params.get("item") or {}
+                if not isinstance(item, dict):
+                    item = {}
+                if item.get("type") == "agent_message":
+                    text, phase = _codex_agent_message(item)
+                    if text:
+                        last_agent_message = (phase or "", text)
+                        if phase:
+                            pending = flush_pending_unphased_as_status()
+                            if pending:
+                                yield pending
+                            yield _codex_message_chunk(text, phase)
+                        else:
+                            pending = flush_pending_unphased_as_status()
+                            if pending:
+                                yield pending
+                            pending_unphased_message = text
+                elif item.get("type") == "command_execution":
                     pending = flush_pending_unphased_as_status()
                     if pending:
                         yield pending
-                    image_count += 1
-                    markdown = _codex_image_markdown(payload, thread_id=thread_id, index=image_count)
-                    if markdown:
-                        emitted_image_ids.add(image_id)
-                        yield markdown
-                continue
-            text, phase = _codex_agent_message(payload)
-            if text:
-                key = (phase or "", text)
-                if key != last_agent_message:
-                    last_agent_message = key
-                    if phase:
-                        pending = flush_pending_unphased_as_status()
-                        if pending:
-                            yield pending
-                        yield _codex_message_chunk(text, phase)
-                    else:
-                        pending = flush_pending_unphased_as_status()
-                        if pending:
-                            yield pending
-                        pending_unphased_message = text
-        elif t == "item.completed" or method == "item/completed":
-            item = event.get("item") or params.get("item") or {}
-            if not isinstance(item, dict):
-                item = {}
-            if item.get("type") == "agent_message":
-                text, phase = _codex_agent_message(item)
-                if text:
-                    last_agent_message = (phase or "", text)
-                    if phase:
-                        pending = flush_pending_unphased_as_status()
-                        if pending:
-                            yield pending
-                        yield _codex_message_chunk(text, phase)
-                    else:
-                        pending = flush_pending_unphased_as_status()
-                        if pending:
-                            yield pending
-                        pending_unphased_message = text
-            elif item.get("type") == "command_execution":
-                pending = flush_pending_unphased_as_status()
-                if pending:
-                    yield pending
-                cmd_str = item.get("command", "")
-                # Strip /bin/zsh -lc "..." or /bin/bash -lc "..." wrapper
-                if cmd_str and " -lc " in cmd_str:
-                    inner = cmd_str.split(" -lc ", 1)[-1].strip()
-                    if len(inner) >= 2 and inner[0] == inner[-1] == '"':
-                        cmd_str = inner[1:-1].replace('\\"', '"')
-                if cmd_str:
-                    yield {"_tool": {"name": "Bash", "command": cmd_str}}
-            diff_tool = _codex_diff_tool(item)
-            if diff_tool:
-                pending = flush_pending_unphased_as_status()
-                if pending:
-                    yield pending
-                yield {"_tool": diff_tool}
-        elif method in ("item/fileChange/patchUpdated", "turn/diff/updated"):
-            diff_tool = _codex_diff_tool(params)
-            if diff_tool:
-                pending = flush_pending_unphased_as_status()
-                if pending:
-                    yield pending
-                yield {"_tool": diff_tool}
-        elif t == "turn.completed" or method == "turn/completed":
-            if pending_unphased_message:
-                yield pending_unphased_message
-                pending_unphased_message = None
-            usage = event.get("usage") or params.get("usage") or {}
-            # ── Codex token semantics (opposite of Claude — do not conflate) ───────────────
-            # Codex reports input_tokens as the FULL total, cache already included.
-            # cached_input_tokens is a subset breakdown of input_tokens, not additive.
-            # True total = input_tokens (do NOT add cache_read on top).
-            # ─────────────────────────────────────────────────────────────────────────────
-            total_in = int(usage.get("input_tokens", 0) or 0)
-            cached_in = int(usage.get("cached_input_tokens", 0) or 0)
-            # output_tokens already includes reasoning_output_tokens — no need to track separately.
-            yield {
-                "_stats": {
-                    "session_id": thread_id,
-                    "model": event.get("model") or params.get("model"),
-                    "input_tokens": total_in,
-                    "output_tokens": int(usage.get("output_tokens", 0) or 0),
-                    "cache_read_tokens": cached_in,
-                    "cache_write_tokens": 0,
-                    "history_input_tokens": _estimate_history_tokens(history),
-                    "cost_usd": None,
-                    "duration_ms": int(time.monotonic() * 1000 - start_ms),
+                    cmd_str = item.get("command", "")
+                    # Strip /bin/zsh -lc "..." or /bin/bash -lc "..." wrapper
+                    if cmd_str and " -lc " in cmd_str:
+                        inner = cmd_str.split(" -lc ", 1)[-1].strip()
+                        if len(inner) >= 2 and inner[0] == inner[-1] == '"':
+                            cmd_str = inner[1:-1].replace('\\"', '"')
+                    if cmd_str:
+                        yield {"_tool": {"name": "Bash", "command": cmd_str}}
+                diff_tool = _codex_diff_tool(item)
+                if diff_tool:
+                    pending = flush_pending_unphased_as_status()
+                    if pending:
+                        yield pending
+                    yield {"_tool": diff_tool}
+            elif method in ("item/fileChange/patchUpdated", "turn/diff/updated"):
+                diff_tool = _codex_diff_tool(params)
+                if diff_tool:
+                    pending = flush_pending_unphased_as_status()
+                    if pending:
+                        yield pending
+                    yield {"_tool": diff_tool}
+            elif t == "turn.completed" or method == "turn/completed":
+                if pending_unphased_message:
+                    yield pending_unphased_message
+                    pending_unphased_message = None
+                usage = event.get("usage") or params.get("usage") or {}
+                # ── Codex token semantics (opposite of Claude — do not conflate) ───────────────
+                # Codex reports input_tokens as the FULL total, cache already included.
+                # cached_input_tokens is a subset breakdown of input_tokens, not additive.
+                # True total = input_tokens (do NOT add cache_read on top).
+                # ─────────────────────────────────────────────────────────────────────────────
+                total_in = int(usage.get("input_tokens", 0) or 0)
+                cached_in = int(usage.get("cached_input_tokens", 0) or 0)
+                # output_tokens already includes reasoning_output_tokens — no need to track separately.
+                yield {
+                    "_stats": {
+                        "session_id": thread_id,
+                        "model": event.get("model") or params.get("model"),
+                        "input_tokens": total_in,
+                        "output_tokens": int(usage.get("output_tokens", 0) or 0),
+                        "cache_read_tokens": cached_in,
+                        "cache_write_tokens": 0,
+                        "history_input_tokens": _estimate_history_tokens(history),
+                        "cost_usd": None,
+                        "duration_ms": int(time.monotonic() * 1000 - start_ms),
+                    }
                 }
-            }
-        elif t == "error":
-            msg = event.get("message", "codex error")
-            if _codex_auth_message(msg):
-                raise CLIAuthRequired("codex", msg)
-            raise CLIError(msg)
+            elif t == "error":
+                msg = event.get("message", "codex error")
+                if _codex_auth_message(msg):
+                    raise CLIAuthRequired("codex", msg)
+                raise CLIError(msg)
 
 
 async def run_copilot(

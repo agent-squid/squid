@@ -5,6 +5,9 @@ updated: 2026-08-15
 ---
 # ADR-0035: CLI Auth Sessions via Scoped PTY over SSE
 
+[ADR-0058](0058-persistent-credential-profiles.md) proposes targeting a
+dedicated Codex subscription provider through the scoped login flow.
+
 ## Context and Problem Statement
 
 Every bundled harness (`claudecode`, `codex`, `cursor`, `opencode`, `pi`)

@@ -127,6 +127,18 @@ class Provider:
     settings: dict[str, Any] = field(default_factory=dict)
     args: tuple[str, ...] = ()
     links: tuple[dict[str, str], ...] = ()
+    dedicated_login: bool = False
+
+    @property
+    def subscription_harness(self) -> Optional[str]:
+        if (self.auth_type != "subscription" or self.base_url or self.api_key is not None
+                or self.settings or self.args or self.env):
+            return None
+        codex = "/v1/responses" in self.supported_apis
+        claude = "/v1/messages" in self.supported_apis
+        if codex == claude:
+            return None
+        return "codex" if codex else "claudecode"
 
     def missing_secrets(self) -> list[str]:
         if self.auth_type != "api_key":
@@ -186,6 +198,8 @@ class Provider:
             "color": self.color,
             "base_url": self.base_url,
             "auth_type": self.auth_type,
+            "dedicated_login": self.dedicated_login,
+            "subscription_harness": self.subscription_harness,
             "parallel": self.parallel,
             "missing_secrets": self.missing_secrets(),
             "gauge": self.gauge.public_dict(),
@@ -346,8 +360,15 @@ def _validate_provider(provider_id: str, raw: Any) -> Provider:
     gauge = _validate_gauge(provider_id, gauge_raw)
     links = _validate_links(provider_id, raw.get("links"))
 
-    return Provider(provider_id, label, color.upper(), base_url, auth_type, api_key, parallel,
-                    gauge, tuple(models), supported_apis, env, settings, tuple(args), links)
+    dedicated = auth.get("dedicated_login", False)
+    if not isinstance(dedicated, bool):
+        raise ValueError(f"Provider {provider_id!r} auth.dedicated_login must be a boolean")
+    provider = Provider(provider_id, label, color.upper(), base_url, auth_type, api_key,
+                        parallel, gauge, tuple(models), supported_apis, env, settings,
+                        tuple(args), links, dedicated)
+    if dedicated and provider.subscription_harness is None:
+        raise ValueError(f"Provider {provider_id!r} requires native Codex or Claude subscription settings with an unambiguous API")
+    return provider
 
 
 def _configured_providers() -> dict[str, Any]:

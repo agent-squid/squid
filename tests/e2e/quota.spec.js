@@ -1,5 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
+test.use({ serviceWorkers: 'block' });
+
 async function mockShell(page) {
   await page.route('**/health', route => route.fulfill({
     json: {
@@ -312,22 +314,19 @@ test('codex quota keeps background retrying after repeated visible errors', asyn
   await page.route('**/processes', route => route.fulfill({ json: [] }));
   await page.route('**/topics/**', route => route.fulfill({ json: {} }));
 
+  let failQuota = false;
   let quotaCalls = 0;
   await page.route('**/quota/provider/openai', route => {
-    quotaCalls++;
-    if (quotaCalls <= 5) return route.fulfill({ status: 502 });
+    if (failQuota && ++quotaCalls <= 5) return route.fulfill({ status: 502 });
     return route.fulfill({ json: { status: 'ok', raw: 34, used_percent: 34 } });
   });
 
   await page.addInitScript(() => {
     const realSetTimeout = window.setTimeout.bind(window);
     const realClearTimeout = window.clearTimeout.bind(window);
-    window.__quotaTimerCallbacks = [];
     window.setTimeout = (callback, delay, ...args) => {
       if ([3000, 10000, 30000, 60000].includes(delay)) {
-        const handle = { callback, args, delay, cleared: false };
-        window.__quotaTimerCallbacks.push(handle);
-        return handle;
+        return { callback, args, delay, cleared: false };
       }
       return realSetTimeout(callback, delay, ...args);
     };
@@ -340,21 +339,22 @@ test('codex quota keeps background retrying after repeated visible errors', asyn
     };
   });
   await page.goto('/');
-  await page.waitForFunction(() => typeof setVisibleQuotaBackend === 'function');
-  quotaCalls = 0;
+  await expect(page.locator('#codex-quota-display')).toHaveClass(/loaded/);
+  failQuota = true;
 
   const result = await page.evaluate(async () => {
     setVisibleQuotaBackend('openai');
     await fetchQuotaForBackend('openai');
-    const callbacks = window.__quotaTimerCallbacks;
+    const delays = [];
     for (let i = 0; i < 5; i++) {
-      const next = callbacks.find(item => !item.cleared);
-      if (!next) break;
+      const next = quotaStateFor('openai').retryTimer;
+      if (!next || next.cleared) break;
+      delays.push(next.delay);
       next.cleared = true;
       await next.callback(...next.args);
     }
     return {
-      delays: callbacks.map(item => item.delay),
+      delays,
       isError: document.getElementById('codex-quota-display').classList.contains('error'),
       isLoaded: document.getElementById('codex-quota-display').classList.contains('loaded'),
       text: document.getElementById('codex-5h-pct').textContent,
@@ -1131,4 +1131,30 @@ test('discovered Antigravity completion refreshes once and local callbacks keep 
   });
   expect(reads).toBe(1);
   expect(await page.evaluate(() => quotaStateFor('custom-agy').activeCount)).toBe(0);
+});
+
+test('inactive Codex providers cannot repaint the visible quota gauge', async ({ page }) => {
+  await mockShell(page);
+  await page.goto('/');
+  await page.evaluate(() => {
+    for (const provider of ['openai', 'openai_pers']) {
+      _providerMetadata[provider] = { gauge: { type: 'codex' } };
+    }
+    setVisibleQuotaBackend('openai_pers');
+    renderQuotaLoaded('openai_pers', { pct: 7, sevenDay: { pct: 19 } });
+    renderQuotaLoaded('openai', { pct: 23, sevenDay: { pct: 42 } });
+  });
+  const sevenDay = page.locator('#codex-7d-label');
+  await expect(sevenDay).toHaveText('19');
+
+  await page.evaluate(() => setVisibleQuotaBackend('openai'));
+  await expect(sevenDay).toHaveText('42');
+  await page.evaluate(() => {
+    showQuotaError('openai_pers', 'auth');
+    updateSevenDayGauge('openai_pers');
+  });
+  await expect(sevenDay).toHaveText('42');
+
+  await page.evaluate(() => setVisibleQuotaBackend('openai_pers'));
+  await expect(sevenDay).toHaveText('—');
 });

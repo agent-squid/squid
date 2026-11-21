@@ -128,6 +128,43 @@ While an agent is running, Squid shows progress in a thought bubble instead of l
 
 After completion, the response carries usage metadata. Instead of guessing what a turn cost, you can inspect tokens, cache reads/writes, reasoning tokens where available, duration, cost, and quota deltas. The analytics view rolls this up by time, topic, and agent so you can see which lanes are expensive and which models are doing the most work.
 
+### Use two Codex subscriptions
+
+Add a second Codex provider to the existing `providers:` section of
+`squid.yaml`. For example:
+
+```yaml
+cope:
+  label: Codex Personal
+  auth: {type: subscription, dedicated_login: true}
+  supported_apis: [/v1/responses]
+```
+
+Create a Codex agent using `cope` and **User Home**. Select that agent in
+chat and run `/login`. If your agent is named `cope`, you can type
+`#default@cope /login` to target it directly. Squid keeps its Codex login and
+sessions in
+`~/.squid/provider-homes/cope/.codex/`. The existing `openai` provider
+continues to use the host login. See [ADR-0058](docs/decisions/0058-persistent-credential-profiles.md).
+
+### Use two Claude subscriptions
+
+Add a second native Claude provider under `providers:` in `squid.yaml`.
+
+```yaml
+clape:
+  label: Claude Personal
+  auth: {type: subscription, dedicated_login: true}
+  supported_apis: [/v1/messages]
+```
+
+Assign `clape` to a Claude Code agent using **User Home**. Select that
+agent in chat and run `/login`. Squid derives that provider's
+`CLAUDE_CONFIG_DIR` and uses the one-shot Claude runner. On macOS, dedicated
+Claude logins support fresh manual turns. On Linux, resume and automation
+require the same verified credential.
+[ADR-0059](docs/decisions/0059-dedicated-claude-subscription-providers.md)
+
 ## Couch Coding With Tailscale
 
 Squid is most useful when your local machine can keep working while you are away from the desk.

@@ -3,7 +3,7 @@ import hashlib
 import json
 
 
-def target(route, topic):
+def target(route, topic, *, verify_claude=True):
     from .flow import parse_flow_route, durable_flow_plan
     from .watch_runs import agent_revision
     if not isinstance(route, str) or not route.strip() or len(route) > 4096:
@@ -20,7 +20,7 @@ def target(route, topic):
                 or step.get('dependencies', []) != previous):
             raise ValueError('watch flows require same-topic sequential steps without delays')
         previous = [step['step_id']]
-    members = {s['agent']: agent_revision(s['agent'], topic) for s in plan}
+    members = {s['agent']: agent_revision(s['agent'], topic, verify_claude=verify_claude) for s in plan}
     revision = hashlib.sha256(json.dumps(dict(route=parsed['route'], plan=plan, members=members),
                                          sort_keys=True).encode()).hexdigest()
     return parsed['route'], plan, revision
@@ -38,7 +38,7 @@ def owned(flow_run_id):
 def initialize(run_id, route, topic):
     from . import stats_db
     from .watches import _connect
-    canonical, plan, _ = target(route, topic)
+    canonical, plan, _ = target(route, topic, verify_claude=False)
     flow_id = 'watch-' + run_id
     with _connect() as conn:
         changed = conn.execute('UPDATE watch_runs SET flow_run_id=? WHERE id=? AND state=\'claimed\'', (flow_id, run_id)).rowcount
@@ -127,7 +127,8 @@ async def dispatch(runtime, run_id):
                     'cwd', 'source_cwd', 'configured_cwd', 'response_timeout', 'resume_session_id',
                     'adhoc', 'lookback', 'code_roots', 'display_prompt', 'worktree_setup_elapsed_ms', 'worktree_isolated')
             out, _, _ = await runtime.dispatcher.dispatch(prompt=prepared['effective_message'],
-                msg_id=prepared['asst_msg_id'], watch_run_id=run_id, effort=prepared.get('effort'), **{k: prepared[k] for k in keys})
+                msg_id=prepared['asst_msg_id'], watch_run_id=run_id, effort=prepared.get('effort'),
+                codex_binding=prepared.get('codex_binding'), **{k: prepared[k] for k in keys})
             queue_error = False
             while True:
                 chunk = await out.get()

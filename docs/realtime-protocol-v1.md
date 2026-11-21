@@ -121,9 +121,13 @@ sessions onto `/ws/v1`, mirroring `chat.*`. The PTY and security model is
 unchanged; SSE remains the migration fallback. Messages:
 
 - `auth.start` — idempotent mutation via `request_id`. Payload
-  `{harness, mode, model?, cols, rows}`. Result
+  `{harness, mode, model?, provider?, cols, rows}`. Result
   `{ok, session_id, harness, command}` or `{ok:false, error, detail}`.
   `mode` is one of `login`, `install`, `pull`, `remove`, or `unlock`.
+  Supply `provider` for a dedicated Codex or Claude login. The server validates the
+  provider and resolves its credential store. Omitting it retains host login.
+  See [ADR-0058](decisions/0058-persistent-credential-profiles.md) and
+  [ADR-0059](decisions/0059-dedicated-claude-subscription-providers.md).
   `unlock` (see `docs/decisions/0035-cli-auth-sessions-via-scoped-pty.md`'s
   keychain-unlock amendment) runs the fixed, allowlisted `security
   unlock-keychain` command — macOS only, and gated to a loopback client

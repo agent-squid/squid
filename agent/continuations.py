@@ -706,6 +706,19 @@ def _dispatch_authorization(row):
     return True, reason
 
 
+def _codex_context_matches(binding, parent, origin, history):
+    """Allow automatic reuse only within the same recorded dedicated login."""
+    source_ids = {parent['id'], origin['id']}
+    source_ids.update(turn['id'] for turn in history or () if turn['role'] == 'assistant')
+    previous = db.get_codex_turn_bindings(list(source_ids))
+    if binding is None or not binding.dedicated:
+        return not previous
+    if not binding.can_reuse:
+        return False
+    expected = (str(binding.home), binding.account)
+    return all(previous.get(msg_id) == expected for msg_id in source_ids)
+
+
 async def dispatch(row, dispatcher):
     from .server import _prepare_chat_turn
     from fastapi.responses import JSONResponse
@@ -795,6 +808,14 @@ async def dispatch(row, dispatcher):
     if isinstance(prepared, JSONResponse):
         await asyncio.to_thread(fail, row['id'], 'preparation_blocked')
         return
+    binding = prepared.get('codex_binding')
+    if not await asyncio.to_thread(_codex_context_matches, binding, parent, origin, history):
+        await asyncio.to_thread(fail, row['id'], 'codex_account_changed')
+        await asyncio.to_thread(
+            db.mark_assistant_cancelled, prepared['asst_msg_id'],
+            'Continuation blocked because the subscription login changed or could not be verified',
+        )
+        return
     # Claim is durable before preparation. A crash in this gap is ambiguous,
     # rather than permission to prepare/execute a second child.
     if not await asyncio.to_thread(link, row['id'], prepared['asst_msg_id']):
@@ -818,6 +839,7 @@ async def dispatch(row, dispatcher):
             'adhoc', 'lookback', 'code_roots', 'display_prompt', 'worktree_setup_elapsed_ms', 'worktree_isolated')
     kwargs = {key: prepared[key] for key in keys}
     kwargs['effort'] = prepared.get('effort')
+    kwargs['codex_binding'] = binding
     try:
         kwargs['response_timeout'] = await asyncio.to_thread(launch_timeout, prepared['asst_msg_id'],
                                                             kwargs['response_timeout'])

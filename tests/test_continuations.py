@@ -1162,7 +1162,7 @@ async def test_adhoc_sequence_has_private_context_and_preserves_regular_session(
 
     monkeypatch.setattr(server, 'get_agent', lambda name: {'model': 'test-model'})
     monkeypatch.setattr(server, '_resolve_agent_runtime', lambda cfg: (
-        'codex', None, 'codex', SimpleNamespace(fingerprint='runtime')))
+        'codex', None, 'codex', SimpleNamespace(fingerprint='runtime', provider=SimpleNamespace(dedicated_login=False))))
     monkeypatch.setattr(server, 'topic_memory_squid_config', lambda topic: {})
 
     class Dispatcher:
@@ -2016,3 +2016,55 @@ def test_durable_read_checks_work_without_realtime_schema(tmp_path, monkeypatch,
             conn.execute('INSERT INTO continuations VALUES(?,?)', (123, mode))
     assert store.git_only(123, durable=True) == (mode == 'backing_git')
     assert store.read_only(123, durable=True) == (mode in {'backing_git', 'task_review'})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("next_account", ["original", "replacement", None])
+async def test_dedicated_continuation_only_reuses_context_under_its_original_account(
+    setup, monkeypatch, tmp_path, next_account,
+):
+    from agent import server
+    from agent.codex_subscription import Binding
+
+    parent, token = setup
+    home = tmp_path / "provider-homes" / "cope" / ".codex"
+    db.record_codex_provider_home(parent, str(home), "original")
+    with db._connection() as conn:
+        conn.execute("UPDATE chat_messages SET adhoc=1 WHERE id=?", (parent,))
+    store.create(token, SEQUENCE)
+    db.update_assistant_message(parent, "First result", "private-session", "done")
+    store.complete(parent, True, "synced")
+    binding = Binding(True, 0, home, next_account)
+    sent = []
+    prepared = {}
+
+    async def prepare(**kwargs):
+        user = db.insert_user_message("test", "codex", kwargs["message"], source="continuation")
+        child = db.insert_assistant_message("test", "codex", user, source="continuation", adhoc=True)
+        prepared.update(
+            topic="test", agent="codex", asst_msg_id=child, effective_message=kwargs["message"],
+            adhoc=True, context_history=[], harness="codex", provider="cope", backend="codex",
+            model=None, cwd=None, source_cwd=None, configured_cwd=None, response_timeout=30,
+            resume_session_id=None, lookback=0, code_roots=[], display_prompt=kwargs["message"],
+            worktree_setup_elapsed_ms=None, worktree_isolated=False, codex_binding=binding,
+        )
+        return prepared
+
+    class Dispatcher:
+        async def dispatch(self, **kwargs):
+            sent.append(kwargs)
+            queue = asyncio.Queue()
+            await queue.put(None)
+            return queue, None, None
+
+    monkeypatch.setattr(server, "_prepare_chat_turn", prepare)
+    await store.dispatch(store.claim(set()), Dispatcher())
+    if next_account == "original":
+        assert len(sent) == 1
+        assert sent[0]["codex_binding"] is binding
+        assert sent[0]["resume_session_id"] == "private-session"
+        assert sent[0]["context_history"][-1]["id"] == parent
+    else:
+        assert not sent
+        assert store.inspect(token)[0]["reason"] == "codex_account_changed"
+        assert db.get_message(prepared["asst_msg_id"])["status"] == "cancelled"

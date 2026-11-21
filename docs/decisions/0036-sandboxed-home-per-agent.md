@@ -5,6 +5,9 @@ updated: 2026-08-08
 ---
 # ADR-0036: Sandboxed `$HOME` Per Agent
 
+[ADR-0058](0058-persistent-credential-profiles.md) proposes independent Codex
+sign-in through a dedicated provider with a durable `CODEX_HOME`.
+
 ## Context and Problem Statement
 
 Every bundled harness resolves its config, plugins/skills, prompt history,

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import logging
 import os
 import pty
 import json
@@ -44,6 +45,9 @@ from typing import AsyncGenerator, Optional
 
 from .config import CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OLLAMA_PATH, OPENCODE_PATH
 from .runners import _register_proc, _deregister_proc, _signal_process_group
+from .watch_async import call as settled_thread_call, settle
+
+log = logging.getLogger(__name__)
 
 # Sentinel topic under the existing process registry (agent/runners.py) so
 # /processes, /cmd stopall, and shutdown/restart's kill_all_procs() all reach
@@ -170,6 +174,10 @@ class AuthSession:
         self.idle_task: Optional[asyncio.Task] = None
         self.api_task: Optional[asyncio.Task] = None
         self._closed = asyncio.Event()
+        self.credential_lock = None
+        self.credential_provider = None
+        self.credential_account = None
+        self.child_reaped = False
 
     def touch(self) -> None:
         self.last_activity = time.monotonic()
@@ -273,6 +281,7 @@ async def _run_ollama_api(session: AuthSession, provider, action: str, model: st
 
 async def create_session(
     target_id: str, cols: int, rows: int, mode: str = "login", model: Optional[str] = None,
+    provider_id: Optional[str] = None,
 ) -> AuthSession:
     """`target_id` is a harness id for mode="login"/"install", or "ollama"
     for mode="install"/"pull"/"remove". `model` is required for pull/remove
@@ -280,9 +289,46 @@ async def create_session(
     argv purposes (fixed `security unlock-keychain` command) — it is still
     used as the session's registry/prompt label. Raises AuthSessionError /
     NoLoginCommand."""
+    credential_lock = None
+    credential_account = None
+    if provider_id is not None and (mode != "login" or target_id not in {"codex", "claudecode"}):
+        raise AuthSessionError("A provider may be selected only for Codex or Claude sign-in")
     if mode == "login":
         argv = _login_argv(target_id)
         env = _login_env(target_id)
+        if provider_id is not None:
+            from . import codex_subscription
+            from .providers import get_provider, require_provider
+            from .runners import _apply_env_overrides
+            try:
+                provider = require_provider(provider_id)
+                if not provider.dedicated_login or provider.subscription_harness != target_id:
+                    raise ValueError(f"Provider {provider_id!r} does not use a dedicated login for this harness")
+                home = codex_subscription.ensure_home(provider.id, target_id)
+                argv[1:1] = codex_subscription.config_args(home, target_id)
+                _apply_env_overrides(env, codex_subscription.environment(home, target_id))
+                credential_lock = codex_subscription.lock(home, login=True)
+                credential_account = await settled_thread_call(
+                    codex_subscription.account_identity, home, target_id, allow_unidentified=True,
+                )
+                current_provider = get_provider(provider_id)
+                if (
+                    current_provider is None or not current_provider.dedicated_login
+                    or current_provider.subscription_harness != target_id
+                ):
+                    raise ValueError("Subscription provider changed before sign-in. Reopen sign-in.")
+            except asyncio.CancelledError:
+                if credential_lock is not None:
+                    credential_lock.close()
+                raise
+            except (OSError, ValueError) as exc:
+                if credential_lock is not None:
+                    credential_lock.close()
+                raise AuthSessionError(str(exc)) from exc
+            except BaseException:
+                if credential_lock is not None:
+                    credential_lock.close()
+                raise
     elif mode == "install":
         argv = _install_argv(target_id)
         env = os.environ.copy()
@@ -310,11 +356,37 @@ async def create_session(
     else:
         raise AuthSessionError(f"Unknown auth-session mode {mode!r}")
 
-    pid, master_fd = await asyncio.to_thread(_spawn_pty, argv, env, cols, rows)
+    if credential_lock is None:
+        pid, master_fd = await asyncio.to_thread(_spawn_pty, argv, env, cols, rows)
+    else:
+        spawn = asyncio.create_task(asyncio.to_thread(_spawn_pty, argv, env, cols, rows))
+        try:
+            pid, master_fd = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            # The worker thread can still fork after cancellation. Keep the
+            # credential store locked until its child is stopped and reaped.
+            try:
+                await settle(spawn)
+                pid, master_fd = spawn.result()
+                _signal_process_group(pid, signal.SIGKILL)
+                try:
+                    await settled_thread_call(os.waitpid, pid, 0)
+                finally:
+                    os.close(master_fd)
+            finally:
+                credential_lock.close()
+            raise
+        except BaseException:
+            credential_lock.close()
+            raise
     os.set_blocking(master_fd, False)
 
     session_id = uuid.uuid4().hex
     session = AuthSession(session_id, target_id, pid, master_fd, shlex.join(argv))
+    if credential_lock is not None:
+        session.credential_lock = credential_lock
+        session.credential_provider = provider_id
+        session.credential_account = credential_account
     _sessions[session_id] = session
 
     prompt = f"{mode}: {target_id}" + (f" {model}" if model else "")
@@ -359,8 +431,31 @@ async def _finalize(session: AuthSession) -> None:
         returncode = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1
     except ChildProcessError:
         returncode = -1
-    session.mark_exited(returncode)
+    session.child_reaped = True
     _deregister_proc(session.pid)
+    if session.credential_lock is not None:
+        from . import codex_subscription
+        try:
+            home = None
+            try:
+                home = codex_subscription.ensure_home(session.credential_provider, session.harness_id)
+                account = await settled_thread_call(codex_subscription.account_identity, home, session.harness_id)
+            except (ValueError, OSError):
+                account = None
+                returncode = -1
+            if account != session.credential_account or not codex_subscription.account_verified(account):
+                if home is not None:
+                    codex_subscription.advance_generation(home)
+                codex_subscription.invalidate_provider(session.credential_provider)
+            if account is None and returncode == 0:
+                session.broadcast(b"\r\nNo verified subscription login was saved for this provider.\r\n")
+                returncode = -1
+        except Exception:
+            log.exception("Could not finalize subscription provider sign-in")
+            returncode = -1
+        finally:
+            session.credential_lock.close()
+    session.mark_exited(returncode)
     try:
         os.close(session.master_fd)
     except OSError:
@@ -477,10 +572,12 @@ async def cancel_session(session_id: str) -> bool:
             await asyncio.gather(session.api_task, return_exceptions=True)
             _sessions.pop(session_id, None)
             return True
-        _signal_process_group(session.pid, signal.SIGTERM)
+        if not session.child_reaped:
+            _signal_process_group(session.pid, signal.SIGTERM)
         try:
             await asyncio.wait_for(session._closed.wait(), timeout=3)
         except asyncio.TimeoutError:
-            _signal_process_group(session.pid, signal.SIGKILL)
+            if not session.child_reaped:
+                _signal_process_group(session.pid, signal.SIGKILL)
     _sessions.pop(session_id, None)
     return True

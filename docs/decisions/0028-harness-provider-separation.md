@@ -45,6 +45,9 @@ a named entity in favor of agents selecting harness + provider directly.
 
 ## Decision
 
+[ADR-0058](0058-persistent-credential-profiles.md) proposes extending this
+model to separate Codex subscription logins for the same vendor.
+
 ### Harness
 
 The primary runtime term is `harness`: `agent/harnesses.py` owns the supported

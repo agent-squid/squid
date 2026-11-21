@@ -821,14 +821,16 @@ body {
 }
 .quota-status-list {
   display: grid;
-  gap: 0.15rem;
+  grid-template-columns: minmax(0, 2.2fr) max-content minmax(0, 1fr) 24px;
+  gap: 0.15rem 0.6rem;
   margin-bottom: 0.5rem;
   padding: 0 0.4rem;
 }
 .quota-status-row {
   display: grid;
-  grid-template-columns: minmax(96px, 1fr) 96px minmax(110px, 1.4fr);
-  gap: 0.6rem;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  min-height: 24px;
   align-items: center;
   color: #777;
   font-size: var(--text-md);
@@ -839,6 +841,12 @@ body {
   align-items: center;
   gap: 0.4rem;
   color: var(--text-muted);
+}
+.quota-status-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .quota-status-dot {
   width: 7px;
@@ -858,6 +866,25 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.quota-setup-btn {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.quota-setup-btn:hover,
+.quota-setup-btn:focus-visible {
+  background: var(--surface-2);
+  color: var(--text-mid);
 }
 .proc-queue-preview {
   max-width: 160px;
@@ -6315,9 +6342,7 @@ mark.search-kw-highlight {
 .creds-guide a { color: var(--accent-light); }
 #codex-creds-account { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem 0.5rem; }
 #quota-creds-popup, #codex-creds-popup { max-width: calc(100vw - 24px); min-width: min(340px, calc(100vw - 24px)); max-height: calc(100dvh - 80px); overflow-y: auto; }
-.quota-setup-btn { font-size: var(--text-xs); }
-.quota-status-detail:has(.quota-setup-btn) { white-space: normal; overflow: visible; }
-.quota-setup-btn { display: block; margin-top: 0.2rem; }
+
 
 #connect-ssh-panel { text-align: left; white-space: normal; }
 #connect-ssh-panel p { margin: 0 0 0.75rem; }

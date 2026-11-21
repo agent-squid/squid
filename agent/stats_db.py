@@ -1140,6 +1140,17 @@ def init_db() -> None:
         if "last_adhoc_at" not in topic_columns:
             conn.execute("ALTER TABLE topics ADD COLUMN last_adhoc_at TEXT")
         message_columns = _table_columns(conn, "chat_messages")
+        if "codex_provider_home" not in message_columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN codex_provider_home TEXT")
+        if "codex_provider_account" not in message_columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN codex_provider_account TEXT")
+        if "subscription_harness" not in message_columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN subscription_harness TEXT")
+        session_columns = _table_columns(conn, "session_stats")
+        if "codex_home" not in session_columns:
+            conn.execute("ALTER TABLE session_stats ADD COLUMN codex_home TEXT")
+        if "dedicated_codex" not in session_columns:
+            conn.execute("ALTER TABLE session_stats ADD COLUMN dedicated_codex INTEGER NOT NULL DEFAULT 0")
         if "source" not in message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'human'")
             conn.execute("UPDATE chat_messages SET source = 'human' WHERE source IS NULL OR source = ''")
@@ -2118,14 +2129,49 @@ def _sanitize_status_raw(content: Optional[str], status_raw: Optional[str]) -> O
     return status_raw
 
 
-def update_message_quota_snapshot(msg_id: int, before: float, after: float) -> None:
+def record_codex_provider_home(msg_id: int, home: str, account: Optional[str] = None, harness: str = "codex") -> None:
+    with _connection() as conn:
+        conn.execute(
+            "UPDATE chat_messages SET codex_provider_home=?, codex_provider_account=?, subscription_harness=? WHERE id=?",
+            (home, account, harness, msg_id),
+        )
+
+
+def get_codex_turn_bindings(msg_ids: list[int]) -> dict[int, tuple[str, Optional[str]]]:
+    """Read internal account fingerprints without adding them to message APIs."""
+    placeholders = ",".join("?" for _ in msg_ids)
+    with _connection() as conn:
+        rows = conn.execute(
+            f"""SELECT id, codex_provider_home, codex_provider_account FROM chat_messages
+                WHERE codex_provider_home IS NOT NULL AND id IN ({placeholders})""",
+            msg_ids,
+        )
+        return {row["id"]: (row["codex_provider_home"], row["codex_provider_account"]) for row in rows}
+
+
+def get_codex_provider_home(agent: str, session_id: str) -> Optional[tuple[str, str]]:
+    with _connection() as conn:
+        row = conn.execute(
+            """SELECT codex_provider_home, subscription_harness FROM chat_messages
+               WHERE agent=? AND session_id=? AND codex_provider_home IS NOT NULL
+               ORDER BY id DESC LIMIT 1""",
+            (agent, session_id),
+        ).fetchone()
+        return (row["codex_provider_home"], row["subscription_harness"] or "codex") if row else None
+
+
+def update_message_quota_snapshot(msg_id: int, before: float, after: float) -> bool:
     delta = round(after - before, 4)
     with _connection() as conn:
+        row = conn.execute("SELECT codex_provider_home FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
+        if row and row["codex_provider_home"]:
+            return False
         conn.execute(
             "UPDATE chat_messages SET quota_before=?, quota_after=?, quota_delta=?"
             " WHERE id=? AND role='assistant'",
             (before, after, delta, msg_id),
         )
+        return True
 
 
 # ── topic sessions ────────────────────────────────────────────────────────────
@@ -3056,6 +3102,8 @@ def save_stats(
     model: Optional[str] = None,
     cwd: Optional[str] = None,
     lookback: int = 0,
+    codex_home: Optional[str] = None,
+    dedicated_codex: bool = False,
 ) -> None:
     if not harness and backend:
         harness, provider = split_agent_ref(backend, provider)
@@ -3065,8 +3113,8 @@ def save_stats(
                    (session_id, topic, agent, harness, provider, model, cwd,
                     input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, history_input_tokens,
-                    cost_usd, duration_ms, adhoc, lookback, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    cost_usd, duration_ms, adhoc, lookback, codex_home, dedicated_codex, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                ON CONFLICT(session_id) DO UPDATE SET
                    created_at           = CURRENT_TIMESTAMP,
                    topic                = COALESCE(excluded.topic, topic),
@@ -3083,7 +3131,9 @@ def save_stats(
                    cost_usd             = excluded.cost_usd,
                    duration_ms          = excluded.duration_ms,
                    adhoc                = excluded.adhoc,
-                   lookback             = excluded.lookback""",
+                   lookback             = excluded.lookback,
+                   codex_home           = COALESCE(codex_home, excluded.codex_home),
+                   dedicated_codex      = MAX(dedicated_codex, excluded.dedicated_codex)""",
             (
                 session_id, topic, agent, harness, provider, model, cwd,
                 stats.get("input_tokens", 0), stats.get("output_tokens", 0),
@@ -3091,17 +3141,21 @@ def save_stats(
                 stats.get("history_input_tokens", 0),
                 stats.get("cost_usd"), stats.get("duration_ms"),
                 1 if stats.get("adhoc") else 0,
-                lookback,
+                lookback, codex_home, int(dedicated_codex),
             ),
         )
 
 
-def save_quota_delta(session_id: str, before: float, after: float) -> None:
+def save_quota_delta(session_id: str, before: float, after: float) -> bool:
     with _connection() as conn:
+        row = conn.execute("SELECT dedicated_codex FROM session_stats WHERE session_id=?", (session_id,)).fetchone()
+        if row and row["dedicated_codex"]:
+            return False
         conn.execute(
             "UPDATE session_stats SET quota_before=?, quota_after=? WHERE session_id=?",
             (before, after, session_id),
         )
+        return True
 
 
 def get_stats(session_id: str) -> Optional[dict]:

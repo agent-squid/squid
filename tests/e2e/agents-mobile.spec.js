@@ -1,5 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
+test.use({ serviceWorkers: 'block' });
+
 async function mockApp(page) {
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
@@ -89,65 +91,15 @@ test.describe('agents view — mobile', () => {
     expect(statusRow.trim().split(/\s+/).every(w => w === 'status')).toBe(true);
   });
 
-  test('runtime column abbreviated on mobile', async ({ page }) => {
+  test('runtime column shows the harness and provider on mobile', async ({ page }) => {
     await mockApp(page);
     await page.goto('/');
     await navigateToAgentsMobile(page);
-    await page.waitForSelector('#agents-list table');
 
-    // Check that runtime-short spans are visible and runtime-full are hidden
-    const visibility = await page.evaluate(() => {
-      const fullSpans = document.querySelectorAll('#agents-list tbody .runtime-full');
-      const shortSpans = document.querySelectorAll('#agents-list tbody .runtime-short');
-      const results = [];
-      for (let i = 0; i < fullSpans.length; i++) {
-        const fullStyle = getComputedStyle(fullSpans[i]);
-        const shortStyle = getComputedStyle(shortSpans[i]);
-        results.push({
-          fullDisplay: fullStyle.display,
-          shortDisplay: shortStyle.display,
-          fullText: fullSpans[i].textContent,
-          shortText: shortSpans[i]?.textContent || '',
-        });
-      }
-      return results;
-    });
-
-    // On mobile (390px), runtime-full should be hidden and runtime-short visible
-    expect(visibility.length).toBeGreaterThanOrEqual(2);
-    for (const v of visibility) {
-      expect(v.fullDisplay).toBe('none');
-      expect(v.shortDisplay).toBe('inline');
-    }
-    // First agent: claude / anthropic → cla:ant
-    expect(visibility[0].fullText).toBe('claude / anthropic');
-    expect(visibility[0].shortText).toBe('cla:ant');
-    // Second agent: opencode / openai → ope:ope
-    expect(visibility[1].fullText).toBe('opencode / openai');
-    expect(visibility[1].shortText).toBe('ope:ope');
-  });
-
-  test('runtime header abbreviated on mobile', async ({ page }) => {
-    await mockApp(page);
-    await page.goto('/');
-    await navigateToAgentsMobile(page);
-    await page.waitForSelector('#agents-list table');
-
-    const headerTexts = await page.evaluate(() => {
-      const headerFull = document.querySelector('#agents-list thead .runtime-full');
-      const headerShort = document.querySelector('#agents-list thead .runtime-short');
-      return {
-        fullDisplay: headerFull ? getComputedStyle(headerFull).display : 'missing',
-        shortDisplay: headerShort ? getComputedStyle(headerShort).display : 'missing',
-        fullText: headerFull?.textContent || '',
-        shortText: headerShort?.textContent || '',
-      };
-    });
-
-    expect(headerTexts.fullDisplay).toBe('none');
-    expect(headerTexts.shortDisplay).toBe('inline');
-    expect(headerTexts.fullText).toBe('Runtime');
-    expect(headerTexts.shortText).toBe('Run');
+    const agents = page.locator('#agents-list table');
+    await expect(agents.getByRole('columnheader', { name: /Runtime/ })).toBeVisible();
+    await expect(agents.getByRole('cell', { name: 'claude / anthropic' })).toBeVisible();
+    await expect(agents.getByRole('cell', { name: 'opencode / openai' })).toBeVisible();
   });
 });
 
@@ -200,3 +152,54 @@ test('agent list shows effort with runtime default model', async ({ page }) => {
   await navigateToAgentsMobile(page);
   await expect(page.locator('#agents-list .agent-model')).toHaveText('Default / Thorough');
 });
+
+for (const [harness, name, id, directory] of [
+  ['codex', 'Codex', 'cope', '.codex'],
+  ['claudecode', 'Claude', 'clape', '.claude'],
+]) {
+  test(`configured ${name} login shows its status and authenticates from chat`, async ({ page }) => {
+    const home = `/home/operator/.squid/provider-homes/${id}/${directory}`;
+    await mockApp(page);
+    await page.route('**/health', route => route.fulfill({ json: {
+      status: 'ok',
+      harnesses: [
+        { id: harness, label: name, installed: true, default_provider: id, compatible_providers: [id] },
+      ],
+      providers: {
+        host: { label: `${name} Host`, auth_type: 'subscription', subscription_harness: harness },
+        [id]: {
+          label: `${name} Personal`, auth_type: 'subscription',
+          subscription_harness: harness, dedicated_login: true, codex_home: home,
+          codex_signed_in: false, subscription_needs_verification: harness === "claudecode",
+        },
+      },
+    } }));
+    const selectedAgent = harness === 'claudecode' ? 'claude' : 'codex';
+    await page.route('**/config/agents', route => route.fulfill({ json: [
+      { name: selectedAgent, harness, provider: id, dedicated_login: true },
+    ] }));
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'sse' } }));
+    await page.route('**/auth/session', route => route.fulfill({
+      status: 400,
+      json: { error: 'Fixture stopped before contacting a login service' },
+    }));
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/');
+    await navigateToAgentsMobile(page);
+    const catalog = page.locator('#providers-catalog');
+    const host = catalog.locator('.bcat-row').filter({ hasText: `${name} Host` });
+    await expect(host.getByText('Uses host login')).toBeVisible();
+    const provider = catalog.locator('.bcat-row').filter({ hasText: `${name} Personal` });
+    await expect(provider.getByText(`Separate ${name} login`)).toBeVisible();
+    await expect(catalog.getByRole('checkbox')).toHaveCount(0);
+    await expect(provider.getByText(home)).toBeVisible();
+    await expect(provider).toContainText(harness === 'claudecode' ? 'Account needs verification' : 'Signed out');
+    await expect(catalog.getByRole('button', { name: /Sign in/ })).toHaveCount(0);
+    await page.locator('#hamburger-btn').click();
+    await page.locator('#hamburger-menu').getByRole('button', { name: 'Chat', exact: true }).click();
+    const slashRequest = page.waitForRequest(req => new URL(req.url()).pathname === '/auth/session');
+    await page.locator('#input').fill(`#test@${selectedAgent} /login`);
+    await page.locator('#input').press('Enter');
+    expect((await slashRequest).postDataJSON()).toMatchObject({ harness, provider: id, mode: 'login' });
+  });
+}

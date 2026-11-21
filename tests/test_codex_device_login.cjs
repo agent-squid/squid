@@ -23,7 +23,7 @@ test('recognizes complete success lines, including terminal wrapping', () => {
 test('parsed success completes immediately without cancelling the CLI; stale terminals are ignored', () => {
   let callback; const queued = []; const completions = [];
   const term = { buffer: { active: buffer([['Successfully logged in']]) }, onWriteParsed: fn => { callback = fn; } };
-  const ctx = vm.createContext({ term, deviceLogin:true, claudeLogin:false, _authSession:{term,running:true},
+  const ctx = vm.createContext({ term, deviceLogin:true, claudeLogin:false, cursorLogin:false, _authSession:{term,running:true},
     queueMicrotask: fn => queued.push(fn), finishExit:(code, options)=>completions.push([code,options.cancelSession]) });
   vm.runInContext(parser, ctx);
   vm.runInContext(source.slice(source.indexOf('  if (deviceLogin) term.onWriteParsed('), source.indexOf('  const fitAddon = new FitAddon.FitAddon();')), ctx);
@@ -41,7 +41,7 @@ test('Claude and Codex show success once, then close and retry without cancellin
       const term = { dispose: () => { disposed = true; } };
       const session = { id:'auth-test', term, panel, mode:'login', running:true, transport:'ws',
         stopCompletionMonitor:()=>{}, onSuccessRetry:()=>{retried++} };
-      const ctx = vm.createContext({ _authSession:session, term, deviceLogin:true, claudeLogin, isCatalogOperation:false,
+      const ctx = vm.createContext({ _authSession:session, term, deviceLogin:true, claudeLogin, cursorLogin:false, isCatalogOperation:false,
         panelTitle:{}, deviceStatus:{}, deviceLink:{}, deviceCodeRow:{}, claudeCodeRow:{}, panelRetryBtn:{},
         showCmdFeedback:text=>{feedback.push(text);return {setAttribute:()=>{}}},
         setTimeout:(fn,delay)=>{assert.equal(delay,800);timers.push(fn);return 1}, clearTimeout:()=>{},

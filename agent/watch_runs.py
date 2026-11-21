@@ -43,7 +43,7 @@ def pause(conn, watch_id, reason):
         claim_token=NULL,lease_until=NULL WHERE id=? AND status='active' ''', (reason, watch_id))
 
 
-def agent_revision(agent, topic):
+def agent_revision(agent, topic, *, verify_claude=True):
     from .stats_db import get_agent
     from .resolve import resolve_agent
     from .memory import topic_memory_squid_config
@@ -58,6 +58,12 @@ def agent_revision(agent, topic):
         scope['effort_args'] = effort_args(resolved.harness, resolved.provider.id,
                                            configuration.get('model'), configuration['effort'])
     scope['runtime'] = resolved.fingerprint
+    if resolved.provider.dedicated_login:
+        from . import codex_subscription
+        binding = codex_subscription.bind(resolved.provider, agent, resolved.harness, verify_claude=verify_claude)
+        if not binding.can_reuse:
+            raise ValueError(binding.error or f"Sign in to subscription provider {resolved.provider.id!r} with a verifiable credential before granting execution")
+        scope['runtime'] = codex_subscription.session_fingerprint(resolved.fingerprint, binding)
     scope['code_roots'] = topic_memory_squid_config(topic).get('code_roots') or []
     return hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
 
@@ -157,9 +163,9 @@ def authorized(service, conn, watch, grant, *, now):
     try:
         if grant is not None and grant['flow_route']:
             from .watch_flows import target
-            revision = target(grant['flow_route'], watch['topic'])[2]
+            revision = target(grant['flow_route'], watch['topic'], verify_claude=False)[2]
         else:
-            revision = agent_revision(grant['agent'], watch['topic']) if grant is not None else None
+            revision = agent_revision(grant['agent'], watch['topic'], verify_claude=False) if grant is not None else None
         unchanged = grant is not None and grant['agent_revision'] == revision
     except (ValueError, KeyError):
         unchanged = False

@@ -827,6 +827,7 @@ async def _dispatch_next_step(flow_run_id: str, step: dict) -> None:
         configured_cwd=prepared["configured_cwd"],
         harness=prepared["harness"],
         provider=prepared["provider"],
+        codex_binding=prepared.get("codex_binding"),
     ):
         pass  # no live client — TopicWorker + this generator already persisted everything
 
@@ -909,6 +910,7 @@ async def _dispatch_claimed_durable_step(flow_run_id: str, step: dict) -> bool:
             display_prompt=prepared["display_prompt"], source_cwd=prepared["source_cwd"],
             configured_cwd=prepared["configured_cwd"], harness=prepared["harness"],
             provider=prepared["provider"],
+            codex_binding=prepared.get("codex_binding"),
         ):
             pass
         return True

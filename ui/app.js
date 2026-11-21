@@ -3881,12 +3881,32 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
     return;
   }
   if (cmd.command === 'login') {
-    const harness = cmd.harness || _agentToHarness(stickyChip?.agent);
+    const selectedAgent = agent || stickyChip?.agent;
+    let harness = cmd.harness;
+    let provider = null;
+    if (selectedAgent) {
+      try {
+        const response = await fetch('/config/agents', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Agent settings unavailable');
+        const selected = (await response.json()).find(item => item.name === selectedAgent);
+        if (!selected?.harness || typeof selected.dedicated_login !== 'boolean') {
+          throw new Error('Agent login target unavailable');
+        }
+        harness ||= selected.harness;
+        if (harness === selected.harness && selected.dedicated_login) {
+          if (!selected.provider) throw new Error('Provider login target unavailable');
+          provider = selected.provider;
+        }
+      } catch {
+        showToast('Could not resolve the selected agent’s login target');
+        return;
+      }
+    }
     if (!harness || !HARNESS_LABELS[harness]) {
       showToast('Usage: /login [claude|codex|cursor|opencode]');
       return;
     }
-    openAuthPanel(harness, null);
+    openAuthPanel(harness, null, { provider });
     return;
   }
   if (cmd.command === 'refresh') {
@@ -4864,28 +4884,19 @@ let _authSession = null; // { id, harness, es, term, onSuccessRetry }
 
 const HARNESS_LABELS = { claudecode: 'Claude Code', codex: 'Codex', cursor: 'Cursor', opencode: 'OpenCode', pi: 'Pi' };
 
-// Map agent slugs (claude, codex, …) to harness ids (claudecode, …).
-// claude/deepseek/cc-deepseek/deepcla/claude-live all run on the claudecode harness.
-function _agentToHarness(agent) {
-  if (!agent) return null;
-  const a = agent.toLowerCase();
-  if (a === 'claude' || a === 'claude-live' || a === 'deepseek' || a === 'cc-deepseek' || a === 'deepcla') return 'claudecode';
-  if (HARNESS_LABELS[a]) return a;
-  return null;
-}
-
 function parseAuthRequiredError(text) {
-  const m = /^\[\[cli-auth-required:([a-z]+)\]\]\s*/.exec(text || '');
+  const m = /^\[\[cli-auth-required:([a-z]+)(?::([a-z][a-z0-9_-]*))?\]\]\s*/.exec(text || '');
   if (!m) return null;
-  return { harness: m[1], message: text.slice(m[0].length) };
+  return { harness: m[1], provider: m[2], message: text.slice(m[0].length) };
 }
 
-function authActionButtonHtml(harness, errorText = '') {
+function authActionButtonHtml(harness, errorText = '', provider = null) {
   if (harness === 'cursor' && /keychain is locked/i.test(errorText)) {
     return '<button type="button" class="auth-login-btn" data-auth-mode="unlock">Unlock keychain</button> ';
   }
-  const label = HARNESS_LABELS[harness] || harness;
-  return `<button type="button" class="auth-login-btn" data-harness="${harness}">Log in to ${label}</button> `;
+  const label = provider ? (_providerMetadata[provider]?.label || provider) : HARNESS_LABELS[harness] || harness;
+  const target = provider ? ` data-provider="${escapeHtml(provider)}"` : '';
+  return `<button type="button" class="auth-login-btn" data-harness="${escapeHtml(harness)}"${target}>Log in to ${escapeHtml(label)}</button> `;
 }
 
 function wireAuthLoginButtons(root, onSuccessRetry) {
@@ -4895,7 +4906,8 @@ function wireAuthLoginButtons(root, onSuccessRetry) {
         openAuthPanel('keychain', onSuccessRetry, { mode: 'unlock' });
         return;
       }
-      openAuthPanel(btn.dataset.harness, onSuccessRetry);
+      const provider = btn.dataset.provider;
+      openAuthPanel(btn.dataset.harness, provider ? null : onSuccessRetry, { provider });
     });
   });
 }
@@ -5047,6 +5059,8 @@ function monitorDeviceLogin(session, finishExit) {
 async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   const mode = opts.mode || 'login';
   const model = opts.model || null;
+  const provider = opts.provider || null;
+  const providerLabel = provider ? (_providerMetadata[provider]?.label || provider) : null;
   const isApiOperation = mode === 'pull' || mode === 'remove';
   // "unlock" (the macOS keychain-unlock remediation) reuses the plain login
   // panel — it's triggered from inside an in-progress cursor login and should
@@ -5069,7 +5083,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   panelRetryBtn.hidden = true;
   if (!isCatalogOperation) authPanelUnlockBtn.hidden = true;
   if (isCatalogOperation) agentsAuthPanelRestartBtn.hidden = true;
-  panelTitle.textContent = _authPanelTitle(harness, mode, model);
+  panelTitle.textContent = providerLabel ? `Sign in to ${providerLabel}` : _authPanelTitle(harness, mode, model);
   panelTerm.innerHTML = '';
   const claudeLogin = harness === 'claudecode' && mode === 'login';
   const cursorLogin = harness === 'cursor' && mode === 'login';
@@ -5164,7 +5178,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   if (deviceLogin) term.onWriteParsed(() => {
     if (_authSession?.term !== term || !_authSession.running) return;
     const prompt = claudeLogin ? claudeWebPrompt(term.buffer.active) : cursorLogin ? cursorWebPrompt(term.buffer.active) : codexDevicePrompt(term.buffer.active);
-    if (prompt.success) {
+    if (prompt.success && !_authSession.provider) {
       // Leave xterm's parser callback before disposing its terminal. Codex has
       // saved credentials, but may still be exiting: do not cancel that process.
       queueMicrotask(() => finishExit(0, { cancelSession: false }));
@@ -5277,7 +5291,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   };
   window.addEventListener('resize', handleResize);
 
-  _authSession = { id: null, harness, mode, model, panel, panelTitle, panelTerm,
+  _authSession = { id: null, harness, mode, model, provider, providerLabel, panel, panelTitle, panelTerm,
     panelRetryBtn, anchor, term, fitAddon, handleResize, onSuccessRetry, running: true };
 
   const finishExit = (code, { cancelSession = true } = {}) => {
@@ -5302,7 +5316,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
         fitTerminal();
       } else if (deviceLogin) {
         const session = _authSession;
-        const label = claudeLogin ? 'Claude' : cursorLogin ? 'Cursor' : 'Codex';
+        const label = session.providerLabel || (claudeLogin ? 'Claude' : cursorLogin ? 'Cursor' : 'Codex');
         panelTitle.textContent = `Signed in to ${label} ✓`;
         deviceStatus.textContent = `${label} login successful.`;
         deviceLink.hidden = true;
@@ -5313,6 +5327,16 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
         showCmdFeedback(`${label} login successful.${retry ? ' Retrying your request…' : ''}`)
           .setAttribute('role', 'status');
         session.loginSucceeded = true;
+        if (session.provider && _providerMetadata[session.provider]?.dedicated_login
+            && gaugeTypeFor(session.provider) === 'codex') {
+          const state = quotaStateFor(session.provider);
+          showQuotaError(session.provider, `${label} loading…`);
+          const refreshQuota = async () => {
+            await state.requestDone;
+            await fetchQuotaForBackend(session.provider);
+          };
+          void refreshQuota();
+        }
         session.onLoginSuccessClose = retry;
         session.successTimer = setTimeout(() => {
           if (_authSession === session) closeAuthPanel({ cancelSession });
@@ -5354,7 +5378,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   if (transportMode !== 'sse' && realtimeV1) {
     try {
       data = await realtimeV1.startAuth(
-        { harness, cols: term.cols, rows: term.rows, mode, model },
+        { harness, cols: term.cols, rows: term.rows, mode, model, ...(provider ? { provider } : {}) },
         frame => {
           if (!_authSession || frame.payload?.session_id !== _authSession.id) return;
           if (frame.type === 'auth.output') {
@@ -5389,7 +5413,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
       // The PTY execs its allowlisted argv directly, without a shell prompt to
       // echo it. Show the exact server-derived command before replay/live output.
       if (!isApiOperation) term.write(`$ ${data.command}\r\n\r\n`);
-      _authSession = { id: data.session_id, harness, mode, model, panel, panelTitle, panelTerm,
+      _authSession = { id: data.session_id, harness, mode, model, provider, providerLabel, panel, panelTitle, panelTerm,
         panelRetryBtn, anchor, term, fitAddon, handleResize, onSuccessRetry, running: true, transport: 'ws' };
       if (deviceLogin) monitorDeviceLogin(_authSession, finishExit);
       term.onData(input => {
@@ -5434,7 +5458,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   try {
     res = await fetch('/auth/session', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ harness, cols: term.cols, rows: term.rows, mode, model }),
+      body: JSON.stringify({ harness, cols: term.cols, rows: term.rows, mode, model, ...(provider ? { provider } : {}) }),
     });
     data = await res.json();
   } catch (err) {
@@ -5461,7 +5485,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
 
   if (!isApiOperation) term.write(`$ ${data.command}\r\n\r\n`);
   const es = new EventSource(`/auth/session/${data.id}/events`);
-  _authSession = { id: data.id, harness, mode, model, panel, panelTitle, panelTerm,
+  _authSession = { id: data.id, harness, mode, model, provider, providerLabel, panel, panelTitle, panelTerm,
     panelRetryBtn, anchor, es, term, fitAddon, handleResize, onSuccessRetry, running: true, transport: 'sse' };
 
   if (deviceLogin) monitorDeviceLogin(_authSession, finishExit);
@@ -5551,7 +5575,7 @@ function retryAuthSession() {
   const mode = _authSession?.mode;
   const model = _authSession?.model;
   const anchor = _authSession?.anchor;
-  if (harness) openAuthPanel(harness, retry, { mode, model, anchor });
+  if (harness) openAuthPanel(harness, retry, { mode, model, anchor, provider: _authSession?.provider });
 }
 authPanelRetryBtn.addEventListener('click', retryAuthSession);
 agentsAuthPanelRetryBtn.addEventListener('click', retryAuthSession);
@@ -5903,7 +5927,8 @@ async function sendMessage(text, opts = {}) {
   let firstDataReceived = false;
 
   let quotaBackend = nativeShell ? null : await resolveQuotaProvider(topic, agent);
-  let quotaBeforeSnapshot = nativeShell || gaugeTypeFor(quotaBackend) === 'antigravity'
+  let dedicatedQuota = !!_providerMetadata[quotaBackend]?.dedicated_login;
+  let quotaBeforeSnapshot = nativeShell || dedicatedQuota || gaugeTypeFor(quotaBackend) === 'antigravity'
     ? null : await fetchQuotaForBackend(quotaBackend, true);
   // fetchQuotaForBackend's null return conflates "this backend has no quota
   // concept at all" with "the read failed". Provider resolution above
@@ -5944,7 +5969,7 @@ async function sendMessage(text, opts = {}) {
   async function finalizeQuotaTracking() {
     if (quotaFinalized) return;
     quotaFinalized = true;
-    if (nativeShell) return;
+    if (nativeShell || dedicatedQuota) return;
     // Quota is a backend-wide meter, so this before/after difference is only an
     // observational signal. Parallel prompts have overlapping windows and can
     // double-count each other's usage; provider reporting lag can shift usage to
@@ -6103,7 +6128,7 @@ async function sendMessage(text, opts = {}) {
     if (!errDisplay && raw) return;
     if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return;
     placeResponseBubble();
-    contentDiv.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message) : '')
+    contentDiv.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message, authReq.provider) : '')
       + `<span class="msg-error">${escapeHtml(errDisplay) || 'Response interrupted.'}</span>`;
     if (authReq) wireAuthLoginButtons(contentDiv, () => sendMessage(text, opts));
     scrollToBottom();
@@ -6670,6 +6695,7 @@ async function sendMessage(text, opts = {}) {
               // (stalling _stopQuotaPoll), and a stale hasConfig would let
               // finalizeQuotaTracking's terminal-failure fallback fabricate a
               // 0,0 delta against a resolved backend that has no meter at all.
+              dedicatedQuota = meta.dedicated_codex ?? !!_providerMetadata[meta.provider]?.dedicated_login;
               if (meta.provider && meta.provider !== quotaBackend) {
                 if (nativeShell) {
                   quotaBackend = meta.provider;
@@ -8598,7 +8624,7 @@ function appendHistoryItem(item, container) {
   if (item.status === 'error') {
     const authReq = parseAuthRequiredError(item.content || '');
     const raw = ((authReq ? authReq.message : item.content) || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
-    asstContent.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message) : '')
+    asstContent.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message, authReq.provider) : '')
       + `<span class="msg-error">${escapeHtml(raw) || 'Response interrupted.'}</span>`;
     // No auto-retry here (unlike the live-turn path in showError) — a
     // history row only has item.prompt as plain text, not the original
@@ -10657,7 +10683,7 @@ function quotaConfigFor(backend) {
 
 function markGaugeAuthenticated(gaugeType) {
   for (const info of Object.values(_providerMetadata)) {
-    if (info?.gauge?.type === gaugeType) info.gauge_authed = true;
+    if (!info?.dedicated_login && info?.gauge?.type === gaugeType) info.gauge_authed = true;
   }
   if (procStatusPopup?.classList.contains('open')) {
     renderProcPopup(cachedProcRows, cachedQueueRows);
@@ -10667,7 +10693,8 @@ function markGaugeAuthenticated(gaugeType) {
 async function refreshQuotaAfterCredentialSave(gaugeType) {
   await ensureQuotaMetadata();
   markGaugeAuthenticated(gaugeType);
-  const providers = Object.keys(_providerMetadata).filter(id => gaugeTypeFor(id) === gaugeType);
+  const providers = Object.keys(_providerMetadata).filter(id =>
+    !_providerMetadata[id]?.dedicated_login && gaugeTypeFor(id) === gaugeType);
   const results = await Promise.all(providers.map(async provider => {
     const state = quotaStateFor(provider);
     // Finish any read started with the previous credentials, then require a
@@ -10794,12 +10821,16 @@ function setVisibleQuotaBackend(backend) {
     } else if (snapshot?.status === 'error') {
       displayEl?.classList.add('error');
       if (displayEl) displayEl.title = cfg.errorTitle ?? '';
+      updateGaugeLabel(activeQuotaBackend);
+      updateSevenDayGauge(activeQuotaBackend);
       const label = document.getElementById(cfg.labelId);
       if (label) label.textContent = snapshot.text;
       const arc = document.getElementById(cfg.pieArcId);
       if (arc) arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
     } else {
+      if (displayEl) displayEl.title = '';
       updateGaugeLabel(activeQuotaBackend);
+      updateSevenDayGauge(activeQuotaBackend);
     }
   }
 }
@@ -10891,9 +10922,10 @@ function updateGaugeLabel(backend) {
 }
 
 function updateSevenDayGauge(backend) {
+  if (backend !== activeQuotaBackend) return;
   const state = quotaStateFor(backend);
   const cfg = quotaConfigFor(backend);
-  if (!cfg.sevenDayArcId) return;
+  if (!cfg?.sevenDayArcId) return;
   const arc = document.getElementById(cfg.sevenDayArcId);
   const label = document.getElementById(cfg.sevenDayLabelId);
   if (arc && state.sevenDay?.pct != null) {
@@ -10961,31 +10993,14 @@ function showQuotaError(backend, text, options = {}) {
   if (!cfg) return;
   const state = quotaStateFor(backend);
   if (options.clearRetry !== false) clearQuotaRetry(state);
+  state.pct = null;
   state.resetAt = null;
+  state.sevenDay = null;
   if (state.timer) { clearTimeout(state.timer); state.timer = null; }
 
   setQuotaSnapshot(backend, { status: 'error', text });
 
-  if (backend === activeQuotaBackend) {
-    const displayEl = document.getElementById(cfg.displayId);
-    displayEl.classList.remove('loaded');
-    displayEl.classList.add('error');
-    displayEl.title = cfg.errorTitle;
-    const label = document.getElementById(cfg.labelId);
-    if (label) label.textContent = text;
-    const arc = document.getElementById(cfg.pieArcId);
-    if (arc) arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
-  }
-  if (cfg.sevenDayArcId) {
-    const sevenDayArc = document.getElementById(cfg.sevenDayArcId);
-    if (sevenDayArc) sevenDayArc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
-    const sevenDayLabel = document.getElementById(cfg.sevenDayLabelId);
-    if (sevenDayLabel) sevenDayLabel.textContent = '—';
-  }
-  if (cfg.fiveHourPctId) {
-    const fiveHrPct = document.getElementById(cfg.fiveHourPctId);
-    if (fiveHrPct) fiveHrPct.textContent = '—';
-  }
+  if (backend === activeQuotaBackend) setVisibleQuotaBackend(backend);
 }
 
 function showTransientQuotaError(backend, text) {
@@ -11041,7 +11056,12 @@ async function fetchQuotaForBackend(backend, requireFresh = false) {
     const res = await fetch(url);
     if (!res.ok) {
       const isAuthFailure = [400, 401, 403].includes(res.status);
-      if (isAuthFailure && gaugeTypeFor(provider) === 'codex') {
+      if (isAuthFailure && _providerMetadata[provider]?.dedicated_login) {
+        state.raw = null;
+        state.pct = null;
+        state.sevenDay = null;
+        showRecoverableQuotaError(provider, `${label} auth`);
+      } else if (isAuthFailure && gaugeTypeFor(provider) === 'codex') {
         showRecoverableQuotaError(provider, `${label} auth`);
       } else if (isAuthFailure) showQuotaError(provider, `${label} auth`);
       else showTransientQuotaError(provider, `${label} error`);
@@ -11143,7 +11163,9 @@ function initQuota() {
 
   const credsPopup = document.getElementById(cfg.credsPopupId);
   quotaDisplay.addEventListener('click', () => {
-    if (gaugeTypeFor(activeQuotaBackend) === 'claude') credsPopup.classList.toggle('open');
+    if (gaugeTypeFor(activeQuotaBackend) === 'claude' && !_providerMetadata[activeQuotaBackend]?.dedicated_login) {
+      credsPopup.classList.toggle('open');
+    }
   });
   document.addEventListener('click', (e) => {
     if (!quotaDisplay.contains(e.target) && !credsPopup.contains(e.target))
@@ -13112,13 +13134,17 @@ function renderQuotaStatus() {
       value = '...';
       detail = 'loading';
     }
-    const popupId = quotaConfigFor(provider)?.credsPopupId;
+    const dedicatedClaude = gaugeTypeFor(provider) === 'claude' && _providerMetadata[provider]?.dedicated_login;
+    const popupId = dedicatedClaude ? null : quotaConfigFor(provider)?.credsPopupId;
     const setup = popupId && ['claude', 'codex', 'cursor'].includes(gaugeTypeFor(provider));
-    if (quotaNeedsSetup(provider)) { value = 'setup'; detail = 'credentials required'; }
+    const needsSetup = quotaNeedsSetup(provider);
+    const settingsLabel = needsSetup ? 'Set up usage' : 'Usage settings';
+    if (needsSetup) { value = 'setup'; detail = dedicatedClaude ? 'Claude sign-in required' : 'credentials required'; }
     return `<div class="quota-status-row">
-      <span class="quota-status-name"><span class="quota-status-dot" style="background:${accent}"></span>${escapeHtml(backendDisplayName(provider))}</span>
+      <span class="quota-status-name"><span class="quota-status-dot" style="background:${accent}"></span><span class="quota-status-label">${escapeHtml(backendDisplayName(provider))}</span></span>
       <span class="quota-status-value">${value}</span>
-      <span class="quota-status-detail">${escapeHtml(detail)}${setup ? ` <button type="button" class="btn-ghost quota-setup-btn" data-popup="${popupId}">${quotaNeedsSetup(provider) ? 'Set up usage' : 'Usage settings'}</button>` : ''}</span>
+      <span class="quota-status-detail">${escapeHtml(detail)}</span>
+      ${setup ? `<button type="button" class="quota-setup-btn" data-popup="${popupId}" aria-label="${settingsLabel}" title="${settingsLabel}"><span aria-hidden="true">⚙︎</span></button>` : ''}
     </div>`;
   }).join('');
 
@@ -14433,6 +14459,7 @@ function setProviderOptions(harness, selectedProvider = null, selectId = 'af-pro
   const hInfo = _harnessMetadata[harness] || {};
   const providerIds = providerOptionsForHarness(harness, selectedProvider);
   providerSelect.innerHTML = providerIds
+    .filter(id => !_providerMetadata[id]?.dedicated_login || harness === (_providerMetadata[id]?.subscription_harness || 'codex'))
     .map(id => `<option value="${escapeHtml(id)}">${escapeHtml(_providerMetadata[id]?.label || id)}</option>`)
     .join('');
   const value = selectedProvider || hInfo.default_provider || providerIds[0] || '';
@@ -14456,6 +14483,13 @@ function syncEffortControl(prefix = 'af', selected) {
 }
 
 function syncAgentModelControls(harness, provider, selectPrefix = 'af') {
+  const homeMode = document.getElementById(`${selectPrefix}-home-mode`);
+  if (homeMode) {
+    const dedicated = !!_providerMetadata[provider]?.dedicated_login;
+    homeMode.querySelector('option[value="blank_home"]').disabled = dedicated;
+    if (dedicated && homeMode.value === 'blank_home') homeMode.value = 'user_home';
+    _updateHomeModeIcon(homeMode);
+  }
   const modelInput = document.getElementById(`${selectPrefix}-model`);
   const backend = runtimeRef(harness, provider || null);
   if (modelInput) modelInput.placeholder = backendModelHint(backend);
@@ -14624,12 +14658,22 @@ function renderProvidersCatalog() {
       </div>`;
     }
 
+    const subscriptionName = info.subscription_harness === 'claudecode' ? 'Claude' : 'Codex';
+    const loginStatus = info.subscription_busy ? 'Sign-in in progress'
+      : info.subscription_needs_verification ? 'Account needs verification'
+      : info.subscription_fresh_only ? 'Signed in · Fresh turns only'
+      : info.codex_signed_in ? 'Signed in' : 'Signed out';
+    const subscriptionLogin = info.dedicated_login
+      ? `<span class="bcat-hint">Separate ${subscriptionName} login</span>
+        <span class="bcat-hint">${info.codex_home_unavailable ? `${subscriptionName} home unavailable` : `${subscriptionName} home <code>${escapeHtml(info.codex_home || '')}</code> · ${loginStatus}`}</span>`
+      : info.subscription_harness ? '<span class="bcat-hint">Uses host login</span>' : '';
     return `<div class="bcat-row">
       <div class="bcat-name"><span class="bcat-dot" style="background:${escapeHtml(color)}"></span>${escapeHtml(label)}</div>
       <div class="bcat-coding">
         <span class="${statusClass}">${statusMark} ${escapeHtml(authText)}</span>
         <span class="bcat-hint">${models}${extraLinks}</span>
         ${localHtml}
+        ${subscriptionLogin}
       </div>
       <div class="bcat-gauge"><span class="bcat-hint">${escapeHtml(gaugeText)}</span></div>
     </div>`;
@@ -15020,11 +15064,12 @@ function renderAgentTable(agents) {
     // other agent; home_mode is independent of cwd.
     const homeMode = a.home_mode === 'blank_home' ? 'blank_home' : 'user_home';
     const homeIcon = homeMode === 'blank_home' ? 'location_away' : 'location_home';
+    const dedicatedLogin = !!_providerMetadata[runtime.provider]?.dedicated_login;
     const homeHtml = `<span class="home-mode-field" title="User Home: today's behavior, full environment inheritance. Blank Home: isolated plugins/skills/settings/history; credential is still symlinked from your real HOME, not isolated.">
         <span class="material-symbols-outlined home-mode-icon" aria-hidden="true">${homeIcon}</span>
         <select class="home-mode-select agent-home-select" data-name="${escapeHtml(a.name)}" data-current="${homeMode}" aria-label="Sandboxed HOME for ${escapeHtml(a.name)}">
           <option value="user_home"${homeMode === 'user_home' ? ' selected' : ''}>User Home</option>
-          <option value="blank_home"${homeMode === 'blank_home' ? ' selected' : ''}>Blank Home</option>
+          <option value="blank_home"${homeMode === 'blank_home' ? ' selected' : ''}${dedicatedLogin ? ' disabled' : ''}>Blank Home</option>
         </select>
       </span>`;
     return `

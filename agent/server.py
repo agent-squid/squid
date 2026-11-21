@@ -62,7 +62,7 @@ from .config import (
     config_revision, config_text, realtime_transport, shore_identity_dir, write_config_text,
 )
 from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harnesses
-from .providers import Provider, _validate_provider, get_provider, public_providers, reload_providers, require_provider
+from .providers import Provider, _validate_provider, get_provider, reload_providers, require_provider
 from .resolve import agent_ref_for_storage, remove_pi_models_store, resolve_agent, split_agent_ref
 from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic, set_process_change_listener
 from .history import list_history, list_history_by_ids, list_history_around
@@ -80,7 +80,7 @@ from .memory import (
     write_topic_memory,
 )
 from .stats_db import (
-    init_db, database_lifetime, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
+    init_db, database_lifetime, get_aggregated_stats, save_quota_delta, get_stats, get_stats_by_topic, get_stats_by_agent,
     get_stats_by_agent_breakdown, get_stats_by_breakdown, get_stats_by_turn, get_stats_filter_options,
     list_stats_filter_presets, create_stats_filter_preset, update_stats_filter_preset,
     delete_stats_filter_preset,
@@ -117,7 +117,7 @@ from .stats_db import (
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
-from . import sandbox_home
+from . import codex_subscription, sandbox_home
 
 BOOT_TIME = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 try:
@@ -324,7 +324,8 @@ def _public_agent_config(agent_config: dict) -> dict:
         harness, provider, backend_ref, resolved = _resolve_agent_runtime(item)
         item.update({
             "harness": harness,
-            "provider": provider,
+            "provider": resolved.provider.id if resolved.provider.dedicated_login else provider,
+            "dedicated_login": resolved.provider.dedicated_login,
             "color": resolved.color,
             "provider_color": resolved.provider.color,
             "provider_label": resolved.provider.label,
@@ -1112,6 +1113,25 @@ async def _prepare_chat_turn(
         harness, provider, backend, resolved_runtime = _resolve_agent_runtime(agent_config)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    codex_binding = None
+    if harness in {"codex", "claudecode"} and not native_shell:
+        revision = codex_subscription.agent_revision(resolved_agent)
+        codex_binding = await asyncio.to_thread(
+            codex_subscription.bind, resolved_runtime.provider, resolved_agent, harness, revision=revision,
+        )
+        if revision != codex_subscription.agent_revision(resolved_agent):
+            return JSONResponse({"error": "Subscription provider changed during preparation. Resubmit the turn."},
+                                status_code=409)
+    if (codex_binding and codex_binding.account == codex_subscription.CLAUDE_UNVERIFIED
+            and source != "human"):
+        return JSONResponse(
+            {"error": "This Claude login supports fresh manual turns only because its credential identity cannot be verified"},
+            status_code=409,
+        )
+    runtime_fingerprint = (
+        codex_subscription.session_fingerprint(resolved_runtime.fingerprint, codex_binding)
+        if codex_binding is not None else resolved_runtime.fingerprint
+    )
     model: Optional[str] = agent_config.get("model") or None
     native_backend_command = _is_backend_native_chat_command(message)
 
@@ -1129,7 +1149,14 @@ async def _prepare_chat_turn(
         stored = get_topic_session(topic, resolved_agent)
         if stored:
             stored_fingerprint = stored.get("runtime_fingerprint")
-            if stored_fingerprint and stored_fingerprint != resolved_runtime.fingerprint:
+            if codex_binding and codex_binding.error:
+                # A temporary probe failure, including an active sign-in,
+                # leaves the existing session available for another request.
+                pass
+            elif (codex_binding and not codex_binding.can_reuse) or (
+                (stored_fingerprint or (codex_binding and codex_binding.dedicated))
+                and stored_fingerprint != runtime_fingerprint
+            ):
                 clear_topic_session(topic, resolved_agent)
                 log.info("cleared session after agent runtime change: topic=%s agent=%s backend=%s", topic, resolved_agent, backend)
             else:
@@ -1265,6 +1292,9 @@ async def _prepare_chat_turn(
             source="shell" if native_shell else source,
             flow_step_id=flow_step_id,
         )
+    if codex_binding is not None and codex_binding.dedicated:
+        from .stats_db import record_codex_provider_home
+        record_codex_provider_home(asst_msg_id, str(codex_binding.home), codex_binding.recorded_account, codex_binding.harness)
     if task_targeted:
         try:
             if task_workspace is not None:
@@ -1359,6 +1389,7 @@ async def _prepare_chat_turn(
         "configured_cwd": agent_cwd,
         "harness": harness,
         "provider": provider,
+        "codex_binding": codex_binding,
         "worktree_setup_elapsed_ms": None,
         "worktree_isolated": False,
         "native_shell": native_shell,
@@ -1466,6 +1497,7 @@ async def stream_response(
     shell_attached_paths: Optional[list[str]] = None,
     shell_topic_memory: Optional[str] = None,
     effort: Optional[str] = None,
+    codex_binding: Optional[codex_subscription.Binding] = None,
 ) -> AsyncGenerator[str, None]:
     meta_payload = {
         "agent": agent,
@@ -1475,6 +1507,7 @@ async def stream_response(
         "msg_id": asst_msg_id,
         "adhoc": adhoc,
         "effort": effort,
+        **({"dedicated_codex": codex_binding.dedicated} if codex_binding else {}),
         "kind": "shell_result" if native_shell else "assistant",
         **({"shell_timeout": NATIVE_SHELL_TIMEOUT} if native_shell else {}),
     }
@@ -1505,7 +1538,7 @@ async def stream_response(
         native_shell=native_shell,
         shell_pinned_contents=shell_pinned_contents,
         shell_attached_paths=shell_attached_paths,
-        shell_topic_memory=shell_topic_memory,
+        shell_topic_memory=shell_topic_memory, codex_binding=codex_binding,
     )
 
     raw = ""
@@ -1683,7 +1716,8 @@ async def chat(req: ChatRequest, request: Request = None):
         stream_response(
             prepared["effective_message"], prepared["topic"], prepared["agent"], prepared["backend"], prepared["model"], prepared["cwd"],
             prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
-            effort=prepared.get("effort"), resume_session_id=prepared["resume_session_id"],
+            effort=prepared.get("effort"), codex_binding=prepared.get("codex_binding"),
+            resume_session_id=prepared["resume_session_id"],
             adhoc=prepared["adhoc"],
             lookback=prepared["lookback"],
             code_roots=prepared["code_roots"],
@@ -1855,6 +1889,7 @@ class AuthSessionRequest(BaseModel):
     rows: int = Field(default=10, ge=5, le=200)
     mode: Literal[AUTH_SESSION_MODES] = "login"
     model: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class AuthSessionInputRequest(BaseModel):
@@ -1881,7 +1916,8 @@ async def auth_session_create(req: AuthSessionRequest, request: Request):
     if error:
         return JSONResponse({"error": error}, status_code=400)
     try:
-        session = await create_session(req.harness, req.cols, req.rows, mode=req.mode, model=req.model)
+        session = await create_session(req.harness, req.cols, req.rows, mode=req.mode, model=req.model,
+                                       **({"provider_id": req.provider} if req.provider is not None else {}))
     except NoLoginCommand as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except AuthSessionError as exc:
@@ -1982,13 +2018,53 @@ def _gauge_authed(gauge_type: str, provider: Provider) -> Optional[bool]:
     return None
 
 
+def _uses_dedicated_gauge(provider: Provider) -> bool:
+    return provider.dedicated_login and (
+        (provider.subscription_harness, provider.gauge.type)
+        in {("codex", "codex"), ("claudecode", "claude")}
+    )
+
+
+def _provider_health(provider: Provider) -> dict:
+    info = provider.public_dict()
+    dedicated_gauge = _uses_dedicated_gauge(provider)
+    if provider.dedicated_login:
+        if not dedicated_gauge:
+            info["gauge"] = {"type": "none"}
+        try:
+            harness = info["subscription_harness"]
+            home = codex_subscription.home_for(provider.id, harness)
+            info["codex_home"] = str(home)
+            account = None
+            if home.is_dir():
+                codex_subscription.ensure_home(provider.id, harness)
+                with codex_subscription.lock(home, login=False):
+                    account = codex_subscription.account_identity(home, harness)
+            info["codex_signed_in"] = bool(account)
+            info["subscription_fresh_only"] = account == codex_subscription.CLAUDE_UNVERIFIED
+        except codex_subscription.ClaudeIdentityUnavailable:
+            info["subscription_needs_verification"] = True
+        except codex_subscription.SubscriptionBusy:
+            info["subscription_busy"] = True
+        except (OSError, ValueError):
+            info["codex_home_unavailable"] = True
+    info["gauge_authed"] = (bool(info.get("codex_signed_in")) if dedicated_gauge
+                            else _gauge_authed(info["gauge"]["type"], provider))
+    return info
+
+
 @app.get("/health")
 async def health():
-    # to_thread: public_providers() now shells out to `ollama list` for any
-    # binary-backed provider, which would otherwise block the event loop.
-    providers = await asyncio.to_thread(public_providers)
-    for provider_id, info in providers.items():
-        info["gauge_authed"] = _gauge_authed(info["gauge"]["type"], require_provider(provider_id))
+    from .providers import PROVIDERS
+
+    # Use one catalog snapshot across the CLI probes, which can outlast a reload.
+    catalog = PROVIDERS.copy()
+    harnesses = list_harnesses()
+    provider_info = await asyncio.gather(*(
+        asyncio.to_thread(_provider_health, provider)
+        for provider in catalog.values()
+    ))
+    providers = dict(zip(catalog, provider_info))
     return JSONResponse({
         "status": "ok",
         "boot_time": BOOT_TIME,
@@ -1998,7 +2074,7 @@ async def health():
             "install_on_restart": UPDATES_INSTALL_ON_RESTART,
             "can_install_on_restart": _pipx_upgrade_unavailable_reason() is None,
         },
-        "harnesses": list_harnesses(),
+        "harnesses": harnesses,
         "providers": providers,
         **get_usage_stats(),
     })
@@ -2672,6 +2748,25 @@ async def update_config_yaml(req: ConfigRequest, request: Request):
         return JSONResponse({"error": "cross-origin configuration writes are not allowed"}, status_code=403)
     try:
         parsed = _validate_config_content(req.content)
+        from .providers import _DEFAULT_PROVIDERS
+        proposed = parsed.get("providers") or _DEFAULT_PROVIDERS
+        affected = []
+        incompatible = []
+        for agent in list_agents():
+            harness, provider_id = split_agent_ref(agent["harness"], agent.get("provider"))
+            if not provider_id:
+                from .harnesses import default_provider_for
+                provider_id = default_provider_for(harness)
+            old = get_provider(provider_id)
+            raw = proposed.get(provider_id)
+            candidate = _validate_provider(provider_id, raw) if raw else None
+            dedicated = bool(candidate and candidate.dedicated_login)
+            if dedicated and (harness != candidate.subscription_harness or agent.get("home_mode") == "blank_home"):
+                incompatible.append(agent["name"])
+            if dedicated != bool(old and old.dedicated_login):
+                affected.append(agent["name"])
+        if incompatible:
+            raise ValueError("Dedicated subscription login is incompatible with: " + ", ".join(incompatible))
         revision = write_config_text(req.content, req.revision)
     except RuntimeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
@@ -2681,6 +2776,9 @@ async def update_config_yaml(req: ConfigRequest, request: Request):
     _cfg.clear()
     _cfg.update(parsed)
     reload_providers()
+    for agent in affected:
+        codex_subscription.invalidate_agent(agent)
+        clear_agent_sessions(agent)
     _LOCALFILE_ROOTS[:] = _localfile_roots_from(parsed)
 
     # Re-sync pi models.json for every pi agent — a provider's base_url
@@ -2722,12 +2820,17 @@ async def create_agent(req: AgentRequest):
     # brand-new agent (no prior row) never counts as a "change" that would
     # try to clear sessions that can't exist yet.
     prior = get_agent(req.name)
+    home_mode = req.home_mode or (prior or {}).get("home_mode", "user_home")
+    if resolved.provider.dedicated_login and home_mode != "user_home":
+        return JSONResponse({"error": "Dedicated subscription login requires User Home"}, status_code=400)
     key_changed = upsert_agent(req.name, harness, provider, req.model, req.cwd, req.effort)
     home_mode_changed = False
     if req.home_mode is not None:
         if prior is not None and prior.get("home_mode", "user_home") != req.home_mode:
             home_mode_changed = True
         set_agent_home_mode(req.name, req.home_mode)
+    if key_changed or home_mode_changed:
+        codex_subscription.invalidate_agent(req.name)
     sessions_cleared = clear_agent_sessions(req.name) if (key_changed or home_mode_changed) else []
     # If this agent used to point pi at a different non-standard provider,
     # drop the now-orphaned models.json entry before syncing the new one.
@@ -2744,6 +2847,8 @@ async def create_agent(req: AgentRequest):
 async def remove_agent(name: str):
     prior = get_agent(name)
     deleted = delete_agent(name)
+    if deleted:
+        codex_subscription.invalidate_agent(name)
     if deleted and prior and prior.get("harness") == "pi":
         remove_pi_models_store(prior["provider"], prior.get("model"))
     return JSONResponse({"ok": deleted})
@@ -2751,13 +2856,21 @@ async def remove_agent(name: str):
 
 @app.put("/config/agents/{name}/home-mode")
 async def set_agent_home_mode_route(name: str, req: AgentHomeModeRequest):
-    if not get_agent(name):
+    agent_config = get_agent(name)
+    if not agent_config:
         return JSONResponse({"error": f"agent not found: {name}"}, status_code=404)
+    from .harnesses import default_provider_for
+    harness, provider = split_agent_ref(agent_config.get("harness"), agent_config.get("provider"))
+    runtime_provider = get_provider(provider or default_provider_for(harness))
+    if runtime_provider and runtime_provider.dedicated_login and req.home_mode != "user_home":
+        return JSONResponse({"error": "Dedicated subscription login requires User Home"}, status_code=400)
     # A resumable session's transcript lives at a $HOME-relative path, so
     # flipping home_mode orphans every session stored for this agent the
     # same way changing harness/model/cwd does -- clear them the same way.
     changed = get_agent_home_mode(name) != req.home_mode
     set_agent_home_mode(name, req.home_mode)
+    if changed:
+        codex_subscription.invalidate_agent(name)
     sessions_cleared = clear_agent_sessions(name) if changed else []
     return JSONResponse({"ok": True, "sessions_cleared": sessions_cleared})
 
@@ -2873,7 +2986,8 @@ async def usage_stats(
 
 @app.post("/stats/quota-delta")
 async def record_quota_delta(req: QuotaDeltaRequest):
-    save_quota_delta(req.session_id, req.before, req.after)
+    if not save_quota_delta(req.session_id, req.before, req.after):
+        return JSONResponse({"error": "Quota unavailable for this subscription provider"}, status_code=409)
     return JSONResponse({"ok": True})
 
 
@@ -2901,7 +3015,8 @@ class AnnotationRequest(BaseModel):
 
 @app.post("/chat/{msg_id}/quota-delta")
 async def record_msg_quota_delta(msg_id: int, req: MsgQuotaSnapshotRequest):
-    update_message_quota_snapshot(msg_id, req.before, req.after)
+    if not update_message_quota_snapshot(msg_id, req.before, req.after):
+        return JSONResponse({"error": "Quota unavailable for this subscription provider"}, status_code=409)
     return JSONResponse({"ok": True})
 
 
@@ -3126,7 +3241,8 @@ async def auto_resolve_worktree_conflict(msg_id: int, req: WorktreeDiscardReques
         async for event in stream_response(
             prepared["effective_message"], prepared["topic"], prepared["agent"], prepared["backend"], prepared["model"], prepared["cwd"],
             prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
-            effort=prepared.get("effort"), resume_session_id=prepared["resume_session_id"],
+            effort=prepared.get("effort"), codex_binding=prepared.get("codex_binding"),
+            resume_session_id=prepared["resume_session_id"],
             adhoc=prepared["adhoc"],
             lookback=prepared["lookback"],
             code_roots=prepared["code_roots"],
@@ -3722,6 +3838,11 @@ async def quota_codex():
     # Legacy fallback tokens must not displace an existing CLI login.
     use_saved = bool(saved_token and (saved_account_id is not None or not codex_auth.get("access_token")))
     token = saved_token if use_saved else codex_auth.get("access_token")
+    account_id = saved_account_id if use_saved else codex_auth.get("account_id")
+    return await _fetch_codex_quota(token, account_id)
+
+
+async def _fetch_codex_quota(token: Optional[str], account_id: Optional[str]) -> JSONResponse:
     if not token:
         return JSONResponse({"error": "credentials not configured"}, status_code=400)
     authorization = _codex_bearer_header(token)
@@ -3737,7 +3858,6 @@ async def quota_codex():
             "originator": "Codex Desktop",
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         }
-        account_id = saved_account_id if use_saved else codex_auth.get("account_id")
         if account_id:
             common_headers["ChatGPT-Account-ID"] = account_id
         async with AsyncSession() as session:
@@ -4006,11 +4126,80 @@ async def quota_antigravity():
             await proc.wait()
 
 
+async def _dedicated_codex_quota(provider: Provider) -> JSONResponse:
+    try:
+        home = codex_subscription.home_for(provider.id)
+        if not home.is_dir():
+            return JSONResponse({"error": "Provider is signed out"}, status_code=401)
+        codex_subscription.ensure_home(provider.id)
+        with codex_subscription.lock(home, login=False):
+            tokens, identity = codex_subscription.codex_quota_credentials(home)
+        if not identity or not tokens:
+            return JSONResponse({"error": "Provider is signed out"}, status_code=401)
+        response = await _fetch_codex_quota(tokens.get("access_token"), tokens.get("account_id"))
+        with codex_subscription.lock(home, login=False):
+            if codex_subscription.account_identity(home) != identity:
+                return JSONResponse({"error": "Provider login changed"}, status_code=401)
+        return response
+    except codex_subscription.SubscriptionBusy:
+        return JSONResponse({"error": "Provider sign-in is in progress"}, status_code=401)
+    except (OSError, ValueError):
+        return JSONResponse({"error": "Provider credentials unavailable"}, status_code=401)
+
+
+async def _fetch_claude_oauth_quota(token: str) -> JSONResponse:
+    import httpx
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://api.anthropic.com/api/oauth/usage",
+                headers={"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
+                follow_redirects=False,
+            )
+        if response.status_code in (401, 403):
+            return JSONResponse({"error": "Claude login could not authorize usage"}, status_code=401)
+        if response.status_code != 200:
+            return JSONResponse({"error": f"Claude usage returned {response.status_code}"}, status_code=502)
+        data = response.json()
+        if isinstance(data, dict):
+            return JSONResponse(data)
+    except (httpx.HTTPError, ValueError):
+        pass
+    return JSONResponse({"error": "Claude usage unavailable"}, status_code=502)
+
+
+def _claude_quota_credentials(home: Path) -> tuple[str | None, str | None]:
+    with codex_subscription.lock(home, login=False):
+        return codex_subscription.claude_quota_credentials(home)
+
+
+async def _dedicated_claude_quota(provider: Provider) -> JSONResponse:
+    try:
+        home = codex_subscription.home_for(provider.id, "claudecode")
+        if not home.is_dir():
+            return JSONResponse({"error": "Provider is signed out"}, status_code=401)
+        codex_subscription.ensure_home(provider.id, "claudecode")
+        token, revision = await asyncio.to_thread(_claude_quota_credentials, home)
+        if not token:
+            return JSONResponse({"error": "Provider is signed out"}, status_code=401)
+        response = await _fetch_claude_oauth_quota(token)
+        _, current_revision = await asyncio.to_thread(_claude_quota_credentials, home)
+        if current_revision != revision:
+            return JSONResponse({"error": "Provider login changed"}, status_code=401)
+        return response
+    except codex_subscription.SubscriptionBusy:
+        return JSONResponse({"error": "Provider sign-in is in progress"}, status_code=401)
+    except (OSError, ValueError):
+        return JSONResponse({"error": "Provider credentials unavailable"}, status_code=401)
+
+
 async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResponse:
     """Return a normalized gauge snapshot for one provider. Quota is a provider
     attribute (ADR-0028) — this never needs to know which harness is using it."""
     gauge = provider.gauge
-    if gauge.type == "none":
+    dedicated_gauge = _uses_dedicated_gauge(provider)
+    if gauge.type == "none" or (provider.dedicated_login and not dedicated_gauge):
         return JSONResponse({"status": "none"})
     if gauge.type == "static":
         return JSONResponse({
@@ -4018,7 +4207,7 @@ async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResp
             "used_percent": None, "reset_at": None,
         })
 
-    if _gauge_authed(gauge.type, provider) is False:
+    if not dedicated_gauge and _gauge_authed(gauge.type, provider) is False:
         label = provider.label or ref
         return JSONResponse({
             "status": "unauthenticated",
@@ -4034,11 +4223,11 @@ async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResp
     if gauge.type in _BALANCE_GAUGES:
         return await _balance_snapshot(provider, ref, _BALANCE_GAUGES[gauge.type])
 
-    raw_response = await {
-        "claude": quota_claude,
-        "codex": quota_codex,
-        "cursor": quota_cursor,
-    }[gauge.type]()
+    if dedicated_gauge:
+        fetch = {"claude": _dedicated_claude_quota, "codex": _dedicated_codex_quota}[gauge.type]
+        raw_response = await fetch(provider)
+    else:
+        raw_response = await {"claude": quota_claude, "codex": quota_codex, "cursor": quota_cursor}[gauge.type]()
     if raw_response.status_code >= 400:
         return raw_response
     data = _json_response_data(raw_response)
@@ -4348,8 +4537,17 @@ async def session_log(agent: str, session_id: str, cwd: str = ""):
     entries end and the next begins -- a raw transcript (jsonl or SQLite) has
     no notion of squid's turn grouping on its own.
     """
-    agent_cfg = get_agent(agent)
-    harness = agent_cfg.get("harness") if agent_cfg else None
+    stats = get_stats(session_id)
+    recorded_home = stats.get("codex_home") if stats and stats.get("agent") == agent else None
+    harness = stats.get("harness") if recorded_home else None
+    if recorded_home is None:
+        from .stats_db import get_codex_provider_home
+        recorded = get_codex_provider_home(agent, session_id)
+        if recorded:
+            recorded_home, harness = recorded
+    if not harness:
+        agent_cfg = get_agent(agent)
+        harness = agent_cfg.get("harness") if agent_cfg else None
     turns = get_session_turn_boundaries(session_id) if session_id else []
     if harness == "opencode":
         home = (
@@ -4364,7 +4562,12 @@ async def session_log(agent: str, session_id: str, cwd: str = ""):
             "source": "opencode-sqlite" if entries else None,
             "turns": turns,
         })
-    path = _find_session_log(harness, session_id, cwd, agent) if harness else None
+    if recorded_home:
+        directory = Path(recorded_home) / ("projects" if harness == "claudecode" else "sessions")
+        pattern = f"{session_id}.jsonl" if harness == "claudecode" else f"*{session_id}.jsonl"
+        path = next(directory.rglob(pattern), None) if directory.is_dir() else None
+    else:
+        path = _find_session_log(harness, session_id, cwd, agent) if harness else None
     return JSONResponse({
         "path": str(path) if path else None,
         "entries": None,
@@ -4874,7 +5077,8 @@ async def _run_realtime_chat(prepared: dict) -> None:
         prepared["effective_message"], prepared["topic"], prepared["agent"],
         prepared["backend"], prepared["model"], prepared["cwd"],
         prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
-        effort=prepared.get("effort"), resume_session_id=prepared["resume_session_id"], adhoc=prepared["adhoc"],
+        effort=prepared.get("effort"), codex_binding=prepared.get("codex_binding"),
+        resume_session_id=prepared["resume_session_id"], adhoc=prepared["adhoc"],
         lookback=prepared["lookback"], code_roots=prepared["code_roots"],
         display_prompt=prepared["display_prompt"], source_cwd=prepared["source_cwd"],
         configured_cwd=prepared["configured_cwd"],
@@ -4982,6 +5186,9 @@ async def _realtime_auth_start(payload: dict, websocket: WebSocket) -> tuple[dic
     rows = payload.get("rows", 10)
     mode = payload.get("mode", "login")
     model = payload.get("model")
+    provider = payload.get("provider")
+    if provider is not None and not isinstance(provider, str):
+        return {"ok": False, "error": "invalid_frame", "detail": "provider must be a string"}, None
 
     if not isinstance(harness, str) or not harness.strip():
         return {"ok": False, "error": "invalid_frame", "detail": "harness is required"}, None
@@ -5002,7 +5209,8 @@ async def _realtime_auth_start(payload: dict, websocket: WebSocket) -> tuple[dic
         return {"ok": False, "error": "invalid_frame", "detail": error}, None
 
     try:
-        session = await create_session(harness, cols, rows, mode=mode, model=model)
+        session = await create_session(harness, cols, rows, mode=mode, model=model,
+                                       **({"provider_id": provider} if provider is not None else {}))
     except NoLoginCommand as exc:
         return {"ok": False, "error": "no_login_command", "detail": str(exc)}, None
     except AuthSessionError as exc:

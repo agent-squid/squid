@@ -143,7 +143,7 @@ async def test_flow_dependencies_do_not_remove_explicit_pins(continuation, tmp_p
     steps = [dict(step_id='origin', assistant_msg_id=parent),
              dict(step_id='target', dependencies=['origin'])]
     with patch('agent.server.get_agent', return_value={'cwd': str(tmp_path)}), \
-         patch('agent.server._resolve_agent_runtime', return_value=('codex', None, 'codex', SimpleNamespace(fingerprint='f'))), \
+         patch('agent.server._resolve_agent_runtime', return_value=('codex', None, 'codex', SimpleNamespace(fingerprint='f', provider=SimpleNamespace(dedicated_login=False)))), \
          patch('agent.server.topic_memory_squid_config', return_value={'code_roots': []}), \
          patch('agent.stats_db.get_flow_steps', return_value=steps):
         prepared = await server._prepare_chat_turn(message='Continue', topic='test', agent='codex',

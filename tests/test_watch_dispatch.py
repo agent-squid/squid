@@ -132,7 +132,22 @@ async def test_dispatch_through_normal_queue_refreshes_and_finishes(setup, monke
         entered.append(kwargs['msg_id'])
         yield 'Completed local inspection'
     monkeypatch.setattr('agent.runners.run_codex', runner)
-    dispatcher = TopicDispatcher()
+    prepare = server._prepare_chat_turn
+    bindings = {}
+
+    async def capture_binding(**kwargs):
+        prepared = await prepare(**kwargs)
+        bindings[prepared['asst_msg_id']] = prepared['codex_binding']
+        return prepared
+
+    monkeypatch.setattr(server, '_prepare_chat_turn', capture_binding)
+
+    class BindingCheckingDispatcher(TopicDispatcher):
+        async def dispatch(self, **kwargs):
+            assert kwargs['codex_binding'] is bindings[kwargs['msg_id']]
+            return await super().dispatch(**kwargs)
+
+    dispatcher = BindingCheckingDispatcher()
     runtime = WatchDispatch(service, dispatcher)
     service.dispatch_runtime = runtime
     run_id = claimed(setup)
@@ -590,7 +605,22 @@ async def test_flow_dispatch_two_agents_and_single_run_budget(setup, monkeypatch
         entered.append(message['agent'])
         yield 'Implementation complete' if message['agent'] == 'watch-agent' else 'Review complete'
     monkeypatch.setattr('agent.runners.run_codex', runner)
-    dispatcher = TopicDispatcher()
+    prepare = server._prepare_chat_turn
+    bindings = {}
+
+    async def capture_binding(**kwargs):
+        prepared = await prepare(**kwargs)
+        bindings[prepared['asst_msg_id']] = prepared['codex_binding']
+        return prepared
+
+    monkeypatch.setattr(server, '_prepare_chat_turn', capture_binding)
+
+    class BindingCheckingDispatcher(TopicDispatcher):
+        async def dispatch(self, **kwargs):
+            assert kwargs['codex_binding'] is bindings[kwargs['msg_id']]
+            return await super().dispatch(**kwargs)
+
+    dispatcher = BindingCheckingDispatcher()
     runtime = WatchDispatch(service, dispatcher)
     service.dispatch_runtime = runtime
     run_id = claimed(setup)

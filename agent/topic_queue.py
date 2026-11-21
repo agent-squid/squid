@@ -5,10 +5,13 @@ from contextlib import asynccontextmanager
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+from .codex_subscription import Binding
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +200,7 @@ class QueueItem:
     shell_topic_memory: Optional[str] = None
     watch_run_id: Optional[str] = None
     refresh_session_at_start: bool = False
+    codex_binding: Optional[Binding] = None
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -473,6 +477,7 @@ class TopicWorker:
         from .resolve import resolve_agent, split_agent_ref
         from .stats_db import (
             get_completed_run_status_raw,
+            get_agent_home_mode,
             get_completed_run_text,
             get_topic_session,
             rebind_pending_assistant_session,
@@ -503,7 +508,11 @@ class TopicWorker:
             await item.out_q.put(None)
             return
 
+        from . import codex_subscription, sandbox_home
+        binding = item.codex_binding
         try:
+            if binding is not None and binding.revision != codex_subscription.agent_revision(item.agent):
+                raise ValueError("Subscription provider changed while queued. Resubmit the turn.")
             harness, provider = split_agent_ref(item.harness or item.backend, item.provider)
             resolved = resolve_agent(harness, provider)
             from .effort import effort_args
@@ -511,6 +520,9 @@ class TopicWorker:
                 harness, resolved.provider.id, item.model, item.effort
             )
         except ValueError as exc:
+            if binding is not None and item.msg_id is not None:
+                rebind_pending_assistant_session(item.msg_id, None)
+                update_assistant_message(item.msg_id, str(exc), None, "error", only_if_pending=True)
             await item.out_q.put({"_error": str(exc)})
             await item.out_q.put(None)
             return
@@ -527,6 +539,44 @@ class TopicWorker:
             await item.out_q.put(None)
             return
 
+        codex_home = None
+        session_codex_home = None
+        runtime_fingerprint = resolved.fingerprint
+        check_codex_binding = harness in {"codex", "claudecode"} and not item.native_shell
+        if check_codex_binding and resolved.provider.dedicated_login and binding is None:
+            await item.out_q.put({"_error": "Dedicated subscription turn is missing its provider binding. Resubmit the turn."})
+            await item.out_q.put(None)
+            return
+        dedicated = bool(binding and binding.dedicated)
+        if check_codex_binding and binding is not None:
+            try:
+                if binding.error:
+                    raise ValueError(binding.error)
+                if item.watch_run_id and binding.account == codex_subscription.CLAUDE_UNVERIFIED:
+                    raise ValueError("This Claude login supports fresh manual turns only")
+                if resolved.provider.dedicated_login != dedicated or binding.harness != harness:
+                    raise ValueError("Subscription provider changed while queued. Resubmit the turn.")
+                mode = get_agent_home_mode(item.agent) if item.agent else "user_home"
+                if dedicated:
+                    if mode != "user_home":
+                        raise ValueError("Dedicated subscription login requires User Home")
+                    codex_home = codex_subscription.ensure_home(resolved.provider.id, harness)
+                    if codex_home != binding.home:
+                        raise ValueError("Subscription store changed while queued. Resubmit the turn.")
+                    runtime_fingerprint = codex_subscription.session_fingerprint(resolved.fingerprint, binding)
+                    session_codex_home = str(codex_home)
+                elif harness == "codex":
+                    effective_home = sandbox_home.sandbox_home_path(item.agent) if mode == "blank_home" else Path.home()
+                    configured_home = backend_env.get("CODEX_HOME", os.environ.get("CODEX_HOME"))
+                    session_codex_home = str(Path(configured_home or effective_home / ".codex").expanduser().resolve())
+            except (ValueError, OSError) as exc:
+                if item.msg_id is not None:
+                    rebind_pending_assistant_session(item.msg_id, None)
+                update_assistant_message(item.msg_id, str(exc), None, "error", only_if_pending=True)
+                await item.out_q.put({"_error": str(exc)})
+                await item.out_q.put(None)
+                return
+
         # Session-dependent state is authoritative when this FIFO item starts,
         # not when its HTTP request entered the queue. A prior queued turn may
         # have established or replaced the session (and its cwd) meanwhile.
@@ -537,7 +587,9 @@ class TopicWorker:
             stored = get_topic_session(item.topic, item.agent)
             if stored:
                 stored_fingerprint = stored.get("runtime_fingerprint")
-                if stored_fingerprint and stored_fingerprint != resolved.fingerprint:
+                if (binding and not binding.can_reuse) or (
+                    (stored_fingerprint or dedicated) and stored_fingerprint != runtime_fingerprint
+                ):
                     clear_topic_session(item.topic, item.agent)
                 else:
                     item.cwd = stored["cwd"]
@@ -670,6 +722,11 @@ class TopicWorker:
             backend_id=resolved.harness, backend_env=backend_env,
             backend_settings=resolved.harness_settings(), backend_args=resolved.args + selected_effort_args,
         )
+        if codex_home is not None:
+            kwargs.update(
+                codex_home=codex_home, codex_account=binding.account,
+                subscription_revision=binding.revision,
+            )
         if item.native_shell:
             kwargs = dict(
                 cwd=effective_cwd, topic=item.topic, agent=item.agent or "",
@@ -758,6 +815,8 @@ class TopicWorker:
             # attempt. Fresh retries get their own source delivery snapshot.
             async def record_launch_tools(tools):
                 nonlocal run_seq
+                if binding is not None and binding.revision != codex_subscription.agent_revision(item.agent):
+                    raise CLIError("Subscription provider changed before launch. Resubmit the turn.")
                 if delivery is not None and item.msg_id is not None:
                     tools = dict(tools)
                     delivery['instructions'] = tools.pop('instructions', []) + delivery['instructions']
@@ -789,12 +848,16 @@ class TopicWorker:
                                            harness=resolved.harness, provider=resolved.provider.id,
                                            model=turn_model,
                                            cwd=display_cwd,
-                                           lookback=item.lookback)
-                                if item.agent and not item.adhoc:
+                                           lookback=item.lookback, codex_home=session_codex_home,
+                                           dedicated_codex=dedicated)
+                                if item.agent and not item.adhoc and (
+                                    binding is None or (binding.can_reuse and binding.revision
+                                    == codex_subscription.agent_revision(item.agent))
+                                ):
                                     set_topic_session(
                                         item.topic, item.agent, session_id,
                                         display_cwd,
-                                        resolved.fingerprint,
+                                        runtime_fingerprint,
                                     )
                                 enriched["session_id"] = session_id
                                 enriched["cwd"] = display_cwd
@@ -867,7 +930,9 @@ class TopicWorker:
                     kwargs.pop("resume_session_id", None)
                     await _stream(effective_prompt, **kwargs)
                 elif item.resume_session_id and "prompt is too long" in exc_str.lower():
-                    if item.agent and not item.adhoc:
+                    if item.agent and not item.adhoc and (
+                        binding is None or binding.revision == codex_subscription.agent_revision(item.agent)
+                    ):
                         clear_topic_session(item.topic, item.agent)
                     status = (
                         f"Session context window exceeded — starting fresh\n"
@@ -884,7 +949,9 @@ class TopicWorker:
                 else:
                     raise
 
-            if raw.strip().lower() == "prompt is too long" and item.agent and not item.adhoc:
+            if raw.strip().lower() == "prompt is too long" and item.agent and not item.adhoc and (
+                binding is None or binding.revision == codex_subscription.agent_revision(item.agent)
+            ):
                 clear_topic_session(item.topic, item.agent)
 
             await _emit_git_diff()
@@ -1023,7 +1090,10 @@ class TopicWorker:
                 # error text alone tells a reconnecting/reloading client
                 # which harness needs the in-app auth-session flow, without
                 # a separate out-of-band signal that a page reload would lose.
-                err_text = f"[[cli-auth-required:{exc.harness_id}]] {err_text}"
+                auth_target = exc.harness_id
+                if dedicated:
+                    auth_target += f":{resolved.provider.id}"
+                err_text = f"[[cli-auth-required:{auth_target}]] {err_text}"
             recovered_content = get_completed_run_text(item.msg_id) if not raw else None
             content = raw or recovered_content or err_text
             try:
@@ -1152,6 +1222,7 @@ class TopicDispatcher:
         shell_attached_paths: Optional[list[str]] = None,
         shell_topic_memory: Optional[str] = None,
         watch_run_id: Optional[str] = None,
+        codex_binding: Optional[Binding] = None,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         from .resolve import split_agent_ref
         resolved_harness, resolved_provider = split_agent_ref(harness or backend, provider)
@@ -1198,6 +1269,16 @@ class TopicDispatcher:
             queue_key = f"{topic}@{agent}" if agent else topic
         worker = self._get_or_create(queue_key, topic)
         self._sweep_worktrees(topic)
+        if resolved_harness in {"codex", "claudecode"} and provider_obj is not None and not native_shell:
+            from . import codex_subscription
+            if codex_binding is None:
+                revision = codex_subscription.agent_revision(agent)
+                codex_binding = await asyncio.to_thread(
+                    codex_subscription.bind, provider_obj, agent, resolved_harness, revision=revision,
+                )
+            if codex_binding.dedicated and msg_id is not None:
+                from .stats_db import record_codex_provider_home
+                record_codex_provider_home(msg_id, str(codex_binding.home), codex_binding.recorded_account, codex_binding.harness)
         item = QueueItem(
             seq=0, topic=topic, agent=agent,
             prompt=prompt, display_prompt=display_prompt, context_history=context_history,
@@ -1214,6 +1295,7 @@ class TopicDispatcher:
             shell_attached_paths=shell_attached_paths,
             shell_topic_memory=shell_topic_memory,
             refresh_session_at_start=True,
+            codex_binding=codex_binding,
             watch_run_id=watch_run_id,
         )
         seq = await worker.enqueue(item)

@@ -81,6 +81,7 @@ class WatchDispatch:
                     'worktree_isolated')
             kwargs = {key: prepared[key] for key in keys}
             kwargs['effort'] = prepared.get('effort')
+            kwargs['codex_binding'] = prepared.get('codex_binding')
             out, _, _ = await self.dispatcher.dispatch(prompt=prepared['effective_message'],
                 msg_id=prepared['asst_msg_id'], watch_run_id=run_id, **kwargs)
             queue_error = False

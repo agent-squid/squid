@@ -806,7 +806,7 @@ def test_native_shell_uses_agent_cwd_without_worktree_setup(tmp_path):
     code_root.mkdir()
 
     with patch("agent.server.get_agent", return_value={"cwd": "/tmp/agent-cwd"}), \
-         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f"))), \
+         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f", provider=SimpleNamespace(dedicated_login=False)))), \
          patch("agent.server.upsert_topic"), \
          patch("agent.server.topic_memory_squid_config", return_value={"code_roots": [str(code_root)]}), \
          patch("agent.server.read_topic_memory", return_value={
@@ -829,7 +829,7 @@ def test_native_shell_uses_agent_cwd_without_worktree_setup(tmp_path):
 
 def test_chat_attachments_enrich_effective_prompt_without_changing_display_prompt():
     with patch("agent.server.get_agent", return_value={"cwd": "/tmp/agent-cwd"}), \
-         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f"))), \
+         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f", provider=SimpleNamespace(dedicated_login=False)))), \
          patch("agent.server.upsert_topic"), \
          patch("agent.server.topic_memory_squid_config", return_value={"code_roots": []}), \
          patch("agent.server.get_context_history", return_value=([], [])), \
@@ -846,7 +846,7 @@ def test_chat_attachments_enrich_effective_prompt_without_changing_display_promp
 
 def test_override_cwd_is_the_prepared_configured_cwd():
     with patch("agent.server.get_agent", return_value={"cwd": "/tmp/agent-cwd"}), \
-         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f"))), \
+         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f", provider=SimpleNamespace(dedicated_login=False)))), \
          patch("agent.server.upsert_topic"), \
          patch("agent.server.topic_memory_squid_config", return_value={"code_roots": ["/repo"]}), \
          patch("agent.server.get_context_history", return_value=([], [])), \
@@ -1319,7 +1319,7 @@ def test_blocked_worktree_turn_persists_recovery_context(tmp_path, monkeypatch):
         return [blocker]
 
     with patch("agent.server.get_agent", return_value={"cwd": str(repo)}), \
-         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f"))), \
+         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f", provider=SimpleNamespace(dedicated_login=False)))), \
          patch("agent.server.get_topic_session", return_value=None), \
          patch("agent.server.topic_memory_squid_config", return_value={"code_roots": [str(repo)]}), \
          patch("agent.server._repo_roots_for_code_roots", fake_repo_roots), \
@@ -3012,3 +3012,92 @@ def test_antigravity_quota_timeout_reaps_process(monkeypatch):
     monkeypatch.setattr(server.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
     assert asyncio.run(server.quota_antigravity()).status_code == 502
     proc.wait.assert_awaited_once()
+
+
+@pytest.mark.parametrize("replace_login", [False, True])
+def test_dedicated_codex_gauge_uses_its_own_login(tmp_path, monkeypatch, replace_login):
+    subscription = server.codex_subscription
+    monkeypatch.setattr(subscription, "ROOT", tmp_path / "provider-homes")
+    provider = Provider(id="cope", dedicated_login=True, gauge=Gauge(type="codex"),
+                        supported_apis=frozenset({"/v1/responses"}))
+
+    async def fetch(token, account):
+        assert (token, account) == ("cope-token", "cope-account")
+        if replace_login:
+            with subscription.lock(home, login=True):
+                subscription.advance_generation(home)
+        return JSONResponse({"rate_limit": {"primary_window": {"used_percent": 12}}})
+
+    fetch_quota = AsyncMock(side_effect=fetch)
+    monkeypatch.setattr(server, "_fetch_codex_quota", fetch_quota)
+    response = asyncio.run(server._quota_snapshot_for_provider(provider, provider.id))
+    assert response.status_code == 401
+    fetch_quota.assert_not_called()
+
+    home = subscription.ensure_home(provider.id)
+    auth = home / "auth.json"
+    auth.touch(mode=0o600)
+    auth.write_text(json.dumps({"tokens": {"access_token": "cope-token", "account_id": "cope-account"}}))
+    health = server._provider_health(provider)
+    assert health["gauge"]["type"] == "codex"
+    assert health["gauge_authed"] is True
+
+    response = asyncio.run(server._quota_snapshot_for_provider(provider, provider.id))
+    fetch_quota.assert_awaited_once()
+    assert response.status_code == (401 if replace_login else 200)
+    if not replace_login:
+        assert json.loads(response.body)["used_percent"] == 12
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("replace_login", [False, True])
+def test_dedicated_claude_gauge_uses_its_own_login(tmp_path, monkeypatch, platform, replace_login):
+    import hashlib
+    from types import SimpleNamespace
+
+    subscription = server.codex_subscription
+    monkeypatch.setattr(subscription, "ROOT", tmp_path.resolve() / "provider-homes")
+    monkeypatch.setattr(subscription, "sys", SimpleNamespace(platform=platform))
+    provider = Provider(id="anthropic_pers", dedicated_login=True, gauge=Gauge(type="claude"),
+                        supported_apis=frozenset({"/v1/messages"}))
+    monkeypatch.setattr(subscription, "account_identity", lambda home, harness: subscription.CLAUDE_UNVERIFIED)
+    credentials = {"claudeAiOauth": {"accessToken": "provider-token"}}
+
+    async def fetch(token):
+        assert token == "provider-token"
+        if replace_login:
+            with subscription.lock(home, login=True):
+                subscription.advance_generation(home)
+        return JSONResponse({"five_hour": {"utilization": 12}, "seven_day": {"utilization": 34}})
+
+    fetch_quota = AsyncMock(side_effect=fetch)
+    monkeypatch.setattr(server, "_fetch_claude_oauth_quota", fetch_quota)
+    monkeypatch.setattr(server, "quota_claude", AsyncMock(side_effect=AssertionError("host quota used")))
+    assert asyncio.run(server._quota_snapshot_for_provider(provider, provider.id)).status_code == 401
+    fetch_quota.assert_not_called()
+
+    home = subscription.ensure_home(provider.id, "claudecode")
+    auth = home / ".credentials.json"
+    auth.touch(mode=0o600)
+    if platform == "darwin":
+        auth.write_text(json.dumps({"claudeAiOauth": {"accessToken": "stale-file-token"}}))
+
+        def keychain_lookup(args, **kwargs):
+            suffix = hashlib.sha256(str(home).encode()).hexdigest()[:8]
+            assert args[-2:] == ["-s", f"Claude Code-credentials-{suffix}"]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(credentials).encode())
+
+        monkeypatch.setattr(subscription, "subprocess", SimpleNamespace(run=keychain_lookup))
+    else:
+        auth.write_text(json.dumps(credentials))
+
+    health = server._provider_health(provider)
+    assert health["gauge"]["type"] == "claude"
+    assert health["gauge_authed"] is True
+    response = asyncio.run(server._quota_snapshot_for_provider(provider, provider.id))
+    fetch_quota.assert_awaited_once()
+    assert response.status_code == (401 if replace_login else 200)
+    if not replace_login:
+        snapshot = json.loads(response.body)
+        assert snapshot["used_percent"] == 12
+        assert snapshot["seven_day"]["used_percent"] == 34

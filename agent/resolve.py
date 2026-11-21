@@ -298,6 +298,7 @@ class ResolvedAgent:
             "provider": self.provider.id,
             "base_url": self.provider.base_url,
             "auth_type": self.provider.auth_type,
+            **({"dedicated_login": True} if self.provider.dedicated_login else {}),
             "api_key": self.provider.api_key,
             "env": self.provider.env,
             "settings": self.provider.settings,
@@ -433,7 +434,11 @@ def resolve_agent(harness_id: str, provider_id: Optional[str] = None,
                   protocol: Optional[str] = None) -> ResolvedAgent:
     require_harness(harness_id)
     provider = require_provider(provider_id or default_provider_for(harness_id))
+    if provider.dedicated_login and harness_id != provider.subscription_harness:
+        raise ValueError(f"Provider {provider.id!r} requires the {provider.subscription_harness} harness")
     resolved_protocol = protocol_for(harness_id, protocol)
+    if provider.dedicated_login and harness_id == "claudecode":
+        resolved_protocol = "oneshot-cli"
     interactive = (
         InteractiveSettings(interactive_idle_timeout_seconds(harness_id))
         if resolved_protocol.startswith("interactive-")
