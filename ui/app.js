@@ -44,8 +44,9 @@ window.scrollTo(0, 0);
 // Android PWA: dvh can be wrong after location.reload(); override with actual visual height
 (function() {
   function setVh() {
-    const h = (window.visualViewport || window).height;
+    const h = window.visualViewport?.height ?? window.innerHeight;
     document.body.style.height = h + 'px';
+    document.body.style.setProperty('--composer-max-height', `${h * 0.34}px`);
   }
   setVh();
   (window.visualViewport || window).addEventListener('resize', setVh);
@@ -4235,8 +4236,8 @@ function showCmdFeedback(text) {
 }
 
 function resizeComposer() {
-  input.style.height = 'auto';
-  input.style.height = `${input.scrollHeight}px`;
+  input.style.height = '';
+  if (input.value) input.style.height = `${input.scrollHeight}px`;
 }
 
 form.addEventListener('submit', async (e) => {
@@ -4643,6 +4644,7 @@ function handleComposerInput({ browseRoutes = false } = {}) {
   }
 }
 
+window.addEventListener('resize', resizeComposer);
 input.addEventListener('input', () => handleComposerInput());
 input.addEventListener('click', () => {
   if ((stickyChip && !editingExpandedSlug) || !/^#[^\s]+@/.test(input.value)) return;

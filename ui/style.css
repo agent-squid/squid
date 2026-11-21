@@ -4618,10 +4618,16 @@ body {
   margin-right: 0.2rem;
 }
 
-#form { display: flex; flex-shrink: 0; gap: 0.5rem; }
+#form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-rows: minmax(0, auto) 40px;
+  min-height: 0;
+  gap: 0.4rem;
+}
 #form.dimmed { opacity: 0.4; pointer-events: none; user-select: none; }
 #input-area {
-  flex: 1;
+  grid-column: 1 / -1;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -4855,6 +4861,9 @@ body {
   padding: 0.35rem 0.25rem;
   resize: none;
   font: inherit;
+  max-height: var(--composer-max-height, 34dvh);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
 }
 button {
   -webkit-appearance: none;
@@ -4881,6 +4890,8 @@ button {
 .btn-ghost:hover:not(:disabled) { color: var(--text-muted); border-color: var(--text-mid); }
 .btn-ghost:disabled { opacity: 0.3; cursor: default; }
 
+#pin-btn { grid-column: 2; }
+#send-btn { grid-column: 3; }
 .send-icon { display: none; }
 
 @media (max-width: 768px) {
@@ -5065,11 +5076,8 @@ button {
   #stats-content .stats-turn-table td:nth-child(4) { width: 3.7rem; }
 
   #form {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 40px;
-    grid-template-rows: 40px 40px;
-    gap: 0.4rem;
-    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr) 44px 44px;
+    grid-template-rows: minmax(0, auto) 44px;
   }
 
   .msg {
@@ -5122,11 +5130,8 @@ button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: 40px;
     padding: 0;
   }
-  #pin-btn { grid-column: 2; grid-row: 1; }
-  #send-btn { grid-column: 2; grid-row: 2; }
 
   .send-label {
     display: none;
@@ -5137,19 +5142,10 @@ button {
   }
 
   #input {
-    max-height: 34dvh;
     min-height: calc(2lh + 0.65rem);
     padding: 0.3rem 0.2rem;
     font-size: 1rem;
     line-height: 1.35;
-  }
-
-  #input-area {
-    grid-column: 1;
-    grid-row: 1 / span 2;
-    align-items: flex-start;
-    min-height: calc(80px + 0.4rem);
-    padding: 0 0.35rem;
   }
 
   .composer-tool-btn {

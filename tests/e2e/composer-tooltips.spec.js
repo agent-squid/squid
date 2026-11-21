@@ -58,3 +58,35 @@ test('dynamic filter tooltip updates with scope after topic chip set', async ({ 
   await expect(page.locator('#chip-search-btn')).toHaveAttribute('title', 'search: /s #squid kw1 kw2…');
   await expect(page.locator('#chip-clear-btn')).toHaveAttribute('title', 'clear context: /clear');
 });
+
+test('mobile composer grows upward and keeps Send and context at the bottom', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 720 });
+  await mockBackend(page);
+  await page.goto('/');
+
+  const input = page.locator('#input');
+  const send = page.locator('#send-btn');
+  const context = page.locator('#pin-btn');
+  const initial = await input.boundingBox();
+  const initialSend = await send.boundingBox();
+  const sendBottom = initialSend.y + initialSend.height;
+
+  await input.fill('A wrapped draft '.repeat(10));
+  const wrapped = await input.boundingBox();
+  expect(wrapped.height).toBeGreaterThan(initial.height);
+  expect(wrapped.y).toBeLessThan(initial.y);
+
+  await input.fill('A line of the draft\n'.repeat(60));
+  await page.setViewportSize({ width: 390, height: 430 });
+  await expect.poll(async () => (await input.boundingBox()).height).toBeLessThanOrEqual(430 * 0.34);
+  const capped = await input.boundingBox();
+  const sendBox = await send.boundingBox();
+  const contextBox = await context.boundingBox();
+  expect(await input.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+  expect(sendBox.y + sendBox.height).toBeCloseTo(sendBottom - 290, 0);
+  expect(contextBox.y).toBe(sendBox.y);
+  expect(capped.y + capped.height).toBeLessThan(sendBox.y);
+
+  await input.fill('');
+  expect((await input.boundingBox()).height).toBe(initial.height);
+});
