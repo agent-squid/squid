@@ -15380,8 +15380,14 @@ function invalidateTopicsCache() { _topicsCache = null; }
 
 async function _acTopics() {
   if (_topicsCache) return _topicsCache;
-  try { _topicsCache = await (await fetch('/topics')).json(); } catch { _topicsCache = []; }
-  return _topicsCache;
+  try {
+    const response = await fetch('/topics');
+    if (response.ok) {
+      const topics = await response.json();
+      if (Array.isArray(topics)) _topicsCache = topics;
+    }
+  } catch { /* Leave the cache empty so a later lookup can retry. */ }
+  return _topicsCache || [];
 }
 
 async function _acAgents() {
@@ -15464,11 +15470,11 @@ function _acHighlight() {
   if (acSel >= 0) acEl.querySelector(`.ac-item[data-i="${acSel}"]`)?.scrollIntoView({ block: 'nearest' });
 }
 
-function _acRender(items, title = 'Suggestions', historyStart = -1) {
+function _acRender(items, title = 'Suggestions') {
   if (!items.length) { hideAutocomplete(); return; }
   acItems = items; acSel = 0;
   const rows = items.map((item, i) =>
-    `<div class="ac-item" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
+    `<div class="ac-item${item.dividerAbove ? ' ac-item-divider' : ''}" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
     `<div class="ac-row${item.rowClass ? ` ${item.rowClass}` : ''}">` +
     (item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="Switch to this route">${item.routeHtml}${item.routeSwitchIcon === false ? '' : '<span class="ac-route-switch-icon" aria-hidden="true"></span>'}</button> ` : '') +
     `<span class="ac-label${item.labelClass ? ` ${item.labelClass}` : ''}">${item.label}</span>` +
@@ -15477,8 +15483,7 @@ function _acRender(items, title = 'Suggestions', historyStart = -1) {
     (item.deleteTopic ? `<button class="ac-del-btn" data-topic="${item.deleteTopic}" type="button" title="Delete #${item.deleteTopic} sessions">✕</button>` : '') +
     (item.deletePromptEntry != null ? `<button class="ac-del-btn ac-del-prompt-btn" data-i="${i}" type="button" title="Remove from history">✕</button>` : '') +
     `</div>` +
-    `</div>` +
-    (i === historyStart ? '<div class="ac-history-heading">Route history</div>' : '')
+    `</div>`
   ).reverse().join('');
   acEl.innerHTML =
     `<div class="ac-list">${rows}</div>` +
@@ -15506,7 +15511,8 @@ function _acRender(items, title = 'Suggestions', historyStart = -1) {
         }
         return;
       }
-      e.preventDefault(); _acSelect(Number(el.dataset.i));
+      e.preventDefault();
+      _acSelect(Number(el.dataset.i), { fromPointer: true });
     })
   );
   acEl.querySelectorAll('.ac-del-btn:not(.ac-del-prompt-btn)').forEach(btn =>
@@ -15551,9 +15557,15 @@ function _acRender(items, title = 'Suggestions', historyStart = -1) {
   });
 }
 
-function _acSelect(idx) {
+function _acSelect(idx, { fromPointer = false } = {}) {
   if (idx < 0 || idx >= acItems.length) return;
   const item = acItems[idx];
+  if (fromPointer && item.browseRouteFrom === input.value) {
+    browseCompletedRoute = true;
+    input.focus();
+    updateAutocomplete();
+    return;
+  }
   hideAutocomplete();
   if (item.execute) {
     input.value = item.insert;
@@ -15991,25 +16003,23 @@ async function updateAutocomplete() {
     if (currentHistory || currentAgent) {
       const agent = currentHistory?.agent || currentAgent.name;
       const backend = backendByAgent.get(agent) || null;
-      const freshSuffix = adhocSuffix || '!';
-      const routeOption = (suffix, lastPrompt, meta) => ({
-        label: _acRouteLabel(topic, agent + suffix, backend),
-        insert: `#${topic}@${agent}${suffix}`,
-        sub: _acLastPrompt(lastPrompt),
-        meta,
-      });
-      items.push(routeOption(freshSuffix, currentHistory?.last_adhoc_prompt, 'adhoc'));
-      if (!isDefault) items.push(routeOption('', currentHistory?.last_prompt));
-      const historyStart = items.length;
-      const currentRoutes = new Set(items.map(item => normalizePromptHistoryRoute(item.insert).toLowerCase()));
-      const otherTopics = topics.filter(t => {
-        const route = `#${t.name}${t.agent ? '@' + t.agent : ''}${t.sticky_adhoc ? '!' : ''}`;
-        return !currentRoutes.has(route.toLowerCase());
-      });
+      const otherTopics = topics.filter(t =>
+        t.name.toLowerCase() !== topic.toLowerCase() || t.agent?.toLowerCase() !== prefix);
+      const switchToAdhoc = !preserveAdhocSuffix;
+      if (switchToAdhoc || !isDefault) {
+        const suffix = switchToAdhoc ? '!' : '';
+        items.push({
+          label: _acRouteLabel(topic, agent + suffix, backend),
+          insert: `#${topic}@${agent}${suffix}`,
+          sub: _acLastPrompt(switchToAdhoc ? currentHistory?.last_adhoc_prompt : currentHistory?.last_prompt),
+          meta: switchToAdhoc ? 'adhoc' : 'session',
+          dividerAbove: otherTopics.length > 0,
+        });
+      }
       items.push(...topicAutocompleteItems(otherTopics, replacingSlug));
       _acRender(items.map(item => ({
         ...item, replaceSlug: replacingSlug, deleteTopic: null, collapseSlug: true, highlightOnly: true,
-      })), 'Routes', historyStart);
+      })), 'Routes');
       return;
     }
     // Used agents — with last prompt
@@ -16065,6 +16075,10 @@ async function updateAutocomplete() {
       });
     }
 
+    const typedRoute = slugVal.toLowerCase();
+    for (const item of items) {
+      if (item.insert.toLowerCase() === typedRoute) item.browseRouteFrom = val;
+    }
     appendMatchingRouteHistoryItems(items, slugVal);
     _acRender(items.slice(0, 10), 'Routes');
   } else if (editingExpandedSlug) {
