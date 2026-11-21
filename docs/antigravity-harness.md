@@ -11,20 +11,21 @@ put `agy` on the server's PATH, and complete native login in an interactive
 `agy` session. Restart Squid to refresh CLI detection. Browser login-session
 integration and isolated credential-home support are not implemented for agy.
 
-The native provider and harness are available automatically, including with an
-older explicit `providers:` section. An explicit `antigravity` entry overrides
-the built-in provider. No installed user's configuration is rewritten. The
-following entries are optional customization examples:
+The example configuration includes the native harness and its `google`
+provider. Installations with an explicit provider catalog need a provider
+supporting `/native/antigravity`. Add the entries below if the catalog lacks
+one. Installations that already use an `antigravity` provider ID can keep
+that ID and use it as the harness default.
 
 ```yaml
 harnesses:
   antigravity:
     protocol: {type: oneshot-cli}
-    default_provider: antigravity
+    default_provider: google
     supported_apis: [/native/antigravity]
 providers:
-  antigravity:
-    label: agy
+  google:
+    label: Google
     color: "#4285F4"
     auth: {type: subscription}
     gauge: antigravity
@@ -34,9 +35,9 @@ providers:
 Merge these entries with existing mappings. Select this harness and provider
 when creating an agent. Model names are freeform; list available choices with
 `agy models`, or leave the model empty to use agy's default. Fresh database
-initialization seeds an `agy` agent when the CLI is detected, without
-replacing an existing row. The display name is `agy`; internal harness/provider
-IDs stay `antigravity` for configuration compatibility. Existing `@antigravity`
+initialization seeds an `agy` agent when the CLI and a compatible default
+provider are available, preserving existing rows. The harness display name is
+`Antigravity` and its ID is `antigravity`. Existing `@antigravity`
 agents and history remain available; use `@agy` for the shorter route.
 
 The runner forwards provider args and environment, uses an explicit conversation

@@ -136,7 +136,7 @@ harnesses:
 
   antigravity:
     protocol: {type: oneshot-cli}
-    default_provider: antigravity
+    default_provider: google
     supported_apis: [/native/antigravity]
 
   cursor:
@@ -168,7 +168,7 @@ harnesses:
 # (freeform entry always works too — this list is never server-validated).
 providers:
   # Native agy login; models come from `agy models` or its configured default.
-  antigravity:
+  google:
     label: Google
     color: "#4285F4"
     auth: {type: subscription}

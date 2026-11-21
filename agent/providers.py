@@ -376,12 +376,7 @@ def _configured_providers() -> dict[str, Any]:
     if configured is not None:
         if not isinstance(configured, dict) or not configured:
             raise ValueError("providers must be a non-empty mapping")
-        # Existing installations have an explicit provider catalog that predates
-        # agy. Its native harness can already be seeded, so keep its zero-config
-        # provider resolvable without rewriting the user's YAML or overrides.
-        providers = dict(configured)
-        providers.setdefault("antigravity", dict(_DEFAULT_PROVIDERS["antigravity"]))
-        return providers
+        return dict(configured)
     return {name: dict(value) for name, value in _DEFAULT_PROVIDERS.items()}
 
 

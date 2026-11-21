@@ -148,16 +148,22 @@ def _claude_file_revision(home: Path) -> str | None:
     return "claude-file:" + hashlib.sha256(json.dumps(keys).encode()).hexdigest()
 
 
-def _claude_account(home: Path, *, allow_unidentified: bool = False) -> str | None:
-    from .config import CLAUDE_PATH
-
-    if not CLAUDE_PATH:
-        raise ValueError("Claude Code CLI not found in PATH")
+def _check_claude_profile(home: Path) -> None:
     if os.path.lexists(home / ".no-console-profile"):
         raise ValueError("Claude subscription store has an unexpected Console profile directory")
     settings = home / ".claude.json"
     if settings.is_symlink() or (settings.exists() and (not settings.is_file() or settings.stat().st_nlink != 1)):
         raise ValueError("Claude account metadata must be local to the provider")
+
+
+def _claude_account(
+    home: Path, *, allow_unidentified: bool = False, identify_managed: bool = False,
+) -> str | None:
+    from .config import CLAUDE_PATH
+
+    if not CLAUDE_PATH:
+        raise ValueError("Claude Code CLI not found in PATH")
+    _check_claude_profile(home)
     credential_before = _claude_file_revision(home)
     env = os.environ.copy()
     for key, value in environment(home, "claudecode").items():
@@ -189,6 +195,8 @@ def _claude_account(home: Path, *, allow_unidentified: bool = False) -> str | No
         raise ClaudeIdentityUnavailable("Claude did not report an account and organization")
     if credential_before != _claude_file_revision(home):
         raise ClaudeIdentityUnavailable("Claude credentials changed during the status check")
+    if identify_managed:
+        return hashlib.sha256(json.dumps([email.strip().casefold(), organization.strip()]).encode()).hexdigest()
     return credential_before or CLAUDE_UNVERIFIED
 
 
@@ -219,35 +227,89 @@ def _codex_account(tokens: dict) -> str | None:
     return hashlib.sha256(binding.encode()).hexdigest()
 
 
+def _read_generation(path: Path) -> str | None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, encoding="ascii") as marker:
+        info = os.fstat(marker.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077 or info.st_nlink != 1):
+            raise ValueError("Subscription login generation must be a private regular file")
+        return uuid.UUID(hex=marker.read(33)).hex
+
+
 def _account_generation(home: Path, account: str | None) -> str | None:
     if not account_verified(account):
         return account
-    try:
-        descriptor = os.open(home / ".squid-generation", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
+    generation = _read_generation(home / ".squid-generation")
+    if generation is None:
         # Keep sessions and grants made before the first explicit replacement.
         return account
-    with os.fdopen(descriptor, encoding="ascii") as marker:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError("Subscription login generation must be a regular file")
-        generation = uuid.UUID(hex=marker.read(33)).hex
     return hashlib.sha256(f"{account}:{generation}".encode()).hexdigest()
 
 
-def advance_generation(home: Path) -> None:
-    """Advance the persistent login generation while holding the sign-in lock."""
-    with tempfile.NamedTemporaryFile(dir=home, mode="w", encoding="ascii", delete=False) as marker:
+def _write_private_marker(path: Path, contents: str) -> None:
+    with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="ascii", delete=False) as marker:
         temporary = Path(marker.name)
         try:
-            marker.write(uuid.uuid4().hex)
+            marker.write(contents)
             marker.close()
-            temporary.replace(home / ".squid-generation")
+            temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
 
 
+def advance_generation(home: Path) -> None:
+    """Advance the persistent login generation while holding the sign-in lock."""
+    _write_private_marker(home / ".squid-generation", uuid.uuid4().hex)
+
+
+_CLAUDE_MANAGED_GENERATION = ".squid-claude-managed-generation"
+
+
+def uses_managed_claude_login(harness: str) -> bool:
+    return harness == "claudecode" and sys.platform == "darwin"
+
+
+def clear_managed_claude_login(home: Path) -> None:
+    """Revoke the previous login before starting a replacement under the login lock."""
+    (home / _CLAUDE_MANAGED_GENERATION).unlink(missing_ok=True)
+
+
+def complete_managed_claude_login(home: Path) -> bool:
+    """Verify native auth and record a new generation under the login lock."""
+    identity = _claude_account(home, identify_managed=True)
+    if not identity:
+        return False
+    _write_private_marker(home / _CLAUDE_MANAGED_GENERATION, json.dumps({
+        "generation": uuid.uuid4().hex, "identity": identity,
+    }))
+    return True
+
+
+def _managed_claude_account(home: Path, *, identity: str | None = None) -> str | None:
+    _check_claude_profile(home)
+    marker = _read_private_credentials(home / _CLAUDE_MANAGED_GENERATION, "Claude login marker")
+    if not isinstance(marker, dict):
+        return None
+    generation, expected_identity = marker.get("generation"), marker.get("identity")
+    if not isinstance(generation, str) or not isinstance(expected_identity, str):
+        raise ValueError("Invalid Claude login marker")
+    generation = uuid.UUID(hex=generation).hex
+    if identity is not None and identity != expected_identity:
+        raise ValueError("Claude account changed outside Squid. Sign in again to this provider.")
+    return f"claude-managed:{generation}"
+
+
 def account_identity(home: Path, harness: str = "codex", *, allow_unidentified: bool = False) -> str | None:
     """Read a credential binding or a signed-in marker without exposing secrets."""
+    if uses_managed_claude_login(harness):
+        identity = _claude_account(home, allow_unidentified=allow_unidentified, identify_managed=True)
+        if identity is None:
+            return None
+        return _managed_claude_account(home, identity=identity) or CLAUDE_UNVERIFIED
     account = (_claude_account(home, allow_unidentified=allow_unidentified)
                if harness == "claudecode" else _codex_account(_codex_tokens(home)))
     return _account_generation(home, account)
@@ -347,8 +409,11 @@ def bind(provider: Provider, agent: str | None, harness: str = "codex", *, revis
             # Rechecking an existing grant can happen in a SQLite write
             # transaction. Compare the already-verified credential on disk
             # here. The runner probes native status again before execution.
-            account = (_account_generation(home, _claude_file_revision(home))
-                       if harness == "claudecode" and not verify_claude else account_identity(home, harness))
+            if harness == "claudecode" and not verify_claude:
+                account = (_managed_claude_account(home) if uses_managed_claude_login(harness)
+                           else _account_generation(home, _claude_file_revision(home)))
+            else:
+                account = account_identity(home, harness)
         return Binding(True, revision, home, account, harness=harness)
     except (OSError, ValueError) as exc:
         directory = ".claude" if harness == "claudecode" else ".codex"

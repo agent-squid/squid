@@ -547,7 +547,7 @@ def test_claude_partial_log_uses_recorded_provider_after_agent_removal(isolated)
 def test_claude_provider_sign_in_and_resume_share_store(isolated, monkeypatch, platform):
     from types import SimpleNamespace
 
-    from agent import config, watch_runs
+    from agent import config
 
     monkeypatch.setattr(subscription, "sys", SimpleNamespace(platform=platform))
 
@@ -571,10 +571,13 @@ if "login" in sys.argv:
     credentials.write_text(json.dumps({"claudeAiOauth": {"accessToken": "fixture"}}))
     credentials.chmod(0o600)
 elif "status" in sys.argv:
+    with (home / "status-count").open("a") as probes:
+        probes.write("probe" + chr(10))
     print(json.dumps({
         "configDirectory": str(home), "apiProvider": "firstParty", "forcedLoginMethod": "claudeai",
         "loggedIn": profile.exists(), "authMethod": "claude.ai" if profile.exists() else "none",
-        "email": "personal@example.invalid", "orgId": "fixture-org",
+        "email": profile.read_text() or "personal@example.invalid" if profile.exists() else None,
+        "orgId": "fixture-org",
     }))
     sys.exit(0 if profile.exists() else 1)
 else:
@@ -616,16 +619,32 @@ else:
             session = await auth_sessions.create_session("claudecode", 100, 10, provider_id="clape")
             await asyncio.wait_for(session._closed.wait(), timeout=5)
             assert session.returncode == 0
+            probe_log = home / "status-count"
+            probes_after_login = probe_log.read_text()
+            first_binding = subscription.bind(provider, "personal", "claudecode", verify_claude=False)
+            assert first_binding.can_reuse
+            assert probe_log.read_text() == probes_after_login
+
             results, _ = await turn()
             assert "new" in results
             results, _ = await turn()
-            if platform == "linux":
-                assert "resumed" in results
-            else:
+            assert "resumed" in results
+            if platform == "darwin":
+                (home / "fixture-login").write_text("replacement@example.invalid")
+                with pytest.raises(ValueError, match="Claude account changed outside Squid"):
+                    subscription.account_identity(home, "claudecode")
+                results, _ = await turn()
+                assert any("Claude account changed outside Squid" in event.get("_error", "")
+                           for event in results if isinstance(event, dict))
+                probes_before_replacement = probe_log.read_text()
+                replacement = await auth_sessions.create_session("claudecode", 100, 10, provider_id="clape")
+                await asyncio.wait_for(replacement._closed.wait(), timeout=5)
+                assert replacement.returncode == 0
+                assert probe_log.read_text() == probes_before_replacement + "probe\n"
+                binding = subscription.bind(provider, "personal", "claudecode", verify_claude=False)
+                assert binding.can_reuse and binding.account != first_binding.account
+                results, _ = await turn()
                 assert "new" in results
-                assert stats_db.get_topic_session("test", "personal") is None
-                with pytest.raises(ValueError, match="verifiable credential"):
-                    await asyncio.to_thread(watch_runs.agent_revision, "personal", "test")
         finally:
             await worker.q.put(None)
 

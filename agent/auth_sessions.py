@@ -308,15 +308,20 @@ async def create_session(
                 argv[1:1] = codex_subscription.config_args(home, target_id)
                 _apply_env_overrides(env, codex_subscription.environment(home, target_id))
                 credential_lock = codex_subscription.lock(home, login=True)
-                credential_account = await settled_thread_call(
-                    codex_subscription.account_identity, home, target_id, allow_unidentified=True,
-                )
+                managed_claude = codex_subscription.uses_managed_claude_login(target_id)
+                if not managed_claude:
+                    credential_account = await settled_thread_call(
+                        codex_subscription.account_identity, home, target_id, allow_unidentified=True,
+                    )
                 current_provider = get_provider(provider_id)
                 if (
                     current_provider is None or not current_provider.dedicated_login
                     or current_provider.subscription_harness != target_id
                 ):
                     raise ValueError("Subscription provider changed before sign-in. Reopen sign-in.")
+                if managed_claude:
+                    codex_subscription.clear_managed_claude_login(home)
+                    codex_subscription.invalidate_provider(provider_id)
             except asyncio.CancelledError:
                 if credential_lock is not None:
                     credential_lock.close()
@@ -436,20 +441,27 @@ async def _finalize(session: AuthSession) -> None:
     if session.credential_lock is not None:
         from . import codex_subscription
         try:
-            home = None
-            try:
-                home = codex_subscription.ensure_home(session.credential_provider, session.harness_id)
-                account = await settled_thread_call(codex_subscription.account_identity, home, session.harness_id)
-            except (ValueError, OSError):
-                account = None
-                returncode = -1
-            if account != session.credential_account or not codex_subscription.account_verified(account):
-                if home is not None:
-                    codex_subscription.advance_generation(home)
-                codex_subscription.invalidate_provider(session.credential_provider)
-            if account is None and returncode == 0:
-                session.broadcast(b"\r\nNo verified subscription login was saved for this provider.\r\n")
-                returncode = -1
+            if codex_subscription.uses_managed_claude_login(session.harness_id):
+                if returncode == 0:
+                    home = codex_subscription.ensure_home(session.credential_provider, session.harness_id)
+                    if not await settled_thread_call(codex_subscription.complete_managed_claude_login, home):
+                        session.broadcast(b"\r\nNo verified subscription login was saved for this provider.\r\n")
+                        returncode = -1
+            else:
+                home = None
+                try:
+                    home = codex_subscription.ensure_home(session.credential_provider, session.harness_id)
+                    account = await settled_thread_call(codex_subscription.account_identity, home, session.harness_id)
+                except (ValueError, OSError):
+                    account = None
+                    returncode = -1
+                if account != session.credential_account or not codex_subscription.account_verified(account):
+                    if home is not None:
+                        codex_subscription.advance_generation(home)
+                    codex_subscription.invalidate_provider(session.credential_provider)
+                if account is None and returncode == 0:
+                    session.broadcast(b"\r\nNo verified subscription login was saved for this provider.\r\n")
+                    returncode = -1
         except Exception:
             log.exception("Could not finalize subscription provider sign-in")
             returncode = -1

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .config import SQUID_HOME
-from .harnesses import SUPPORTED_HARNESSES, is_installed
+from .harnesses import SUPPORTED_HARNESSES, default_provider_for, is_installed
 from .resolve import agent_ref_for_storage, split_agent_ref
 
 # Fresh-install seed models, keyed by harness — only where the harness's CLI
@@ -26,7 +26,6 @@ _SEED_DEFAULT_MODEL_BY_HARNESS: dict[str, str] = {
     "pi": "deepseek-ai/deepseek-v4-pro",
 }
 _SEED_DEFAULT_PROVIDER_BY_HARNESS: dict[str, str] = {
-    "antigravity": "antigravity",
     "opencode": "opencode",
     "pi": "nvidia",
 }
@@ -1198,6 +1197,12 @@ def init_db() -> None:
             if harness != "claudecode" and is_installed(harness):
                 name = "agy" if harness == "antigravity" else harness
                 provider = _SEED_DEFAULT_PROVIDER_BY_HARNESS.get(harness)
+                if harness == "antigravity":
+                    from .providers import get_provider
+                    provider = default_provider_for(harness)
+                    configured_provider = get_provider(provider)
+                    if configured_provider is None or "/native/antigravity" not in configured_provider.supported_apis:
+                        continue
                 model = _SEED_DEFAULT_MODEL_BY_HARNESS.get(harness)
                 if has_legacy_backend:
                     conn.execute(

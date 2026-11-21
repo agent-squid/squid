@@ -1491,7 +1491,14 @@ def test_clear_command_rejects_unknown_agent():
     clear_session.assert_not_called()
 
 
-def test_health_returns_harnesses_and_providers_without_backend_aliases():
+def test_health_returns_harnesses_and_providers_without_backend_aliases(monkeypatch):
+    from agent.harnesses import HARNESS_DEFAULT_PROVIDER
+
+    monkeypatch.setitem(HARNESS_DEFAULT_PROVIDER, "claudecode", "anthropic")
+    monkeypatch.setitem(
+        providers_mod.PROVIDERS, "anthropic",
+        providers_mod._validate_provider("anthropic", providers_mod._DEFAULT_PROVIDERS["anthropic"]),
+    )
     client = TestClient(server.app)
     response = client.get("/health")
 

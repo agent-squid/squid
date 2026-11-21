@@ -71,7 +71,7 @@ _DEFAULT_HARNESS_LABELS: dict[str, str] = {
     "cursor": "Cursor",
     "opencode": "OpenCode",
     "pi": "Pi",
-    "antigravity": "agy",
+    "antigravity": "Antigravity",
     "echo": "Squid Echo",
 }
 

@@ -139,7 +139,6 @@ def test_missing_cli(monkeypatch):
 def test_harness_registration_and_protocol_restrictions(monkeypatch):
     monkeypatch.setitem(harnesses._HARNESS_PATHS, 'antigravity', '/test/agy')
     assert harnesses.is_installed('antigravity')
-    assert harnesses.default_provider_for('antigravity') == 'antigravity'
     assert harnesses.protocol_for('antigravity', None) == 'oneshot-cli'
     with pytest.raises(ValueError, match='does not support'):
         harnesses.protocol_for('antigravity', 'interactive-cli')
@@ -155,10 +154,12 @@ def test_installed_harness_seed_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, '_DB_PATH', tmp_path / 'squid.db')
     monkeypatch.setattr(stats_db, 'SUPPORTED_HARNESSES', frozenset({'antigravity'}))
     monkeypatch.setattr(stats_db, 'is_installed', lambda harness: True)
+    monkeypatch.setattr(stats_db, 'default_provider_for', lambda harness: 'google')
+    monkeypatch.setattr('agent.providers.get_provider', lambda provider: SimpleNamespace(supported_apis={'/native/antigravity'}) if provider == 'google' else None)
     stats_db.init_db()
     with sqlite3.connect(tmp_path / 'squid.db') as conn:
         assert conn.execute("SELECT name,harness,provider,model FROM agents WHERE name='agy'").fetchall() == [
-            ('agy', 'antigravity', 'antigravity', None)]
+            ('agy', 'antigravity', 'google', None)]
         conn.execute("UPDATE agents SET model='chosen-model' WHERE name='agy'")
     stats_db.init_db()
     with sqlite3.connect(tmp_path / 'squid.db') as conn:
@@ -166,7 +167,7 @@ def test_installed_harness_seed_is_idempotent(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('setup', ['fresh', 'legacy', 'custom'])
-def test_fresh_and_existing_configs_expose_native_provider_and_harness(tmp_path, setup):
+def test_native_provider_respects_explicit_catalog(tmp_path, setup):
     if setup != 'fresh':
         import yaml
         config = {
@@ -179,7 +180,8 @@ def test_fresh_and_existing_configs_expose_native_provider_and_harness(tmp_path,
             }},
         }
         if setup == 'custom':
-            config['providers']['antigravity'] = {
+            config['harnesses'] = {'antigravity': {'default_provider': 'google', 'label': 'Custom Harness'}}
+            config['providers']['google'] = {
                 'label': 'Custom AGY', 'color': '#123456',
                 'auth': {'type': 'subscription'}, 'gauge': {'type': 'static', 'text': 'Custom'},
                 'supported_apis': ['/native/antigravity'],
@@ -192,8 +194,9 @@ import json
 from agent.harnesses import list_harnesses
 from agent.providers import public_providers
 from agent.resolve import resolve_agent
-print(json.dumps({'harnesses': list_harnesses(), 'providers': public_providers(),
-                  'resolved': resolve_agent('antigravity').public_dict()}))
+providers = public_providers()
+resolved = resolve_agent('antigravity').public_dict() if {'google', 'antigravity'} & providers.keys() else None
+print(json.dumps({'harnesses': list_harnesses(), 'providers': providers, 'resolved': resolved}))
 '''
     env = {k: v for k, v in os.environ.items() if not k.startswith('SQUID_')}
     env.update(HOME=str(tmp_path), USER='agy-harness-test', LOGNAME='agy-harness-test')
@@ -201,18 +204,25 @@ print(json.dumps({'harnesses': list_harnesses(), 'providers': public_providers()
                           capture_output=True, text=True, check=True, timeout=20)
     data = json.loads(proc.stdout)
     harness = next(h for h in data['harnesses'] if h['id'] == 'antigravity')
-    provider = data['providers']['antigravity']
-    assert harness['compatible_providers'] == ['antigravity']
+    if setup == 'legacy':
+        assert set(data['providers']) == {'anthropic'}
+        assert harness['compatible_providers'] == []
+        return
+    provider_id = 'google'
+    provider = data['providers'][provider_id]
+    assert harness['default_provider'] == provider_id
+    assert harness['compatible_providers'] == [provider_id]
     assert harness['supported_apis'] == ['/native/antigravity']
     assert provider['gauge']['type'] == ('static' if setup == 'custom' else 'antigravity')
     assert data['resolved']['protocol'] == 'oneshot-cli'
     if setup != 'fresh':
-        assert set(data['providers']) == {'anthropic', 'antigravity'}
+        assert set(data['providers']) == {'anthropic', provider_id}
         assert data['providers']['anthropic']['label'] == 'Existing Claude'
     if setup != 'custom':
         assert provider['label'] == 'Google'
-        assert harness['label'] == 'agy'
+        assert harness['label'] == 'Antigravity'
     if setup == 'custom':
+        assert harness['label'] == 'Custom Harness'
         assert provider['label'] == 'Custom AGY'
         assert provider['color'] == '#123456'
         assert provider['gauge']['text'] == 'Custom'

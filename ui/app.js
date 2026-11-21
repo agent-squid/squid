@@ -17599,6 +17599,7 @@ function _currentContextTarget() {
     agent = _topicsCache.find(t => t.name === topic)?.agent || null;
   } else if (!agent) {
     _acTopics().then(() => {
+      if (!_topicsCache) return;
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
       updateInContextMarkers();
@@ -17964,7 +17965,9 @@ function _pinStatus(item) {
       chipAgent = _topicsCache.find(t => t.name === chipTopic)?.agent || null;
     } else {
       // Cache cold — load async and re-render panel when ready
-      _acTopics().then(() => { if (pinPanel.classList.contains('open')) renderPinPanel(); });
+      _acTopics().then(() => {
+        if (_topicsCache && pinPanel.classList.contains('open')) renderPinPanel();
+      });
     }
   }
 
