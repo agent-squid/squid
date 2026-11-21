@@ -250,9 +250,9 @@ revalidate Git state afresh. Database authority and budgets are not cached.
 
 ## Read-only agent history search
 
-Turns receiving `SQUID_CONTINUE_TOKEN` can also use basic history search without
-scheduling work. The same shared catalog exposes `history_search` and
-`history_fetch` over CLI/HTTP and optional MCP. This initial slice uses existing
+Eligible turns can use basic history search independently of continuation settings.
+When a continuation credential is unavailable, Squid issues a read-only history credential.
+The shared catalog exposes `history_search` and `history_fetch` over CLI/HTTP and optional MCP. This initial slice uses existing
 SQLite FTS5 indexes; it requires no QMD or model downloads.
 
 ```sh
@@ -264,20 +264,19 @@ agentsquid search --query "release" --scope subtree
 agentsquid search --message 12345 --scope subtree
 ```
 
-Scope defaults to the issuing turn's exact topic, derived from its validated
-credential. Explicit `--scope subtree` includes that topic and its dot-separated
-descendants for both search and fetch. Parent, sibling and unrelated topics stay
-excluded; callers cannot select a different root. CLI, HTTP and MCP accept the
-same optional `scope` field (`exact` or `subtree`). Availability follows existing continuation
-credential provisioning, so this does not add search to persistent harnesses or
-turns without those credentials. Results are newest first, with up to 20 hits
-and 800-character excerpts. Prompt searches identify the assistant reply and
+Owner-initiated turns and owner-started flows search all topics by default.
+Use `--scope exact` for the issuing topic or `--scope subtree` to include its
+dot-separated descendants. Watch and agent-launched route turns default to
+`exact` and can request `subtree`. CLI, HTTP and MCP accept the same optional
+`scope` field (`exact`, `subtree` or `all`). History credentials are scoped to eligible
+launches and are unavailable in persistent harnesses or shell turns. Results
+are newest first, with up to 20 hits and 800-character excerpts. Prompt searches identify the assistant reply and
 include `prompt_message_id` for fetching the original prompt. Source records
 include message IDs, topic, agent, timestamp and the existing `/jump <id>` UI
 command. No new browser deep-link format is introduced.
 
 Fetch returns at most 8,000 characters and a `next_offset` for the next page.
-It checks current topic and message existence again; deleted or inaccessible
+It checks the authorized scope and message existence again; deleted or inaccessible
 messages return the same not-found response. It returns message text, not run
 metadata, credentials or internal context fields. Message text itself may contain
 sensitive user-provided material; this tool adds no content redaction guarantee.

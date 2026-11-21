@@ -122,8 +122,8 @@ def timeout(conn, msg_id, value):
     return min(value, remaining) if value is not None else remaining
 
 
-def principal(conn, token):
-    parent_id = c.principal(conn, token)
+def principal(conn, token, *, allow_history=False):
+    parent_id = c.principal(conn, token, allow_history=allow_history)
     credential = conn.execute('SELECT * FROM continuation_credentials WHERE digest=?',
         (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
     parent = conn.execute('SELECT * FROM chat_messages WHERE id=?', (parent_id,)).fetchone()

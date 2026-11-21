@@ -31,11 +31,61 @@ def read_pr_review_comments(owner: str, repo: str, pull_number: int) -> dict[str
     return _read_comments(owner, repo, pull_number, 'pulls', ('path', 'line', 'in_reply_to_id'))
 
 
-def _read_comments(owner, repo, issue_number, resource, extra_fields=()):
+def read_pr_checks(owner: str, repo: str, pull_number: int) -> dict[str, Any]:
+    """Read current-head failed check runs and commit statuses, plus PR merge state."""
+    _validate_coordinates(owner, repo, pull_number)
+    path = f'repos/{owner}/{repo}'
+    pull = _read(f'{path}/pulls/{pull_number}')
+    if not isinstance(pull, dict) or type(pull.get('merged')) is not bool:
+        raise ValueError('GitHub pull request lacks merge state')
+    if pull['merged']:
+        return {'merged': True, 'checks': [], 'complete': True}
+    head = pull.get('head')
+    sha = head.get('sha') if isinstance(head, dict) else None
+    if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise ValueError('GitHub pull request lacks a valid head SHA')
+    snapshot = _read(f'{path}/commits/{sha}/check-runs?filter=latest&per_page=100')
+    runs = snapshot.get('check_runs') if isinstance(snapshot, dict) else None
+    if not isinstance(runs, list) or snapshot.get('total_count') != len(runs):
+        raise ValueError('Incomplete GitHub check run snapshot')
+    failures = []
+    for run in runs:
+        if not isinstance(run, dict) or type(run.get('id')) is not int:
+            raise ValueError('GitHub check run lacks a valid identity')
+        if run.get('conclusion') in ('failure', 'timed_out', 'action_required', 'startup_failure'):
+            if not isinstance(run.get('completed_at'), str) or not run['completed_at']:
+                raise ValueError('GitHub failed check run lacks a completion time')
+            failures.append({key: run.get(key) for key in
+                             ('id', 'completed_at', 'name', 'conclusion', 'details_url')})
+    snapshot = _read(f'{path}/commits/{sha}/status?per_page=100')
+    statuses = snapshot.get('statuses') if isinstance(snapshot, dict) else None
+    if not isinstance(statuses, list) or snapshot.get('total_count') != len(statuses):
+        raise ValueError('Incomplete GitHub commit status snapshot')
+    for status in statuses:
+        if not isinstance(status, dict) or status.get('state') not in ('error', 'failure', 'pending', 'success'):
+            raise ValueError('GitHub commit status lacks a valid state')
+        if status['state'] in ('error', 'failure'):
+            if (type(status.get('id')) is not int or not isinstance(status.get('updated_at'), str)
+                    or not status['updated_at']):
+                raise ValueError('GitHub failed commit status lacks an identity or timestamp')
+            failures.append(dict(id=f"status:{status['id']}", completed_at=status['updated_at'],
+                                 name=status.get('context'), conclusion=status['state'],
+                                 details_url=status.get('target_url')))
+    result = {'merged': False, 'head_sha': sha, 'checks': failures, 'complete': True}
+    if len(json.dumps(result, ensure_ascii=True).encode()) > LIMIT:
+        raise ValueError('GitHub snapshot exceeds the watch output limit')
+    return result
+
+
+def _validate_coordinates(owner, repo, issue_number):
     if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,99}', owner)
             or not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', repo)
             or repo in {'.', '..'} or type(issue_number) is not int or issue_number < 1):
         raise ValueError('Invalid GitHub issue coordinates')
+
+
+def _read_comments(owner, repo, issue_number, resource, extra_fields=()):
+    _validate_coordinates(owner, repo, issue_number)
     comments = _read(f'repos/{owner}/{repo}/{resource}/{issue_number}/comments?per_page=51')
     if not isinstance(comments, list):
         raise ValueError('GitHub returned an unexpected comment response')
@@ -192,6 +242,7 @@ def make_server():
     server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_issues)
     server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_bugs)
     server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_pr_review_comments)
+    server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_pr_checks)
     return server
 
 

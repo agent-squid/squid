@@ -1,4 +1,5 @@
-"""Bounded read-only history for the issuing turn's topic or explicit subtree."""
+"""Bounded read-only history with scope derived from the issuing turn."""
+import json
 import re
 
 from . import routes, stats_db as db
@@ -12,16 +13,20 @@ def source(row):
 
 def invoke(token, action, body):
     with db._connection() as conn:
-        parent, _ = routes.principal(conn, token)
+        parent, credential = routes.principal(conn, token, allow_history=True)
+        owner_history = json.loads(credential['owner_json'])['kind'] in {'human', 'human_flow'}
         topic = parent['topic']
     # Never let a missing topic become the database API's unfiltered search.
     if not topic:
         raise PermissionError()
     if not isinstance(body, dict):
         raise ValueError('invalid_history_request')
-    scope = body.get('scope', 'exact')
-    if scope not in ('exact', 'subtree'):
+    scope = body.get('scope', 'all' if owner_history else 'exact')
+    if scope not in ('exact', 'subtree', 'all'):
         raise ValueError('invalid_history_request')
+    if scope == 'all' and not owner_history:
+        raise PermissionError()
+    search_topic = None if scope == 'all' else topic
     subtree = scope == 'subtree'
     if action == 'search':
         query, limit, target = body.get('query'), body.get('limit', 10), body.get('target', 'responses')
@@ -30,7 +35,7 @@ def invoke(token, action, body):
                 or not 1 <= limit <= 20 or target not in ('responses', 'prompts')):
             raise ValueError('invalid_history_request')
         search = db.search_prompts if target == 'prompts' else db.search_messages
-        rows = search(query, topic=topic, limit=limit, topic_subtree=subtree)['items']
+        rows = search(query, topic=search_topic, limit=limit, topic_subtree=subtree)['items']
         items = []
         for row in rows:
             if target == 'prompts':
@@ -62,12 +67,13 @@ def invoke(token, action, body):
                 or not 1 <= identifier <= 2**63 - 1 or type(offset) is not int or offset < 0):
             raise ValueError('invalid_history_request')
         params = []
-        clause = db._topic_filter_clause(topic, subtree, params)
+        clause = db._topic_filter_clause(search_topic, subtree, params)
+        topic_filter = f' AND {clause}' if clause else ''
         with db._connection() as conn:
             row = conn.execute(
                 f'''SELECT m.id, m.topic, m.agent, m.role, m.content, m.status,
                            m.reply_to, m.created_at AS timestamp
-                    FROM chat_messages m WHERE m.id=? AND {clause}''',
+                    FROM chat_messages m WHERE m.id=?{topic_filter}''',
                 [identifier] + params).fetchone()
         if (not row or row['role'] not in ('assistant', 'user')
                 or (row['role'] == 'assistant' and row['status'] != 'done')):

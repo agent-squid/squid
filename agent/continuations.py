@@ -321,8 +321,11 @@ def launch_timeout(msg_id, timeout, watch_run_id=None, now=None):
     return min(timeout if timeout is not None else RESPONSE_TIMEOUT, deadline - now)
 
 
-def mint(parent_id, scope=None, response_timeout=None):
-    if not _enabled or not parent_id:
+HISTORY_TOKEN_PREFIX = 'history-'
+
+
+def mint(parent_id, scope=None, response_timeout=None, *, history_only=False):
+    if not parent_id or (not _enabled and not history_only):
         return None
     from .config import RESPONSE_TIMEOUT
     lifetime = RESPONSE_TIMEOUT if response_timeout is None else response_timeout
@@ -340,6 +343,8 @@ def mint(parent_id, scope=None, response_timeout=None):
                 or not owners.valid(conn, owner_json, topic=parent['topic'], agent=parent['agent'])):
             return None
         token = secrets.token_hex(32)
+        if history_only:
+            token = HISTORY_TOKEN_PREFIX + token
         scope = current_scope(parent['topic'], parent['agent']) if scope is None else scope
         conn.execute('INSERT INTO continuation_credentials(digest,parent_id,expires,scope_json,owner_json) VALUES(?,?,?,?,?)',
                      (hashlib.sha256(token.encode()).hexdigest(), parent_id, time.time() + lifetime + 60,
@@ -353,8 +358,13 @@ def revoke(token):
                      (hashlib.sha256(token.encode()).hexdigest(),))
 
 
-def principal(conn, token):
-    if not _enabled:
+def principal(conn, token, *, allow_history=False):
+    # The prefix is part of the hashed bearer. Removing it cannot convert a
+    # history credential into one accepted by mutation endpoints.
+    if token.startswith(HISTORY_TOKEN_PREFIX):
+        if not allow_history:
+            raise PermissionError('continuation_not_authorized')
+    elif not _enabled:
         raise PermissionError('continuations_disabled')
     row = conn.execute('SELECT parent_id FROM continuation_credentials WHERE digest=? AND revoked=0 AND expires>?',
                        (hashlib.sha256(token.encode()).hexdigest(), time.time())).fetchone()

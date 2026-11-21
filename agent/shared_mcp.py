@@ -50,7 +50,7 @@ async def run():
 def main(argv):
     parser = argparse.ArgumentParser(prog='agentsquid mcp', description=
         'Optional stdio adapter for Squid history, route and continuation tools. Uses the issuing turn\'s '
-        'SQUID_API_URL and SQUID_CONTINUE_TOKEN environment; does not change harness configuration. '
+        'SQUID_API_URL and turn credentials from the environment; does not change harness configuration. '
         'Install the mcp extra to use this transport. CLI remains available without it.')
     parser.parse_args(argv)
     try:

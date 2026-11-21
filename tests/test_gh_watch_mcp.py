@@ -49,6 +49,27 @@ def test_inline_review_comment_snapshot(monkeypatch):
     assert calls[0][-1] == 'repos/o/r/pulls/1/comments?per_page=51'
 
 
+def test_pr_checks_report_commit_status_failure_without_failed_check_runs(monkeypatch):
+    sha = 'a' * 40
+    timestamp = '2026-11-21T19:00:00Z'
+    url = 'https://ci.example.com/build'
+    responses = {
+        'repos/o/r/pulls/1': {'merged': False, 'head': {'sha': sha}},
+        f'repos/o/r/commits/{sha}/check-runs?filter=latest&per_page=100':
+            {'total_count': 0, 'check_runs': []},
+        f'repos/o/r/commits/{sha}/status?per_page=100': {'total_count': 2, 'statuses': [
+            dict(id=42, state='failure', updated_at=timestamp, context='required-ci', target_url=url),
+            dict(id=43, state='success', updated_at=timestamp, context='lint'),
+        ]},
+    }
+    monkeypatch.setattr(reader, '_read', responses.__getitem__)
+    assert reader.read_pr_checks('o', 'r', 1) == {
+        'merged': False, 'head_sha': sha, 'complete': True,
+        'checks': [dict(id='status:42', completed_at=timestamp, name='required-ci',
+                        conclusion='failure', details_url=url)],
+    }
+
+
 @pytest.mark.parametrize('payload', [[], [comment(i) for i in range(50)]])
 def test_complete_boundary(monkeypatch, payload):
     fake_gh(monkeypatch, payload)
@@ -106,6 +127,7 @@ async def test_real_stdio_tool(tmp_path, new_issues):
             catalog = await session.list_tools()
             assert [tool.name for tool in catalog.tools] == [
                 'read_issue_comments', 'read_issues', 'read_bugs', 'read_pr_review_comments',
+            'read_pr_checks',
             ]
             result = await session.call_tool(
                 'read_issues' if new_issues else 'read_issue_comments',

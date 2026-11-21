@@ -13231,7 +13231,7 @@ function renderProcPopup(processes, queued) {
         <button class="proc-watch-control proc-watch-stop proc-deq-btn" data-action="cancel" data-watch-id="${escapeHtml(w.id)}" data-version="${w.version}" title="Cancel watch" aria-label="Cancel watch">✕</button></td>
       </tr>`;
     }).join('');
-    body += `<div class="proc-section-label">Watches (${cachedWatchRows.length})</div><table><thead><tr><th>Route</th><th>Target / prompt</th><th>Status</th><th>Last job</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+    body += `<div class="proc-section-label">Monitoring (${cachedWatchRows.length})</div><table><thead><tr><th>Route</th><th>Target / prompt</th><th>Status</th><th>Last job</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   procStatusPopup.innerHTML = header + body;
   procStatusPopup.querySelectorAll('.quota-setup-btn').forEach(btn => {

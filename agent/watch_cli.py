@@ -18,7 +18,7 @@ def main(argv):
         return probe_main(argv[2:])
     parser = argparse.ArgumentParser(prog='agentsquid ' + argv[0],
         description='Watch monitoring and explicitly granted local work and task publication.',
-        epilog='With SQUID_CONTINUE_TOKEN, tools reports shared history/route/continuation capabilities. Use agentsquid search --help for read-only current-topic history. '
+        epilog='With SQUID_CONTINUE_TOKEN, tools reports shared history/route/continuation capabilities. Use agentsquid search --help for read-only Squid history. '
                'Use agentsquid watch probe contract for executable wrapper I/O, registration and credential requirements; '
                'watch probe test --help and watch probe register --help for local setup. '
                'Use agentsquid watch --help for commands. SQUID_API_URL must name the issuing instance. '

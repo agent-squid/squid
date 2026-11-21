@@ -21,8 +21,8 @@ STEP = obj(dict(mode=dict(enum=['isolated', 'backing_git', 'dependency_sync', 't
 CREATE = dict(type='object', oneOf=[obj(dict(request_key=dict(type='string', minLength=1, maxLength=128), **STEP['properties']), ['request_key', 'mode', 'prompt']),
                     obj(dict(request_key=dict(type='string', minLength=1, maxLength=128), steps=dict(type='array', items=STEP, minItems=1, maxItems=8)), ['request_key', 'steps'])])
 OPERATIONS = {
-    'history_search': ('POST', '/agent-history/search', obj(dict(query=dict(type='string', minLength=1, maxLength=512), target=dict(enum=['responses', 'prompts']), scope=dict(enum=['exact', 'subtree'], default='exact'), limit=dict(type='integer', minimum=1, maximum=20)), ['query'])),
-    'history_fetch': ('POST', '/agent-history/fetch', obj(dict(message_id=dict(type='integer', minimum=1, maximum=2**63 - 1), offset=dict(type='integer', minimum=0), scope=dict(enum=['exact', 'subtree'], default='exact')), ['message_id'])),
+    'history_search': ('POST', '/agent-history/search', obj(dict(query=dict(type='string', minLength=1, maxLength=512), target=dict(enum=['responses', 'prompts']), scope=dict(enum=['exact', 'subtree', 'all']), limit=dict(type='integer', minimum=1, maximum=20)), ['query'])),
+    'history_fetch': ('POST', '/agent-history/fetch', obj(dict(message_id=dict(type='integer', minimum=1, maximum=2**63 - 1), offset=dict(type='integer', minimum=0), scope=dict(enum=['exact', 'subtree', 'all'])), ['message_id'])),
     'capabilities': ('GET', '/capabilities', obj()),
     'route_validate': ('POST', '/routes/validate', ROUTE),
     'route_launch': ('POST', '/routes', LAUNCH),
@@ -37,6 +37,9 @@ OPERATIONS = {
 }
 
 
+HISTORY_OPERATIONS = {'history_search', 'history_fetch'}
+
+
 def catalog():
     return [dict(name=name, method=value[0], path=value[1], input_schema=value[2]) for name, value in OPERATIONS.items()]
 
@@ -45,6 +48,8 @@ def request(operation, arguments, *, api_url=None):
     method, path, _ = OPERATIONS[operation]
     url = api_url or os.environ.get('SQUID_API_URL', '')
     token = os.environ.get('SQUID_CONTINUE_TOKEN', '')
+    if operation in HISTORY_OPERATIONS:
+        token = os.environ.get('SQUID_HISTORY_TOKEN') or token
     if not valid_api_url(url) or not token or len(token) > 512 or not isinstance(arguments, dict):
         raise ValueError('shared_client_error')
     if '{identifier}' in path:

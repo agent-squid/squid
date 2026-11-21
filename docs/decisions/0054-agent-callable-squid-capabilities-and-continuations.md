@@ -211,6 +211,17 @@ production configuration, or authorize publication. General routes, broader
 operational discovery, budgets outside managed roots, and tag/release execution
 remain outside the delivered scope.
 
+### Read-only agent history (2026-11-21)
+
+History search and fetch are available to eligible one-shot turns independently
+of worktree isolation and continuation settings. Squid issues a turn-scoped,
+read-only credential when a continuation credential is unavailable.
+
+Owner-started turns and flows can read across all topics by default. Watch runs
+and agent-launched routes can read their issuing topic and its descendants.
+See [agent history search](../continuations.md#read-only-agent-history-search)
+for scope options and credential availability.
+
 ## References
 
 - [ADR-0025: isolation and uncommitted sync](0025-per-turn-worktree-isolation.md)

@@ -21,7 +21,7 @@ test('watch job stays visible between polls and can be cancelled', async ({ page
   await page.route('**/queue', route => route.fulfill({ json: [] }));
   await page.goto('/');
   await page.locator('#proc-status').click();
-  await expect(page.locator('#proc-status-popup')).toContainText('Watches');
+  await expect(page.locator('#proc-status-popup')).toContainText('Monitoring');
   await expect(page.locator('#proc-status-popup')).toContainText('#squid@coder>@reviewer');
   await expect(page.locator('#proc-status-popup')).toContainText('<Watch feedback>');
   await expect(page.locator('#proc-status-popup')).toContainText(/Next \d+s/);
@@ -109,7 +109,7 @@ test('proposals and watches across topics show targets, jobs and pause controls'
   await page.goto('/');
   await page.locator('#proc-status').click();
   const popup = page.locator('#proc-status-popup');
-  await expect(popup).toContainText('Watches (2)');
+  await expect(popup).toContainText('Monitoring (2)');
   await expect(popup).toContainText('#other');
   await expect(popup).toContainText('<new PR>');
   await expect(popup).toContainText('<review feedback>');
