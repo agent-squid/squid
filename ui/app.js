@@ -46,6 +46,7 @@ window.scrollTo(0, 0);
   function setVh() {
     const h = window.visualViewport?.height ?? window.innerHeight;
     document.body.style.height = h + 'px';
+    document.body.classList.toggle('short-viewport', h <= 240);
     document.body.style.setProperty('--composer-max-height', `${h * 0.34}px`);
   }
   setVh();
@@ -590,6 +591,7 @@ function switchView(name) {
   if (mobileTitle) mobileTitle.textContent = VIEW_LABELS[name] || name;
   currentView = name;
   updateLoadErrorVisibility();
+  if (name === 'chat') resizeComposer();
   document.getElementById('right-rail')?.classList.toggle('quota-chat-hidden', name !== 'chat');
   if (name !== 'chat') {
     document.querySelectorAll('#quota-creds-popup, #codex-creds-popup, #cursor-creds-popup, #balance-max-popup')
@@ -4236,6 +4238,7 @@ function showCmdFeedback(text) {
 }
 
 function resizeComposer() {
+  if (currentView !== 'chat') return;
   input.style.height = '';
   if (input.value) input.style.height = `${input.scrollHeight}px`;
 }
@@ -4645,6 +4648,7 @@ function handleComposerInput({ browseRoutes = false } = {}) {
 }
 
 window.addEventListener('resize', resizeComposer);
+window.visualViewport?.addEventListener('resize', resizeComposer);
 input.addEventListener('input', () => handleComposerInput());
 input.addEventListener('click', () => {
   if ((stickyChip && !editingExpandedSlug) || !/^#[^\s]+@/.test(input.value)) return;
@@ -4834,7 +4838,7 @@ input.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape' && closeEscSurfaces()) { e.preventDefault(); return; }
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !window.matchMedia('(pointer: coarse)').matches) {
     e.preventDefault();
     form.requestSubmit();
   }
@@ -15454,9 +15458,11 @@ async function _acAgents() {
 }
 
 function hideAutocomplete() {
+  const wasOpen = acOpen;
   browseCompletedRoute = false;
   acEl.classList.remove('open');
   acOpen = false; acItems = []; acSel = -1; _acStashedForNav = false;
+  if (wasOpen) resizeComposer();
 }
 
 function _acPreview() {

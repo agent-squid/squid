@@ -1,10 +1,12 @@
 # Test a watch with GitHub CLI over stdio MCP
 
 `tools/gh_watch_mcp.py` is a development/test utility, not an installed console
-entry point. It exposes read tools `read_issue_comments`, `read_issues`, and `read_bugs`, and uses
+entry point. It exposes read tools for conversation comments, inline PR review comments,
+repository issues, and filtered bugs. It uses
 `gh api` with GitHub CLI's existing authentication. It does not post comments,
 close issues, resolve review threads, or contain watch/change-detection logic.
-PR conversation comments work; inline PR review comments are not included.
+Use `read_issue_comments` for PR conversation comments and
+`read_pr_review_comments` for inline comments and replies.
 
 ## Configure the host
 
@@ -27,7 +29,7 @@ watches:
         argv:
           - /absolute/path/to/squid/.venv/bin/python
           - /absolute/path/to/squid/tools/gh_watch_mcp.py
-      read_tools: [read_issue_comments, read_issues, read_bugs]
+      read_tools: [read_issue_comments, read_issues, read_bugs, read_pr_review_comments]
 ```
 
 Preserve existing watch policy/connections. If `policy.adapters` is explicitly
@@ -66,6 +68,64 @@ separate human controls (`--human-topic TOPIC`) to record the exact-watch
 observation grant and activate the returned watch/version. See
 [authorization](watch-authorization.md) for grant and activation JSON/commands.
 Creation and validation alone do not start monitoring.
+
+## Watch a PR and address feedback locally
+
+Enable `watches.policy.execution_enabled` and configure the watch topic with
+the PR repository as a code root. Start from the PR's head branch in that
+checkout so local fixes land on the intended branch. Restart Squid after
+changing its configuration, then start a fresh non-persistent Codex turn in
+that topic and ask it to prepare a watch proposal for the exact PR URL.
+
+For inline comments, use `read_pr_review_comments` with arguments
+`{"owner":"OWNER","repo":"REPO","pull_number":123}`. Keep `/comments` as
+the items path, `["/id","/updated_at"]` as the identity, and the same
+completeness check as above. Add a second step using `read_issue_comments`
+and `issue_number` if conversation comments should also trigger work.
+Use `initial: quiet` for new activity only or `initial: actionable` to
+include matching comments already present on the first poll. The inline
+reader includes replies and does not expose review summaries, thread
+resolution state, CI checks, or PR closure. It shares the 50-comment and
+output size limits of the conversation reader.
+
+The operator records the observation grant through the proposal's
+`expires_at`, records a separate `execution-grant` with the configured
+Codex agent and finite budgets, then activates with the observation grant ID
+and current watch version. For example, tell the execution agent to verify
+which findings still apply, fix those locally, and run relevant checks.
+Use [the grant and activation commands](watch-authorization.md#explicit-execution-grants-and-local-work)
+and inspect `agentsquid watch show WATCH_ID` and
+`agentsquid watch runs WATCH_ID` to verify the loop.
+
+Squid polls after the setup turn exits and dispatches fresh turns on
+actionable events while the host is running and the grants and budgets
+permit. This setup leaves fixes in the local checkout for review.
+
+### Request another review
+
+When the fixes are on the remote PR branch, use the re-request icon next to
+the reviewer in GitHub's Reviewers sidebar. For a watch to request re-review
+from a named reviewer, include explicit scope in the human execution grant:
+
+```json
+{
+  "external_actions": "Re-request review from REVIEWER on https://github.com/OWNER/REPO/pull/123 after confirming the tested fixes are on the remote PR head. Check for an outstanding review request before sending."
+}
+```
+
+Add this field to the full grant payload. Squid passes the recorded scope to
+the agent, which needs GitHub credentials with pull request write access and a
+tool capable of re-requesting review. The watch needs an actionable event to
+run. With the comment sources above, a push by itself does not trigger a run.
+For a manual push, re-request review from GitHub once the push succeeds.
+
+For a second Codex pass on local changes, the
+[fix, review, revise Flow](#fix-review-revise-locally) already supports a
+bounded review cycle. To publish automatically, Squid's
+[task publication](task-publication.md) requires a saved task, an enabled
+publication grant, and a separate review. Publication is terminal in a
+continuation sequence. The comment watch does not yet automatically re-request
+review after publishing to an existing PR.
 
 ## Exercise the loop
 

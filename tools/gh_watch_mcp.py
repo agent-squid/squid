@@ -23,11 +23,20 @@ def read_issue_comments(owner: str, repo: str, issue_number: int) -> dict[str, A
     Excludes PR inline review threads. More than 50 comments or oversized output
     fails explicitly rather than returning an incomplete snapshot.
     """
+    return _read_comments(owner, repo, issue_number, 'issues')
+
+
+def read_pr_review_comments(owner: str, repo: str, pull_number: int) -> dict[str, Any]:
+    """Read up to 50 inline PR review comments and replies, with file paths."""
+    return _read_comments(owner, repo, pull_number, 'pulls', ('path', 'line', 'in_reply_to_id'))
+
+
+def _read_comments(owner, repo, issue_number, resource, extra_fields=()):
     if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,99}', owner)
             or not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', repo)
             or repo in {'.', '..'} or type(issue_number) is not int or issue_number < 1):
         raise ValueError('Invalid GitHub issue coordinates')
-    comments = _read(f'repos/{owner}/{repo}/issues/{issue_number}/comments?per_page=51')
+    comments = _read(f'repos/{owner}/{repo}/{resource}/{issue_number}/comments?per_page=51')
     if not isinstance(comments, list):
         raise ValueError('GitHub returned an unexpected comment response')
     if len(comments) > 50:
@@ -39,7 +48,8 @@ def read_issue_comments(owner: str, repo: str, issue_number: int) -> dict[str, A
                 or not isinstance(comment.get('body'), str)
                 or not isinstance(comment.get('html_url'), str)):
             raise ValueError('GitHub comment lacks required identity or content fields')
-        records.append({key: comment[key] for key in ('id', 'updated_at', 'body', 'html_url')})
+        fields = ('id', 'updated_at', 'body', 'html_url') + extra_fields
+        records.append({key: comment[key] for key in fields if key in comment})
     snapshot = {'comments': records, 'complete': True}
     # Match the ASCII-escaped JSON accounting in Squid's MCP transport.
     if len(json.dumps(snapshot, ensure_ascii=True, allow_nan=False).encode()) > LIMIT:
@@ -181,6 +191,7 @@ def make_server():
     server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_issue_comments)
     server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_issues)
     server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_bugs)
+    server.tool(annotations={'readOnlyHint': True, 'destructiveHint': False})(read_pr_review_comments)
     return server
 
 

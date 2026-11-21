@@ -28,7 +28,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
   <link rel="stylesheet" href="/vendor/xterm.css" />
-  <link rel="stylesheet" href="style.css?v=20261121-086" />
+  <link rel="stylesheet" href="style.css?v=20261121-088" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -358,7 +358,7 @@
           <div class="help-row"><kbd>↑</kbd><kbd>↓</kbd><span>navigate autocomplete, route history, or prompt history when input is single-line</span></div>
           <div class="help-row"><span>Type a prompt prefix to match recent routed prompts; use <kbd>↑</kbd> in empty input to browse all</span></div>
           <div class="help-row"><kbd>↓</kbd><span>while in prompt history: return toward draft; restores stashed input and topic chip</span></div>
-          <div class="help-row"><kbd>Enter</kbd><span>select autocomplete item / send message</span></div>
+          <div class="help-row"><kbd>Enter</kbd><span>send on desktop or add a line on touch keyboards</span></div>
           <div class="help-row"><kbd>Esc</kbd><span>close autocomplete / panels</span></div>
           <div class="help-row"><kbd>Shift+Enter</kbd><span>newline in input</span></div>
           <div class="help-row"><kbd>Backspace</kbd><span>on empty input or at the start of a prompt: expand the topic chip for editing; moving back into the prompt restores the chip</span></div>
@@ -528,7 +528,7 @@
               </button>
             </div>
           </div>
-          <textarea id="input" placeholder="#topic or #topic@agent message…" rows="1"></textarea>
+          <textarea id="input" enterkeyhint="enter" placeholder="#topic or #topic@agent message…" rows="1"></textarea>
         </div>
         <button id="pin-btn" type="button" title="Pinned context">
           <svg width="14" height="15" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
@@ -930,7 +930,7 @@
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="flow-lang.js?v=20261121-086"></script>
-  <script src="app.js?v=20261121-086"></script>
+  <script src="flow-lang.js?v=20261121-088"></script>
+  <script src="app.js?v=20261121-088"></script>
 </body>
 </html>

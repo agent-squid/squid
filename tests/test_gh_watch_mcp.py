@@ -40,6 +40,15 @@ def test_complete_snapshot_and_command(monkeypatch):
                       'repos/o/r/issues/1/comments?per_page=51']]
 
 
+def test_inline_review_comment_snapshot(monkeypatch):
+    review_comment = dict(comment(), path='src/file.py', line=17, in_reply_to_id=42)
+    calls = fake_gh(monkeypatch, [review_comment | {'diff_hunk': 'unused'}])
+    assert reader.read_pr_review_comments('o', 'r', 1) == {
+        'comments': [review_comment], 'complete': True,
+    }
+    assert calls[0][-1] == 'repos/o/r/pulls/1/comments?per_page=51'
+
+
 @pytest.mark.parametrize('payload', [[], [comment(i) for i in range(50)]])
 def test_complete_boundary(monkeypatch, payload):
     fake_gh(monkeypatch, payload)
@@ -95,7 +104,9 @@ async def test_real_stdio_tool(tmp_path, new_issues):
         async with ClientSession(*streams) as session:
             await session.initialize()
             catalog = await session.list_tools()
-            assert [tool.name for tool in catalog.tools] == ['read_issue_comments', 'read_issues', 'read_bugs']
+            assert [tool.name for tool in catalog.tools] == [
+                'read_issue_comments', 'read_issues', 'read_bugs', 'read_pr_review_comments',
+            ]
             result = await session.call_tool(
                 'read_issues' if new_issues else 'read_issue_comments',
                 dict(owner='o', repo='r') if new_issues else dict(owner='o', repo='r', issue_number=1))

@@ -275,7 +275,14 @@ body {
 /* views */
 .view { display: none; flex-direction: column; flex: 1; min-height: 0; gap: 1rem; }
 .view.active { display: flex; }
-#view-chat { position: relative; }
+#view-chat {
+  position: relative;
+  container: chat / size;
+  --composer-button-height: 40px;
+  --composer-controls-height: var(--composer-button-height);
+  --composer-row-gap: 0.4rem;
+  --compact-draft-height: 32px;
+}
 #view-topics { gap: 0; min-height: 0; }
 #view-stats { gap: 0; }
 #view-community { gap: 0; }
@@ -4619,15 +4626,14 @@ body {
 }
 
 #form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  grid-template-rows: minmax(0, auto) 40px;
+  display: flex;
+  align-items: flex-end;
   min-height: 0;
-  gap: 0.4rem;
+  gap: 0.5rem;
 }
 #form.dimmed { opacity: 0.4; pointer-events: none; user-select: none; }
 #input-area {
-  grid-column: 1 / -1;
+  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -4890,8 +4896,7 @@ button {
 .btn-ghost:hover:not(:disabled) { color: var(--text-muted); border-color: var(--text-mid); }
 .btn-ghost:disabled { opacity: 0.3; cursor: default; }
 
-#pin-btn { grid-column: 2; }
-#send-btn { grid-column: 3; }
+#pin-btn, #send-btn { min-height: var(--composer-button-height); }
 .send-icon { display: none; }
 
 @media (max-width: 768px) {
@@ -5076,8 +5081,15 @@ button {
   #stats-content .stats-turn-table td:nth-child(4) { width: 3.7rem; }
 
   #form {
-    grid-template-columns: minmax(0, 1fr) 44px 44px;
-    grid-template-rows: minmax(0, auto) 44px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--composer-button-height);
+    grid-template-rows: minmax(var(--composer-button-height), 1fr) var(--composer-button-height);
+    gap: var(--composer-row-gap);
+    align-items: stretch;
+  }
+
+  #input-area {
+    grid-area: 1 / 1 / span 2;
   }
 
   .msg {
@@ -5133,6 +5145,13 @@ button {
     padding: 0;
   }
 
+  #pin-btn {
+    grid-area: 1 / 2;
+    align-self: end;
+  }
+
+  #send-btn { grid-area: 2 / 2; }
+
   .send-label {
     display: none;
   }
@@ -5142,7 +5161,8 @@ button {
   }
 
   #input {
-    min-height: calc(2lh + 0.65rem);
+    height: calc(2lh + 0.65rem);
+    min-height: 0;
     padding: 0.3rem 0.2rem;
     font-size: 1rem;
     line-height: 1.35;
@@ -5162,7 +5182,10 @@ button {
   }
 
   .view { padding-top: var(--mobile-view-top-space); }
-  #view-chat { padding-top: 0; }
+  #view-chat {
+    padding-top: 0;
+    --composer-controls-height: calc(2 * var(--composer-button-height) + var(--composer-row-gap));
+  }
   #view-community {
     width: calc(100% + 1.5rem);
     margin-left: -0.75rem;
@@ -5495,6 +5518,44 @@ button {
 }
 #agent-form-status { font-size: var(--text-xs); color: var(--text-dim); }
 
+@container chat (max-height: 280px) {
+  #messages { padding-bottom: 0; }
+
+  #view-chat:has(> :is(#pin-panel, #autocomplete).open) > #scroll-btn {
+    visibility: hidden;
+  }
+
+  #view-chat > :is(#pin-panel, #autocomplete) {
+    --panel-bottom: calc(var(--composer-controls-height) + var(--composer-row-gap));
+    position: absolute;
+    inset: auto 0 var(--panel-bottom);
+    max-height: calc(100% - var(--panel-bottom));
+    z-index: 2;
+  }
+
+  #view-chat:has(> #autocomplete.open) #input-area {
+    height: var(--compact-draft-height);
+    align-self: end;
+  }
+
+  #view-chat:has(> #autocomplete.open) #chip-row {
+    display: none;
+  }
+
+  #view-chat:has(> #autocomplete.open) #input {
+    max-height: 100%;
+  }
+
+  #view-chat > #autocomplete {
+    --panel-bottom: calc(max(var(--composer-controls-height), var(--compact-draft-height)) + var(--composer-row-gap));
+  }
+
+  #autocomplete .ac-header {
+    min-height: 32px;
+    padding-block: 0;
+  }
+}
+
 /* autocomplete dropdown */
 #autocomplete {
   display: none;
@@ -5505,9 +5566,10 @@ button {
   border-radius: 8px;
   overflow: hidden;
   max-height: 200px;
-  flex-shrink: 0;
+  min-height: 0;
 }
 #autocomplete.open { display: flex; }
+#view-chat:has(> #autocomplete.open) #form { flex-shrink: 0; }
 .ac-list {
   min-height: 0;
   overflow-y: auto;
@@ -6373,6 +6435,45 @@ mark.search-kw-highlight {
 #connection-banner button { position: relative; min-height: 30px; padding: .25rem .7rem; border-radius: 5px; font-size: .8rem; line-height: 1.25; font-weight: 500; white-space: nowrap; }
 #connection-banner .btn-ghost { color: var(--text-muted); border-color: var(--border); }
 #connection-snackbar { padding: .5rem .75rem; color: var(--text-muted); background: var(--surface); font-size: .85rem; flex-shrink: 0; }
+
+@media (min-width: 769px) {
+  .short-viewport #app:has(> #connection-banner:not([hidden])) {
+    row-gap: 0.25rem;
+    padding-bottom: 0.5rem;
+  }
+
+  .short-viewport #connection-banner {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding-block: 0;
+  }
+
+  .short-viewport #connection-actions {
+    flex: none;
+    padding-block: 0;
+  }
+}
+
+@container chat (max-height: 140px) {
+  .short-viewport #autocomplete.open {
+    flex-direction: row;
+  }
+
+  .short-viewport #autocomplete .ac-list {
+    flex: 1;
+  }
+
+  .short-viewport #autocomplete .ac-header {
+    min-height: 0;
+    border-top: 0;
+    border-left: 1px solid var(--border);
+  }
+
+  .short-viewport #autocomplete .ac-title {
+    display: none;
+  }
+}
 /* Extend touch targets without making the visible buttons bulky. */
 @media (pointer: coarse) {
   #connection-actions { row-gap: 14px; }
