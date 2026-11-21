@@ -13118,7 +13118,8 @@ function renderQuotaStatus() {
   const backends = [...new Set([
     ...Object.keys(_providerMetadata),
     ...Object.keys(quotaSnapshots).map(quotaStatusProviderKey),
-  ])].filter(shouldShowQuotaStatusProvider);
+  ])].filter(shouldShowQuotaStatusProvider)
+    .sort((a, b) => backendDisplayName(a).localeCompare(backendDisplayName(b)));
   const rows = backends
     .map(provider => {
     const snapshot = quotaSnapshotForProvider(provider);
@@ -14671,7 +14672,9 @@ function renderProvidersCatalog() {
       : info.codex_signed_in ? 'Signed in' : 'Signed out';
     const subscriptionLogin = info.dedicated_login
       ? `<span class="bcat-hint">Separate ${subscriptionName} login</span>
-        <span class="bcat-hint">${info.codex_home_unavailable ? `${subscriptionName} home unavailable` : `${subscriptionName} home <code>${escapeHtml(info.codex_home || '')}</code> · ${loginStatus}`}</span>`
+        <span class="bcat-hint">${info.codex_home_unavailable || !info.codex_home
+          ? `${subscriptionName} home unavailable`
+          : `<a class="bcat-link bcat-auth-home-link" href="#" data-path="${escapeHtml(info.codex_home)}" title="Open in file viewer">${subscriptionName} auth home</a> · ${loginStatus}`}</span>`
       : info.subscription_harness ? '<span class="bcat-hint">Uses host login</span>' : '';
     return `<div class="bcat-row">
       <div class="bcat-name"><span class="bcat-dot" style="background:${escapeHtml(color)}"></span>${escapeHtml(label)}</div>
@@ -14691,6 +14694,12 @@ function renderProvidersCatalog() {
         btn.textContent = 'copied';
         setTimeout(() => { btn.textContent = 'copy'; }, 1500);
       });
+    });
+  });
+  el.querySelectorAll('.bcat-auth-home-link').forEach(link => {
+    link.addEventListener('click', event => {
+      event.preventDefault();
+      openFileViewer(link.dataset.path);
     });
   });
   el.querySelectorAll('.bcat-yaml-link').forEach(link => {
