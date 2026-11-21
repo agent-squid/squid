@@ -232,6 +232,53 @@ test('left opens route autocomplete when the composer contains only a route', as
   await expect(composer).toHaveValue('');
 });
 
+test('tapping a completed route puts its variants below recent topic routes', async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
+  try {
+    await mockBackend(page);
+    await page.route('**/topics', r => r.fulfill({ json: [
+      { name: 'squid', agent: 'codex', last_prompt: 'pull the latest squid' },
+      { name: 'other', agent: 'codex', last_prompt: 'push the changes' },
+      { name: 'older', agent: 'haiku', sticky_adhoc: true, last_prompt: 'summarize' },
+    ] }));
+    await page.route('**/topics/squid/agents/history', r => r.fulfill({ json: [
+      { agent: 'codex', last_prompt: 'pull the latest squid' },
+    ] }));
+    await page.goto('/');
+
+    const composer = page.locator('#input');
+    const picker = page.locator('#autocomplete');
+    const labels = picker.locator('.ac-label');
+    await page.evaluate(() => clearTopicChip());
+    await composer.fill('#');
+    await expect(labels).toHaveText(['#older@haiku', '#other@codex', '#squid@codex']);
+
+    await composer.fill('#squid@codex');
+    await expect(labels).toHaveText(['#squid@codex!', '#squid@codex']);
+    await expect(picker.locator('.ac-history-heading')).toHaveCount(0);
+
+    await composer.tap();
+    await expect(labels).toHaveText(['#older@haiku', '#other@codex', '#squid@codex', '#squid@codex!']);
+    await expect(picker.locator('.ac-history-heading')).toHaveText('Route history');
+    await expect(picker.locator('.ac-item.selected .ac-label')).toHaveText('#squid@codex!');
+
+    await composer.fill('#squid@code');
+    await expect(labels).toHaveText(['#squid@codex!', '#squid@codex']);
+    await expect(picker.locator('.ac-history-heading')).toHaveCount(0);
+
+    await composer.fill('#squid@codex keep this draft');
+    const chip = page.locator('#topic-chip');
+    await expect(chip).toContainText('#squid@codex');
+    await chip.tap();
+    await expect(labels).toHaveText(['#older@haiku', '#other@codex', '#squid@codex', '#squid@codex!']);
+    await picker.locator('.ac-item', { hasText: '#older@haiku' }).tap();
+    await expect(chip).toContainText('#older@haiku!');
+    await expect(composer).toHaveValue('keep this draft');
+  } finally {
+    await page.close();
+  }
+});
+
 test('route autocomplete includes multi-head flow routes from prompt history', async ({ page }) => {
   await mockBackend(page);
   await page.unroute('**/prompts/recent**');

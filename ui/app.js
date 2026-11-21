@@ -1338,6 +1338,7 @@ const chipStashBtn = document.getElementById('chip-stash-btn');
 let stickyChip = null; // { topic, agent, adhoc, chainTarget?, chainTargetFresh?, route? } | null
 let editingExpandedSlug = false;
 let expandedSlugEditToken = 0;
+let browseCompletedRoute = false;
 let composerActionTitleSeq = 0;
 const TOPIC_SLUG_SRC = '[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)*';
 const TOPIC_SLUG_PARTIAL_SRC = '[A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]*)*';
@@ -1789,7 +1790,7 @@ topicChipEl.addEventListener('click', () => {
   expandedSlugEditToken++;
   input.value = prompt ? `${tag} ${prompt}` : tag;
   input.setSelectionRange(tag.length, tag.length);
-  input.dispatchEvent(new Event('input'));
+  handleComposerInput({ browseRoutes: true });
   input.focus();
 });
 
@@ -4605,7 +4606,8 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
   input.dispatchEvent(new Event('input'));
 }
 
-input.addEventListener('input', () => {
+function handleComposerInput({ browseRoutes = false } = {}) {
+  browseCompletedRoute = browseRoutes;
   resizeComposer();
   updateAutocomplete();
   // Expanded #topic@agent!N text is still being edited. The chip creation path
@@ -4619,6 +4621,16 @@ input.addEventListener('input', () => {
   if (promptHistoryPos !== -1 && input.value !== promptHistory[promptHistoryPos]) {
     promptHistoryPos = -1;
   }
+}
+
+input.addEventListener('input', () => handleComposerInput());
+input.addEventListener('click', () => {
+  if ((stickyChip && !editingExpandedSlug) || !/^#[^\s]+@/.test(input.value)) return;
+  const routeEnd = editingExpandedSlug ? input.value.search(/\s/) : -1;
+  if (input.selectionStart !== input.selectionEnd ||
+      input.selectionEnd > (routeEnd < 0 ? input.value.length : routeEnd)) return;
+  browseCompletedRoute = true;
+  updateAutocomplete();
 });
 
 document.addEventListener('selectionchange', () => {
@@ -15389,6 +15401,7 @@ async function _acAgents() {
 }
 
 function hideAutocomplete() {
+  browseCompletedRoute = false;
   acEl.classList.remove('open');
   acOpen = false; acItems = []; acSel = -1; _acStashedForNav = false;
 }
@@ -15396,6 +15409,7 @@ function hideAutocomplete() {
 function _acPreview() {
   if (acSel < 0 || acSel >= acItems.length) return;
   const item = acItems[acSel];
+  if (item.highlightOnly) return;
   if (!_acStashedForNav) {
     promptDraft = input.value;
     promptDraftChip = stickyChip ? { ...stickyChip } : null;
@@ -15450,7 +15464,7 @@ function _acHighlight() {
   if (acSel >= 0) acEl.querySelector(`.ac-item[data-i="${acSel}"]`)?.scrollIntoView({ block: 'nearest' });
 }
 
-function _acRender(items, title = 'Suggestions') {
+function _acRender(items, title = 'Suggestions', historyStart = -1) {
   if (!items.length) { hideAutocomplete(); return; }
   acItems = items; acSel = 0;
   const rows = items.map((item, i) =>
@@ -15463,7 +15477,8 @@ function _acRender(items, title = 'Suggestions') {
     (item.deleteTopic ? `<button class="ac-del-btn" data-topic="${item.deleteTopic}" type="button" title="Delete #${item.deleteTopic} sessions">✕</button>` : '') +
     (item.deletePromptEntry != null ? `<button class="ac-del-btn ac-del-prompt-btn" data-i="${i}" type="button" title="Remove from history">✕</button>` : '') +
     `</div>` +
-    `</div>`
+    `</div>` +
+    (i === historyStart ? '<div class="ac-history-heading">Route history</div>' : '')
   ).reverse().join('');
   acEl.innerHTML =
     `<div class="ac-list">${rows}</div>` +
@@ -15554,6 +15569,7 @@ function _acSelect(idx) {
       resizeComposer();
       input.focus();
       input.dispatchEvent(new Event('input'));
+      if (item.collapseSlug) _maybeCollapseExpandedSlug(true, true);
       return;
     }
   }
@@ -15693,6 +15709,17 @@ function _acLastPrompt(prompt) {
   return `<span class="ac-last-badge">last</span> ${escapeHtml(truncate(prompt, 55))}`;
 }
 
+function topicAutocompleteItems(topics, replacingSlug) {
+  return topics.map(t => ({
+    label: _acRouteLabel(t.name, t.agent || '', t.last_backend || null),
+    insert: '#' + t.name,
+    replaceSlug: replacingSlug,
+    deleteTopic: t.name,
+    meta: t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
+    sub: _acLastPrompt(t.last_prompt),
+  }));
+}
+
 async function updateAutocomplete() {
   const val = input.value;
   const promptSeparator = editingExpandedSlug ? val.indexOf(' ') : -1;
@@ -15819,15 +15846,7 @@ async function updateAutocomplete() {
     const topics = await _acTopics();
     if (input.value !== val) return;
     _acRender(
-      topics.filter(t => t.name.toLowerCase().startsWith(prefix)).slice(0, 8)
-        .map(t => ({
-          label:       _acRouteLabel(t.name, t.agent || '', t.last_backend || null),
-          insert:      '#' + t.name,
-          replaceSlug: replacingSlug,
-          deleteTopic: t.name,
-          meta:        t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
-          sub:         _acLastPrompt(t.last_prompt),
-        })),
+      topicAutocompleteItems(topics.filter(t => t.name.toLowerCase().startsWith(prefix)).slice(0, 8), replacingSlug),
       'Routes'
     );
   } else if (mMultiOriginChainAlias) {
@@ -15954,17 +15973,45 @@ async function updateAutocomplete() {
     const prefix = mAlias[2].toLowerCase();
     const adhocSuffix = mAlias[3] || '';
     const preserveAdhocSuffix = mAlias[3] !== undefined;
-    const [agents, history] = await Promise.all([
+    const browseRoutes = browseCompletedRoute;
+    const [agents, history, topics] = await Promise.all([
       _acAgents(),
       fetch(`/topics/${encodeURIComponent(topic)}/agents/history`).then(r => r.ok ? r.json() : []).catch(() => []),
+      browseRoutes ? _acTopics() : [],
     ]);
-    if (input.value !== val) return;
+    if (input.value !== val || browseCompletedRoute !== browseRoutes) return;
 
     const usedNames = new Set(history.map(h => h.agent));
     const backendByAgent = new Map(agents.map(a => [a.name, a.backend]));
     const items = [];
 
     const isDefault = topic.toLowerCase() === 'default';
+    const currentHistory = browseRoutes && history.find(h => h.agent.toLowerCase() === prefix);
+    const currentAgent = browseRoutes && agents.find(a => a.name.toLowerCase() === prefix);
+    if (currentHistory || currentAgent) {
+      const agent = currentHistory?.agent || currentAgent.name;
+      const backend = backendByAgent.get(agent) || null;
+      const freshSuffix = adhocSuffix || '!';
+      const routeOption = (suffix, lastPrompt, meta) => ({
+        label: _acRouteLabel(topic, agent + suffix, backend),
+        insert: `#${topic}@${agent}${suffix}`,
+        sub: _acLastPrompt(lastPrompt),
+        meta,
+      });
+      items.push(routeOption(freshSuffix, currentHistory?.last_adhoc_prompt, 'adhoc'));
+      if (!isDefault) items.push(routeOption('', currentHistory?.last_prompt));
+      const historyStart = items.length;
+      const currentRoutes = new Set(items.map(item => normalizePromptHistoryRoute(item.insert).toLowerCase()));
+      const otherTopics = topics.filter(t => {
+        const route = `#${t.name}${t.agent ? '@' + t.agent : ''}${t.sticky_adhoc ? '!' : ''}`;
+        return !currentRoutes.has(route.toLowerCase());
+      });
+      items.push(...topicAutocompleteItems(otherTopics, replacingSlug));
+      _acRender(items.map(item => ({
+        ...item, replaceSlug: replacingSlug, deleteTopic: null, collapseSlug: true, highlightOnly: true,
+      })), 'Routes', historyStart);
+      return;
+    }
     // Used agents — with last prompt
     for (const h of history) {
       if (!h.agent.toLowerCase().startsWith(prefix)) continue;
@@ -18950,7 +18997,9 @@ document.addEventListener('keydown', e => {
   }
 });
 document.addEventListener('click', e => {
-  if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete();
+  if (!acEl.contains(e.target) && e.target !== input && !topicChipEl.contains(e.target)) {
+    hideAutocomplete();
+  }
   if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
   const ctxPopup = document.getElementById('ctx-popup');
   const statsTurnPopup = document.getElementById('stats-turn-popup');
