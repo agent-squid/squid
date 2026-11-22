@@ -245,15 +245,11 @@ def _materialize_tree(repo_root: Path, commit: str, dest: Path) -> None:
         raise
 
 
-def _snapshot_dir(repo_root: Path, work_tree: Path) -> str:
-    """
-    Build a git tree object for work_tree's current file content, using
-    repo_root's object database. work_tree need not be a git repo itself —
-    this is how a branchless turn directory (see _materialize_tree) gets
-    captured. Unlike _snapshot_tree, this does not seed from `read-tree
-    HEAD`: work_tree's content may have started from an older base than
-    repo_root's current HEAD, and seeding from HEAD would make repo_root
-    drift since the turn started look like a change the turn itself made.
+def _snapshot_dir(repo_root: Path, work_tree: Path, base_commit: Optional[str]) -> str:
+    """Snapshot an isolated directory using its original tracked paths.
+
+    Seed from the recorded base so tracked paths still count even if ignored,
+    and changes to the backing checkout's HEAD stay out of the snapshot.
     """
     fd, index_path = tempfile.mkstemp(prefix="squid-worktree-index-")
     os.close(fd)
@@ -262,6 +258,8 @@ def _snapshot_dir(repo_root: Path, work_tree: Path) -> str:
         env = os.environ.copy()
         env["GIT_INDEX_FILE"] = index_path
         env["GIT_WORK_TREE"] = str(work_tree)
+        if base_commit is not None:
+            _run_git(repo_root, "read-tree", base_commit, env=env)
         _run_git(repo_root, "add", "-A", "--", ".", env=env)
         for rel in set(_linked_dir_rel_paths(repo_root)) | set(_external_dir_symlink_rel_paths(work_tree)):
             _run_git(repo_root, "rm", "-r", "--cached", "--ignore-unmatch", "--", rel, env=env, check=False)
@@ -515,8 +513,8 @@ def sync_after_turn(
         # reaches this path even if the runner never reached its completion guard.
         if not git_only_turn:
             _promote_new_ignored_files(repo_root, wt)
-        turn_tree = (_snapshot_dir(repo_root, wt) if git_only_turn else
-                     turn_tree or _snapshot_dir(repo_root, wt))
+        turn_tree = (_snapshot_dir(repo_root, wt, base_commit) if git_only_turn else
+                     turn_tree or _snapshot_dir(repo_root, wt, base_commit))
         base_tree = _run_git(repo_root, "show", "--format=%T", "--no-patch", base_commit).stdout.strip()
         if git_only_turn:
             new_ignored_files = any(

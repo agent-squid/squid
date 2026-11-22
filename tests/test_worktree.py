@@ -348,6 +348,53 @@ def test_sync_after_turn_reuses_supplied_turn_tree_for_noop(tmp_path, monkeypatc
     assert conflicts == []
 
 
+@pytest.mark.parametrize("reuse_turn_tree", [False, True])
+def test_sync_preserves_tracked_ignored_files(tmp_path, reuse_turn_tree):
+    from agent.git_changes import prepare_trackers
+
+    repo = init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text("*.local\n")
+    for name in ("keep", "edit", "delete"):
+        (repo / f"{name}.local").write_text("base\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "add", "-f", "keep.local", "edit.local", "delete.local")
+    git(repo, "commit", "-m", "Track ignored files")
+    wt = ensure_worktree(repo, "t", "408")
+
+    (repo / "upstream.local").write_text("upstream\n")
+    git(repo, "add", "-f", "upstream.local")
+    git(repo, "commit", "-m", "Advance backing HEAD")
+
+    tracker, = prepare_trackers(
+        [str(wt)], topic="t", agent="codex", adhoc=False, msg_id=408,
+        worktree_sources={str(wt): str(repo)},
+    )
+    assert tracker.build_event() is None
+    assert git(repo, "ls-tree", "--name-only", tracker.head_tree).stdout.splitlines() == [
+        ".gitignore", "delete.local", "edit.local", "file.txt", "keep.local",
+    ]
+
+    (wt / "edit.local").write_text("edited\n")
+    (wt / "delete.local").unlink()
+    (wt / "new.local").write_text("ignored\n")
+
+    event = tracker.build_event()
+    assert "edit.local" in event["diff"]
+    assert "delete.local" in event["diff"]
+    assert "keep.local" not in event["diff"]
+    assert "upstream.local" not in event["diff"]
+    assert "new.local" not in event["diff"]
+    assert sync_after_turn(
+        repo, "t", "408", msg_id=408,
+        turn_tree=tracker.head_tree if reuse_turn_tree else None,
+    ) == []
+    assert (repo / "keep.local").read_text() == "base\n"
+    assert (repo / "edit.local").read_text() == "edited\n"
+    assert (repo / "upstream.local").read_text() == "upstream\n"
+    assert not (repo / "delete.local").exists()
+    assert not (repo / "new.local").exists()
+
+
 def test_sync_after_turn_promotes_without_source_commit(tmp_path):
     repo = init_repo(tmp_path / "repo")
     head_before = git(repo, "rev-parse", "HEAD").stdout.strip()

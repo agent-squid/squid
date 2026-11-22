@@ -44,41 +44,18 @@ def _repo_root(cwd: Path) -> Optional[Path]:
     return Path(out).resolve() if out else None
 
 
-def _snapshot_tree(repo_root: Path, work_tree: Optional[Path] = None) -> str:
-    """
-    Build a tree object for work_tree's current file content, using
-    repo_root's object database. Defaults to snapshotting repo_root itself
-    (its own dirty state relative to HEAD).
-
-    When work_tree is a separate, branchless per-turn directory (no .git of
-    its own — see ADR-0025), it is captured via GIT_WORK_TREE instead, with
-    no `read-tree HEAD` seeding: the turn directory may have started from an
-    older base than repo_root's current HEAD, and seeding from HEAD would
-    make repo_root drift since the turn started look like part of the turn's
-    own diff.
-    """
+def _snapshot_tree(repo_root: Path) -> str:
+    """Snapshot the backing checkout for a direct tracker."""
     fd, index_path = tempfile.mkstemp(prefix="agent-squid-index-")
     os.close(fd)
     os.unlink(index_path)
     try:
-        env = os.environ.copy()
-        env["GIT_INDEX_FILE"] = index_path
-        if work_tree is not None and work_tree != repo_root:
-            env["GIT_WORK_TREE"] = str(work_tree)
-        else:
-            _run_git(repo_root, "read-tree", "HEAD", env=env)
+        env = dict(os.environ, GIT_INDEX_FILE=index_path)
+        _run_git(repo_root, "read-tree", "HEAD", env=env)
         _run_git(repo_root, "add", "-A", "--", ".", env=env)
-        if work_tree is not None and work_tree != repo_root:
-            from .worktree import _external_dir_symlink_rel_paths, _linked_dir_rel_paths
-
-            for rel in set(_linked_dir_rel_paths(repo_root)) | set(_external_dir_symlink_rel_paths(work_tree)):
-                _run_git(repo_root, "rm", "-r", "--cached", "--ignore-unmatch", "--", str(rel), env=env, check=False)
         return _run_git(repo_root, "write-tree", env=env).stdout.strip()
     finally:
-        try:
-            os.unlink(index_path)
-        except FileNotFoundError:
-            pass
+        Path(index_path).unlink(missing_ok=True)
 
 
 def _read_nul_diff(repo_root: Path, option: str, base: str, head: str) -> str:
@@ -212,6 +189,7 @@ class GitChangeTracker:
     persistent: bool
     msg_id: Optional[int] = None
     head_tree: Optional[str] = None
+    base_commit: Optional[str] = None
 
     @classmethod
     def prepare(
@@ -225,7 +203,7 @@ class GitChangeTracker:
         source_cwd: Optional[str] = None,
         source_root: Optional[str] = None,
     ) -> Optional["GitChangeTracker"]:
-        del topic, agent, adhoc
+        del adhoc
         run_cwd = Path(cwd).expanduser().resolve()
 
         event_cwd = Path(source_cwd).expanduser().resolve() if source_cwd else run_cwd
@@ -240,22 +218,51 @@ class GitChangeTracker:
             return None
         event_root = event_root or git_root
 
-        base_tree = _snapshot_tree(git_root, run_cwd)
+        from .worktree import (
+            _base_commit_from_registry,
+            _snapshot_dir,
+            base_commit_for,
+            worktree_path,
+        )
+
+        work_tree = run_cwd
+        base_commit = None
+        if work_tree != git_root and msg_id is not None:
+            turn_id = str(msg_id)
+            turn_path = worktree_path(git_root, topic, turn_id).resolve()
+            if work_tree.is_relative_to(turn_path):
+                work_tree = turn_path
+                base_commit = (
+                    _base_commit_from_registry(git_root, topic, turn_id)
+                    or base_commit_for(git_root, topic, turn_id)
+                )
+                if not base_commit:
+                    raise RuntimeError(f"missing base commit for worktree {work_tree}")
+        base_tree = (
+            _snapshot_tree(git_root) if work_tree == git_root
+            else _snapshot_dir(git_root, work_tree, base_commit)
+        )
         return cls(
             source_cwd=event_cwd,
             source_root=event_root,
             run_cwd=run_cwd,
             repo_root=git_root,
-            work_tree=run_cwd,
+            work_tree=work_tree,
             event_cwd=event_cwd,
             event_repo_root=event_root,
             base_tree=base_tree,
             persistent=True,
             msg_id=msg_id,
+            base_commit=base_commit,
         )
 
     def build_event(self) -> Optional[dict]:
-        head_tree = _snapshot_tree(self.repo_root, self.work_tree)
+        from .worktree import _snapshot_dir
+
+        head_tree = (
+            _snapshot_tree(self.repo_root) if self.work_tree == self.repo_root
+            else _snapshot_dir(self.repo_root, self.work_tree, self.base_commit)
+        )
         self.head_tree = head_tree
         name_status = _read_nul_diff(self.repo_root, "--name-status", self.base_tree, head_tree)
         files = _parse_name_status(name_status)
@@ -490,7 +497,6 @@ def prepare_trackers(
         dedupe_key = repo_root or source
         if dedupe_key in seen:
             continue
-        seen.add(dedupe_key)
         source_cwd, source_root = _source_for_worktree_path(source, resolved_worktree_sources)
         tracker = prepare_tracker(
             str(source),
@@ -499,5 +505,9 @@ def prepare_trackers(
             **kwargs,
         )
         if tracker:
+            dedupe_key = tracker.work_tree
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
             trackers.append(tracker)
     return trackers
