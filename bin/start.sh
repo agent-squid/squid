@@ -89,7 +89,7 @@ RELOAD=""
 [[ "${DEV:-}" == "1" ]] && RELOAD="--reload"
 
 cd "$ROOT"
-nohup "$VENV/bin/python" -m agent.server $RELOAD > "$BOOT_LOG" 2>&1 &
+PATH="$VENV/bin:$PATH" nohup "$VENV/bin/python" -m agent.server $RELOAD > "$BOOT_LOG" 2>&1 &
 echo $! > "$PID_FILE"
 
 # ── health check ─────────────────────────────────────────────────────────────
