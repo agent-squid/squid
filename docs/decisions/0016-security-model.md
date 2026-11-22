@@ -1,9 +1,9 @@
 ---
 status: accepted
 date: 2026-06-01
-updated: 2026-08-28
+updated: 2026-11-22
 ---
-# ADR-0016: Security Model — Network Isolation
+# ADR-0016: Security Model — Network Isolation and Instance Authentication
 
 ## Context and Problem Statement
 
@@ -19,6 +19,84 @@ API costs. The question is what level of access control is appropriate for a
 personal, single-user tool.
 
 ## Decision Outcome
+
+### Amendment (2026-11-22) — Authenticate access to the Squid instance
+
+Squid will retain loopback binding and require application credentials for
+protected operations. Tailscale and SSH forwarding control network reachability.
+A forwarded connection can reach Squid with a loopback peer address, so source
+address alone cannot grant access. This amendment supersedes the earlier decision
+to rely on network isolation for application access. It describes the target
+behavior. The transport and setup sections below document the existing behavior.
+See the [implementation plan](../plans/adr-0016-instance-authentication.md).
+
+#### Browser pairing and sessions
+
+Squid serves one owner. Each paired browser represents that owner on a separate
+device and has the same owner permissions. The owner initiates first-run pairing
+through the host CLI. A paired owner browser can use `/remote` to generate a QR
+code containing a short-lived, single-use pairing credential for another device.
+Only the host CLI or a paired owner browser can issue a pairing credential.
+
+The browser exchanges the credential for a revocable, per-device session. The
+exchange consumes the credential atomically. Use a URL fragment to carry the
+pairing credential and remove it from the browser URL before exchanging it.
+Keep the session in an `HttpOnly`, `SameSite` cookie and use `Secure` for HTTPS.
+Remote browser pairing and sessions require HTTPS. The earlier plain HTTP IP
+route is unsuitable for authenticated remote browsing. Direct local access
+still requires an authorized session for protected browser operations.
+
+#### Endpoint authorization
+
+Each HTTP endpoint, WebSocket handshake, and privileged WebSocket operation
+declares its allowed caller and authority. Protected operations fail closed
+when the caller or its scope cannot be verified.
+
+| Caller | Credential | Authority |
+|---|---|---|
+| Unauthenticated browser | None | Minimal sign-in or pairing surface and its static assets |
+| Paired browser | Revocable device session | Browser APIs and WebSocket operations granted to the session |
+| Agent shell tool | Scoped turn credential | Granted operations and targets for the active turn |
+| Host operator tool | Dedicated host control credential | Explicit operator operations allowed for that credential |
+
+This covers file access, chat and command APIs, and terminal and auth-session
+streams. Validate browser origins for protected state changes and WebSocket
+handshakes. Browser Keychain unlock requires a paired owner session, explicit
+user initiation, and the existing remote-unlock opt-in unless the host can
+positively establish local access. TCP loopback, browser headers, and a
+loopback address behind SSH or Tailscale forwarding cannot establish local
+access on their own. With browser unlock disabled, the owner can still use
+macOS Keychain tools on the host. Keep password input in the dedicated
+auth-session flow.
+
+Keep existing scoped credentials for tools such as `agentsquid watch`,
+`agentsquid search`, and `agentsquid continue`. A browser-started turn records
+the initiating session ID for attribution. Shell subprocesses receive the
+scoped credentials appropriate to the turn. Browser cookies and pairing
+credentials stay out of their environment. General-purpose remote developer
+API keys are deferred until there is a concrete client use case. Integration
+tests can create an ephemeral credential or session in their test instance.
+
+#### Revocation and rollout
+
+Revoking a device session blocks new requests and closes its WebSockets.
+Terminate browser-owned interactive terminal and auth processes associated with
+the revoked session. A normal connection drop can still support reconnect while
+the owning session is valid. Every attach and replay must check that session
+before connecting to the existing process or returning its output.
+
+The owner can revoke all browser sessions and outstanding pairing credentials.
+The host CLI remains available for recovery. Ordinary agent turns already
+accepted by the instance retain their independent credential lifecycle and
+finish unless separately stopped or revoked. Attribution records may retain a
+session identifier after revocation.
+
+Existing bookmarks lead to the pairing surface until the browser establishes a
+session. Verify browser pairing, HTTP and WebSocket denial before sign-in,
+single-use credential exchange, device revocation, and allowed local tool
+operations before enabling the new boundary. The
+[Shore relay ADR](0039-remote-access-via-shore-relay.md) covers Shore's separate
+remote transport and pairing model.
 
 ### Host binding restricted to loopback
 
@@ -151,7 +229,7 @@ the list of starting points shown in the file viewer's root view — a
 favorites list, not an allowlist. `/localfile` will serve any path the OS
 user can read.
 
-## Why bearer token auth was removed (2026-06-17)
+## Historical rationale for removing bearer token auth (2026-06-17)
 
 An earlier version of this ADR included a bearer token as Layer 2. It was
 removed for these reasons:
@@ -165,7 +243,7 @@ removed for these reasons:
   `~/.squid/squid.yaml` and constructing a `?token=` URL, which caused confusion on
   fresh installs.
 
-## Consequences
+## Consequences of the original network-only model
 
 - Good: startup validation prevents accidental public-IP binding
 - Good: no first-run auth friction on fresh installs

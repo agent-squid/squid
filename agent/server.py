@@ -28,8 +28,10 @@ import ipaddress
 import json
 import logging
 import logging.handlers
+import math
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -3641,42 +3643,157 @@ async def delete_annotation(kind: str, msg_id: int):
     return JSONResponse({"ok": True})
 
 
-@app.post("/config/creds")
-async def save_creds(req: CredsRequest):
-    creds.save(req.claude_org_id.strip(), req.claude_session_key.strip())
-    return JSONResponse({"ok": True})
-
-
 @app.get("/config/creds/capabilities")
 async def credential_capabilities(request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "Cross-origin credential requests are not allowed."}, status_code=403)
     direct_host = request.client.host if request.client else None
+    macos = sys.platform == "darwin"
     return JSONResponse({
-        "host_browser_detection": sys.platform == "darwin" and _request_is_loopback(request.headers, direct_host),
-    })
+        "host_browser_detection": macos and _request_is_loopback(request.headers, direct_host),
+        "keychain_unlock": macos and _keychain_unlock_allowed(request.headers, direct_host),
+    }, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/config/creds/profiles")
+async def claude_meter_profiles(request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "Cross-origin Claude meter requests are not allowed."}, status_code=403)
+    if sys.platform != "darwin" or not _request_is_loopback(request.headers, request.client.host if request.client else None):
+        return JSONResponse({"error": "Host detection requires a direct macOS loopback connection."}, status_code=403)
+    profiles = await asyncio.to_thread(creds.claude_browser_profiles)
+    return JSONResponse(
+        [{"id": key, "label": label} for key, (label, _) in profiles.items()],
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+class ClaudeBrowserProfileRequest(BaseModel):
+    profile: str
+
+
+class ClaudeMeterConfirmation(BaseModel):
+    confirmation: str
+
+
+ClaudeMeterCredentials = tuple[str | None, str | None, str | None]
+_claude_meter_preview: tuple[str, float, str, str, str, ClaudeMeterCredentials] | None = None
+_CLAUDE_METER_REVIEW_SECONDS = 300
+
+
+def _expire_claude_meter_preview(confirmation: str) -> None:
+    global _claude_meter_preview
+    if _claude_meter_preview is not None and _claude_meter_preview[0] == confirmation:
+        _claude_meter_preview = None
+
+
+def _saved_claude_meter() -> ClaudeMeterCredentials:
+    saved = creds.load()
+    return (saved.get("claude_org_id") or saved.get("org_id"),
+            saved.get("claude_session_key") or saved.get("session_key"),
+            saved.get("claude_email"))
+
+
+async def _preview_claude_meter(org_id: str | None, session_key: str | None) -> JSONResponse:
+    from curl_cffi.requests import AsyncSession
+
+    global _claude_meter_preview
+    if not org_id or not session_key:
+        return JSONResponse({"error": "Claude organization and session key are both required."}, status_code=400)
+    previous = _saved_claude_meter()
+    try:
+        async with AsyncSession() as session:
+            response = await session.get(
+                "https://claude.ai/api/account",
+                headers={"Cookie": f"sessionKey={session_key}", "Accept": "application/json"},
+                impersonate="chrome", allow_redirects=False, timeout=15,
+            )
+            response.raise_for_status()
+            account = response.json()
+        email = account["email_address"]
+        organization = next(
+            membership["organization"] for membership in account["memberships"]
+            if membership["organization"]["uuid"] == org_id
+        )
+        if not isinstance(email, str) or not email.strip():
+            raise ValueError("Missing Claude email")
+    except Exception:
+        return JSONResponse({
+            "error": "Could not verify the Claude account and organization. Check the selected profile or session.",
+        }, status_code=422)
+
+    previous_org, _, previous_email = previous
+    confirmation = secrets.token_urlsafe(32)
+    expires = time.monotonic() + _CLAUDE_METER_REVIEW_SECONDS
+    _claude_meter_preview = (confirmation, expires, org_id, session_key, email, previous)
+    asyncio.get_running_loop().call_later(
+        _CLAUDE_METER_REVIEW_SECONDS, _expire_claude_meter_preview, confirmation,
+    )
+    return JSONResponse({
+        "confirmation": confirmation, "email": email,
+        "organization": organization.get("name") or org_id, "claude_org_id": org_id,
+        "previous_email": previous_email, "previous_org": previous_org,
+        "account_changed": bool(previous_org and (
+            previous_org != org_id or not previous_email or previous_email.casefold() != email.casefold()
+        )),
+    }, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/config/creds")
+async def legacy_save_claude_meter(request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "Cross-origin Claude meter requests are not allowed."}, status_code=403)
+    return JSONResponse({"error": "Refresh Squid to review and save Claude meter credentials."}, status_code=409)
+
+
+@app.post("/config/creds/preview")
+async def preview_claude_meter(request: Request, req: CredsRequest):
+    if not _same_origin(request):
+        return JSONResponse({"error": "Cross-origin Claude meter requests are not allowed."}, status_code=403)
+    return await _preview_claude_meter(req.claude_org_id.strip(), req.claude_session_key.strip())
 
 
 @app.post("/config/creds/auto")
-async def auto_detect_creds(request: Request):
-    direct_host = request.client.host if request.client else None
-    if not _request_is_loopback(request.headers, direct_host):
-        port = _cfg.get("server", {}).get("port", 8000)
-        return JSONResponse({
-            # The why already lives in the static .creds-auto-desc hint next to
-            # the button — keep this one short and actionable, not a repeat.
-            "error": "Not a direct connection — open:",
-            "local_url": f"http://127.0.0.1:{port}/",
-        }, status_code=403)
+async def auto_detect_creds(request: Request, req: ClaudeBrowserProfileRequest | None = None):
+    if not _same_origin(request):
+        return JSONResponse({"error": "Cross-origin Claude meter requests are not allowed."}, status_code=403)
+    if req is None:
+        return JSONResponse({"error": "Refresh Squid to choose a browser profile for the Claude meter."}, status_code=409)
+    if sys.platform != "darwin" or not _request_is_loopback(request.headers, request.client.host if request.client else None):
+        return JSONResponse({"error": "Host detection requires a direct macOS loopback connection."}, status_code=403)
     try:
-        found = await asyncio.to_thread(creds.read_chrome_claude_creds)
-    except RuntimeError as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-    session_key = found.get("sessionKey")
-    org_id = found.get("lastActiveOrg")
-    if not session_key or not org_id:
-        missing = [k for k, v in {"sessionKey": session_key, "lastActiveOrg": org_id}.items() if not v]
-        return JSONResponse({"error": f"Cookies not found: {', '.join(missing)}. Make sure you are logged into claude.ai in Chrome."}, status_code=404)
-    creds.save(org_id, session_key)
-    return JSONResponse({"ok": True, "claude_org_id": org_id})
+        found = await asyncio.to_thread(creds.read_claude_browser_creds, req.profile)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    return await _preview_claude_meter(found["lastActiveOrg"], found["sessionKey"])
+
+
+@app.post("/config/creds/confirm")
+async def confirm_claude_meter(request: Request, req: ClaudeMeterConfirmation):
+    if not _same_origin(request):
+        return JSONResponse({"error": "Cross-origin Claude meter requests are not allowed."}, status_code=403)
+    global _claude_meter_preview
+    preview = _claude_meter_preview
+    if preview is None or req.confirmation != preview[0]:
+        return JSONResponse({"error": "Review the Claude account again before saving."}, status_code=409)
+    _, expires, org_id, session_key, email, previous = preview
+    _claude_meter_preview = None
+    if time.monotonic() > expires or _saved_claude_meter() != previous:
+        return JSONResponse({"error": "The review expired or the saved session changed. Review the account again."}, status_code=409)
+    usage_response = await _fetch_claude_web_usage(org_id, session_key)
+    if usage_response.status_code != 200 or not _has_claude_web_usage(_json_response_data(usage_response)):
+        return JSONResponse({
+            "error": "Could not load usage for the reviewed Claude organization. The saved meter was not changed.",
+        }, status_code=502)
+    if time.monotonic() > expires or _saved_claude_meter() != previous:
+        return JSONResponse({"error": "The review expired or the saved session changed. Review the account again."}, status_code=409)
+    try:
+        creds.save(org_id, session_key, email)
+    except OSError:
+        log.exception("Could not write Claude meter credentials")
+        return JSONResponse({"error": "Could not save the Claude meter credentials. The saved meter was not changed."},
+                            status_code=500)
+    return JSONResponse({"ok": True})
 
 
 @app.post("/config/creds/codex")
@@ -3813,14 +3930,38 @@ async def quota_claude():
     session_key = creds.get_session_key()
     if not org_id or not session_key:
         return JSONResponse({"error": "credentials not configured"}, status_code=400)
+    return await _fetch_claude_web_usage(org_id, session_key)
+
+
+def _has_claude_web_usage(data: object) -> bool:
+    if not isinstance(data, dict):
+        return False
+    has_usage = False
+    for name in ("five_hour", "seven_day"):
+        window = data.get(name)
+        if window is None:
+            continue
+        if not isinstance(window, dict):
+            return False
+        utilization = window.get("utilization")
+        if utilization is None:
+            continue
+        if type(utilization) not in (int, float) or not 0 <= utilization < math.inf:
+            return False
+        has_usage = True
+    return has_usage
+
+
+async def _fetch_claude_web_usage(org_id: str, session_key: str) -> JSONResponse:
     try:
         from curl_cffi.requests import AsyncSession
         async with AsyncSession() as session:
             r = await session.get(
-                f"https://claude.ai/api/organizations/{org_id}/usage",
+                f"https://claude.ai/api/organizations/{urllib.parse.quote(org_id, safe='')}/usage",
                 headers={"Cookie": f"sessionKey={session_key}"},
                 impersonate="chrome",
                 allow_redirects=False,
+                timeout=15,
             )
         if r.status_code != 200:
             return JSONResponse({"error": f"claude.ai returned {r.status_code}"}, status_code=502)
@@ -4191,6 +4332,10 @@ async def _dedicated_claude_quota(provider: Provider) -> JSONResponse:
         return response
     except codex_subscription.SubscriptionBusy:
         return JSONResponse({"error": "Provider sign-in is in progress"}, status_code=401)
+    except codex_subscription.ClaudeKeychainInteractionRequired:
+        return JSONResponse({
+            "error": "Provider credentials unavailable", "code": "keychain_interaction_required",
+        }, status_code=401)
     except (OSError, ValueError):
         return JSONResponse({"error": "Provider credentials unavailable"}, status_code=401)
 
@@ -4271,6 +4416,24 @@ async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResp
         "raw": used, "used_percent": used, "reset_at": data.get("billingCycleEnd"),
         "title": data.get("autoModelSelectedDisplayMessage") or "Cursor usage",
     })
+
+
+@app.get("/quota/provider/{provider_id}/account")
+async def claude_quota_account(request: Request, provider_id: str):
+    if not _same_origin(request):
+        return JSONResponse({"error": "Cross-origin Claude meter requests are not allowed."}, status_code=403)
+    provider = get_provider(provider_id)
+    if not provider or provider.gauge.type != "claude" or not _uses_dedicated_gauge(provider):
+        return JSONResponse({"error": "No dedicated Claude meter for this provider."}, status_code=404)
+
+    try:
+        home = codex_subscription.home_for(provider.id, "claudecode")
+        details = await asyncio.to_thread(codex_subscription.claude_account_details, home) if home.is_dir() else None
+    except (OSError, ValueError):
+        details = None
+    if details is None:
+        return JSONResponse({"error": "Claude Code account could not be verified."}, status_code=409)
+    return JSONResponse(details, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/quota/provider/{provider_id}")

@@ -443,6 +443,7 @@ body {
   min-width: 340px;
 }
 #quota-creds-popup.open { display: flex; }
+#claude-web-meter-setup:not([hidden]) { display: contents; }
 #creds-org, #creds-key {
   background: var(--surface-2);
   border: 1px solid var(--border);
@@ -698,6 +699,16 @@ body {
   line-height: 1.4;
   white-space: normal;
 }
+#creds-profile {
+  max-width: 100%;
+  background: var(--surface-2);
+  color: var(--text-mid);
+  border: 1px solid var(--surface-3);
+  border-radius: 4px;
+}
+#creds-review {
+  overflow-wrap: anywhere;
+}
 .creds-auto-btn {
   background: #1e1e30;
   border: 1px solid #3a3a55;
@@ -885,6 +896,10 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.quota-account-detail {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
 }
 .quota-setup-btn {
   display: grid;

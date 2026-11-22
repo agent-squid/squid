@@ -10918,11 +10918,12 @@ function setVisibleQuotaBackend(backend) {
     const displayEl = document.getElementById(cfg.displayId);
     displayEl?.classList.remove('quota-hidden', 'loaded', 'error');
     const snapshot = quotaSnapshots[activeQuotaBackend];
-    const authRequired = snapshot?.authRequired === true;
+    const dedicatedClaude = gaugeType === 'claude' && _providerMetadata[backend]?.dedicated_login;
+    const meterIssue = dedicatedClaude && snapshot?.status === 'error';
     if (gaugeType === 'claude') {
-      quotaDisplay.classList.toggle('auth-required', authRequired);
-      quotaDisplay.disabled = !!_providerMetadata[backend]?.dedicated_login && !authRequired;
-      if (authRequired) quotaDisplay.setAttribute('aria-label', `${backendDisplayName(backend)} usage settings`);
+      quotaDisplay.classList.toggle('auth-required', meterIssue);
+      quotaDisplay.disabled = dedicatedClaude && !meterIssue;
+      if (meterIssue) quotaDisplay.setAttribute('aria-label', `${backendDisplayName(backend)} usage settings`);
       else quotaDisplay.removeAttribute('aria-label');
     }
     if (snapshot?.status === 'loaded') {
@@ -10932,13 +10933,13 @@ function setVisibleQuotaBackend(backend) {
       updateSevenDayGauge(activeQuotaBackend);
     } else if (snapshot?.status === 'error') {
       displayEl?.classList.add('error');
-      if (displayEl) displayEl.title = authRequired ? snapshot.text : (cfg.errorTitle ?? '');
+      if (displayEl) displayEl.title = meterIssue ? snapshot.text : (cfg.errorTitle ?? '');
       updateGaugeLabel(activeQuotaBackend);
       updateSevenDayGauge(activeQuotaBackend);
       const label = document.getElementById(cfg.labelId);
-      if (label) label.textContent = authRequired ? '' : snapshot.text;
+      if (label) label.textContent = meterIssue ? '' : snapshot.text;
       const pct = document.getElementById(cfg.fiveHourPctId);
-      if (authRequired && pct) pct.textContent = '!';
+      if (meterIssue && pct) pct.textContent = '!';
       const arc = document.getElementById(cfg.pieArcId);
       if (arc) arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
     } else {
@@ -11104,13 +11105,17 @@ function showQuotaError(backend, text, options = {}) {
   state.sevenDay = null;
   if (state.timer) { clearTimeout(state.timer); state.timer = null; }
 
-  setQuotaSnapshot(backend, { status: 'error', text, authRequired: options.authRequired });
+  setQuotaSnapshot(backend, { status: 'error', text, authRequired: options.authRequired, errorCode: options.errorCode });
 
   if (backend === activeQuotaBackend) setVisibleQuotaBackend(backend);
 }
 
 function showTransientQuotaError(backend, text) {
   const state = quotaStateFor(backend);
+  if (quotaSnapshots[backend]?.errorCode === 'keychain_interaction_required') {
+    text = 'Claude usage is temporarily unavailable.';
+    showQuotaError(backend, text, { clearRetry: false });
+  }
   if (state.retryTimer) return;
   const delay = QUOTA_ERROR_RETRY_DELAYS[state.retryAttempt++];
   if (delay == null) {
@@ -11167,7 +11172,12 @@ async function fetchQuotaForBackend(backend, requireFresh = false) {
         state.pct = null;
         state.sevenDay = null;
         if (gaugeTypeFor(provider) === 'claude') {
-          showRecoverableQuotaError(provider, `Sign in to ${label}`, { authRequired: true });
+          const data = await res.json().catch(() => null);
+          const authRequired = data?.error === 'Provider is signed out';
+          const usageRejected = data?.error === 'Claude login could not authorize usage';
+          const message = authRequired ? `Sign in to ${label}`
+            : (usageRejected ? 'Claude usage unavailable' : data?.error || 'Claude usage unavailable');
+          showRecoverableQuotaError(provider, message, { authRequired, errorCode: data?.code });
         } else {
           showRecoverableQuotaError(provider, `${label} auth`);
         }
@@ -11245,6 +11255,83 @@ async function fetchQuota() {
   return fetchQuotaForBackend('anthropic');
 }
 
+function showClaudeWebMeterSetup() {
+  document.getElementById('claude-meter-guide').hidden = true;
+  document.getElementById('claude-web-meter-setup').hidden = false;
+}
+
+function openClaudeMeterGuide(provider, afterUnlock = false) {
+  const popup = document.getElementById('quota-creds-popup');
+  const guide = document.getElementById('claude-meter-guide');
+  const message = document.getElementById('claude-meter-message');
+  const action = document.getElementById('claude-meter-action');
+  const retry = document.getElementById('claude-meter-retry');
+  const snapshot = quotaSnapshotForProvider(provider);
+  const keychainIssue = snapshot?.errorCode === 'keychain_interaction_required';
+
+  document.getElementById('claude-web-meter-setup').hidden = true;
+  document.getElementById('claude-meter-title').textContent = `${backendDisplayName(provider)} usage`;
+  guide.hidden = false;
+  popup.classList.add('open');
+  action.hidden = true;
+  action.onclick = null;
+  retry.hidden = snapshot?.status === 'loaded';
+  retry.disabled = false;
+
+  async function refresh() {
+    await quotaStateFor(provider).requestDone;
+    await fetchQuotaForBackend(provider);
+  }
+
+  retry.onclick = async function retryMeter() {
+    retry.disabled = true;
+    message.textContent = 'Checking usage…';
+    await refresh();
+    if (popup.classList.contains('open') && !guide.hidden && retry.onclick === retryMeter) {
+      openClaudeMeterGuide(provider, afterUnlock);
+    }
+  };
+
+  if (snapshot?.status === 'loaded') {
+    message.textContent = 'Usage is connected.';
+  } else if (keychainIssue) {
+    const hostHelp = 'On the Mac running Squid, unlock the login Keychain and approve access to the Claude Code credential if prompted. Then retry the meter.';
+    message.textContent = afterUnlock
+      ? `Squid still can’t read the Claude Code credential. ${hostHelp}`
+      : `Squid can’t read the Claude Code credential from the Mac’s Keychain. ${hostHelp}`;
+    if (!afterUnlock) {
+      const retryHandler = retry.onclick;
+      fetch('/config/creds/capabilities').then(res => res.ok ? res.json() : null).then(data => {
+        if (!data?.keychain_unlock || retry.onclick !== retryHandler
+            || !popup.classList.contains('open') || guide.hidden || retry.disabled) return;
+        message.textContent = 'Squid can’t read the Claude Code credential from the Mac’s Keychain. Try unlocking it. Squid will check usage again afterward.';
+        action.textContent = 'Unlock Keychain';
+        action.hidden = false;
+        action.onclick = () => {
+          popup.classList.remove('open');
+          openAuthPanel('keychain', async () => {
+            await refresh();
+            openClaudeMeterGuide(provider, true);
+          }, { mode: 'unlock' });
+        };
+      }).catch(() => {});
+    }
+  } else if (snapshot?.authRequired) {
+    message.textContent = 'Sign in to Claude Code for this provider to load usage.';
+    action.textContent = 'Sign in to Claude Code';
+    action.hidden = false;
+    action.onclick = () => {
+      popup.classList.remove('open');
+      openAuthPanel('claudecode', async () => {
+        await refresh();
+        openClaudeMeterGuide(provider);
+      }, { provider });
+    };
+  } else {
+    message.textContent = snapshot?.text || 'Claude Code usage is unavailable. Retry the meter.';
+  }
+}
+
 function initQuota() {
   const cfg = QUOTA_CONFIG.claude;
   quotaDisplay.style.setProperty('--quota-accent', agentThemeColor('anthropic'));
@@ -11274,7 +11361,20 @@ function initQuota() {
   const credsPopup = document.getElementById(cfg.credsPopupId);
   quotaDisplay.addEventListener('click', () => {
     if (gaugeTypeFor(activeQuotaBackend) !== 'claude') return;
-    credsPopup.classList.toggle('open');
+    if (_providerMetadata[activeQuotaBackend]?.dedicated_login) {
+      if (credsPopup.classList.contains('open') && !document.getElementById('claude-meter-guide').hidden) {
+        credsPopup.classList.remove('open');
+      } else {
+        openClaudeMeterGuide(activeQuotaBackend);
+      }
+      return;
+    }
+    if (!document.getElementById('claude-meter-guide').hidden) {
+      showClaudeWebMeterSetup();
+      credsPopup.classList.add('open');
+    } else {
+      credsPopup.classList.toggle('open');
+    }
   });
   document.addEventListener('click', (e) => {
     if (!quotaDisplay.contains(e.target) && !credsPopup.contains(e.target))
@@ -11444,60 +11544,98 @@ function initCreds() {
   const autoBtn    = document.getElementById('creds-auto');
   const autoStatus = document.getElementById('creds-auto-status');
 
-  // The server evaluates connection and host capabilities; hostnames cannot
-  // distinguish remote browsers from local clients using Tailscale or a proxy.
-  fetch('/config/creds/capabilities').then(r => r.ok ? r.json() : null).then(data => {
-    if (data?.host_browser_detection === false) {
-      autoBtn.disabled = true;
-      autoBtn.title = 'Use browser import for this connection or host.';
-      autoStatus.textContent = 'Use “Set up from this browser” below for this connection or host.';
-      document.getElementById('claude-remote-guide').open = true;
-    }
-  }).catch(() => { /* Older hosts can still return an actionable detection error. */ });
-  autoBtn.addEventListener('click', async () => {
-    autoBtn.disabled = true;
-    autoStatus.textContent = 'detecting…';
-    let isError = false;
-    try {
-      const res = await fetch('/config/creds/auto', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok) {
-        autoStatus.textContent = `saved ✓ (org: ${(data.claude_org_id || '').slice(0, 8)}…)`;
-        await refreshQuotaAfterCredentialSave('claude');
-      } else {
-        isError = true;
-        if (data.local_url) {
-          autoStatus.textContent = 'Host detection requires a direct loopback connection. Use “Set up from this browser” below for a remote or headless host.';
-          document.getElementById('claude-remote-guide').open = true;
-        } else {
-          autoStatus.textContent = data.error || 'Detection failed. Use “Set up from this browser” below.';
-        }
-      }
-    } catch { isError = true; autoStatus.textContent = 'error'; }
-    autoBtn.disabled = false;
-    setTimeout(() => { autoStatus.innerHTML = ''; }, isError ? 12000 : 5000);
+  const profile = document.getElementById('creds-profile');
+  const review = document.getElementById('creds-review');
+  const confirm = document.getElementById('creds-confirm');
+  let confirmation;
+  let busy = false;
+
+  function updateButtons() {
+    autoBtn.disabled = busy || !profile.value;
+    saveBtn.disabled = busy;
+    confirm.disabled = busy || !confirmation;
+  }
+
+  function clearReview() {
+    confirmation = undefined;
+    review.hidden = true;
+    updateButtons();
+  }
+
+  for (const input of [profile, orgInput, keyInput]) input.addEventListener('input', clearReview);
+
+  fetch('/config/creds/profiles').then(async res => {
+    if (!res.ok) throw new Error();
+    for (const item of await res.json()) profile.add(new Option(item.label, item.id));
+    profile.disabled = false;
+  }).catch(() => {
+    autoStatus.textContent = 'Use “Set up from this browser” below for this connection or host.';
+    document.getElementById('claude-remote-guide').open = true;
   });
 
-  saveBtn.addEventListener('click', async () => {
-    const claude_org_id      = orgInput.value.trim();
-    const claude_session_key = keyInput.value.trim();
-    if (!claude_org_id || !claude_session_key) { status.textContent = 'both fields required'; return; }
+  async function post(path, body) {
+    const res = await fetch(`/config/creds${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Claude meter setup failed.');
+    return data;
+  }
+
+  async function preview(path, body, message, inputs) {
+    busy = true;
+    clearReview();
+    status.textContent = '';
+    message.textContent = 'Verifying Claude account…';
+    inputs.forEach(input => { input.disabled = true; });
     try {
-      const res = await fetch('/config/creds', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ claude_org_id, claude_session_key }),
-      });
-      if (res.ok) {
-        status.textContent = 'saved ✓';
-        keyInput.value = '';
-        const usage = await refreshQuotaAfterCredentialSave('claude');
-        status.textContent = usage ? 'saved ✓ · usage connected' : 'saved · usage unavailable; check organization and session';
-      } else {
-        status.textContent = 'failed';
-      }
-    } catch { status.textContent = 'error'; }
-    setTimeout(() => { status.textContent = ''; }, 3000);
+      const data = await post(path, body);
+      const organization = data.organization === data.claude_org_id
+        ? data.organization : `${data.organization} (${data.claude_org_id})`;
+      document.getElementById('creds-identity').textContent = `${data.email} · ${organization}`;
+      document.getElementById('creds-account-change').textContent = data.account_changed
+        ? `This will replace the saved meter for ${data.previous_email || 'an unverified account'} · ${data.previous_org}.`
+        : '';
+      confirmation = data.confirmation;
+      review.hidden = false;
+      message.textContent = '';
+    } catch (error) {
+      message.textContent = error.message;
+    } finally {
+      inputs.forEach(input => { input.disabled = false; });
+      busy = false;
+      updateButtons();
+    }
+  }
+
+  autoBtn.addEventListener('click', () => preview('/auto', { profile: profile.value }, autoStatus, [profile]));
+  saveBtn.addEventListener('click', () => {
+    const claude_org_id = orgInput.value.trim();
+    const claude_session_key = keyInput.value.trim();
+    if (!claude_org_id || !claude_session_key) {
+      status.textContent = 'Both fields are required.';
+      return;
+    }
+    preview('/preview', { claude_org_id, claude_session_key }, status, [orgInput, keyInput]);
+  });
+  confirm.addEventListener('click', async () => {
+    busy = true;
+    updateButtons();
+    try {
+      await post('/confirm', { confirmation });
+      keyInput.value = '';
+      clearReview();
+      const usage = await refreshQuotaAfterCredentialSave('claude');
+      status.textContent = usage ? 'Saved · usage connected' : 'Saved · usage unavailable';
+    } catch (error) {
+      clearReview();
+      status.textContent = error.message;
+    } finally {
+      busy = false;
+      updateButtons();
+    }
   });
 }
 
@@ -13245,16 +13383,30 @@ function renderQuotaStatus() {
       detail = 'loading';
     }
     const dedicatedClaude = gaugeTypeFor(provider) === 'claude' && _providerMetadata[provider]?.dedicated_login;
+    const account = procClaudeAccounts.get(provider);
     const popupId = dedicatedClaude ? null : quotaConfigFor(provider)?.credsPopupId;
     const setup = popupId && ['claude', 'codex', 'cursor'].includes(gaugeTypeFor(provider));
     const needsSetup = quotaNeedsSetup(provider);
     const settingsLabel = needsSetup ? 'Set up usage' : 'Usage settings';
-    if (needsSetup) { value = 'setup'; detail = dedicatedClaude ? 'Claude sign-in required' : 'credentials required'; }
+    const claudeNeedsAttention = dedicatedClaude && (q.status === 'error' || (!snapshot && needsSetup));
+    const accountExpanded = !claudeNeedsAttention && typeof account === 'string';
+    const accountLoading = !claudeNeedsAttention && typeof account === 'symbol';
+    const claudeInfoLabel = claudeNeedsAttention ? 'Show Claude usage help'
+      : accountExpanded ? 'Hide Claude Code account' : 'Show Claude Code account';
+    if (claudeNeedsAttention) {
+      value = '—';
+      detail = '';
+    } else if (!dedicatedClaude && needsSetup) {
+      value = 'setup';
+      detail = 'credentials required';
+    }
     return `<div class="quota-status-row">
       <span class="quota-status-name"><span class="quota-status-dot" style="background:${accent}"></span><span class="quota-status-label">${escapeHtml(backendDisplayName(provider))}</span></span>
       <span class="quota-status-value">${value}</span>
       <span class="quota-status-detail">${escapeHtml(detail)}</span>
+      ${dedicatedClaude ? `<button type="button" class="quota-setup-btn quota-account-btn" data-provider="${escapeHtml(provider)}" data-recovery="${claudeNeedsAttention}" aria-label="${claudeInfoLabel}" title="${claudeInfoLabel}"${accountLoading ? ' disabled aria-busy="true"' : ''}${claudeNeedsAttention ? '' : ` aria-expanded="${accountExpanded}"`}><span aria-hidden="true">ⓘ</span></button>` : ''}
       ${setup ? `<button type="button" class="quota-setup-btn" data-popup="${popupId}" aria-label="${settingsLabel}" title="${settingsLabel}"><span aria-hidden="true">⚙︎</span></button>` : ''}
+      ${dedicatedClaude && accountExpanded ? `<span class="quota-account-detail" role="status">${escapeHtml(account)}</span>` : ''}
     </div>`;
   }).join('');
 
@@ -13337,11 +13489,50 @@ function renderProcPopup(processes, queued) {
     body += `<div class="proc-section-label">Monitoring (${cachedWatchRows.length})</div><table><thead><tr><th>Route</th><th>Target / prompt</th><th>Status</th><th>Last job</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   }
   procStatusPopup.innerHTML = header + body;
-  procStatusPopup.querySelectorAll('.quota-setup-btn').forEach(btn => {
+  procStatusPopup.querySelectorAll('.quota-setup-btn[data-popup]').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       procStatusPopup.classList.remove('open');
+      if (btn.dataset.popup === 'quota-creds-popup') showClaudeWebMeterSetup();
       document.getElementById(btn.dataset.popup)?.classList.add('open');
+    });
+  });
+  procStatusPopup.querySelectorAll('.quota-account-btn').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const provider = btn.dataset.provider;
+      if (btn.dataset.recovery === 'true') {
+        procStatusPopup.classList.remove('open');
+        openClaudeMeterGuide(provider);
+        return;
+      }
+      const account = procClaudeAccounts.get(provider);
+      if (typeof account === 'symbol') return;
+      if (procClaudeAccounts.delete(provider)) {
+        renderProcPopup(cachedProcRows, cachedQueueRows);
+        return;
+      }
+      const lookup = Symbol();
+      procClaudeAccounts.set(provider, lookup);
+      btn.disabled = true;
+      btn.setAttribute('aria-busy', 'true');
+      let detail;
+      try {
+        const res = await fetch(`/quota/provider/${encodeURIComponent(provider)}/account`);
+        const data = await res.json();
+        if (!res.ok) throw new Error();
+        const organization = data.organization === data.org_id ? data.org_id : `${data.organization} (${data.org_id})`;
+        detail = `${data.email} · ${organization}`;
+      } catch {
+        detail = 'Claude Code account could not be verified.';
+      }
+      if (procClaudeAccounts.get(provider) !== lookup) return;
+      if (procStatusPopup.classList.contains('open')) {
+        procClaudeAccounts.set(provider, detail);
+        renderProcPopup(cachedProcRows, cachedQueueRows);
+      } else {
+        procClaudeAccounts.delete(provider);
+      }
     });
   });
   procStatusPopup.querySelectorAll('.proc-watch-control').forEach(btn => {
@@ -13437,12 +13628,14 @@ function renderProcPopup(processes, queued) {
 }
 
 let procPopupOpenedAt = 0;
+const procClaudeAccounts = new Map();
 
 function toggleProcPopup() {
   document.querySelectorAll('#quota-creds-popup, #codex-creds-popup, #cursor-creds-popup, #balance-max-popup').forEach(popup => popup.classList.remove('open'));
   const open = procStatusPopup.classList.toggle('open');
   if (open) {
     procPopupOpenedAt = Date.now();
+    procClaudeAccounts.clear();
     renderProcPopup(cachedProcRows, cachedQueueRows);
     startProcPoll();
     for (const backend of Object.keys(_providerMetadata)) {
@@ -21156,20 +21349,18 @@ window.addEventListener('pageshow', recoverForegroundState);
   if (type === 'claude' && parts.length >= 3) {
     const claude_org_id = decodeURIComponent(parts[1]);
     const claude_session_key = decodeURIComponent(parts[2]);
-    fetch('/config/creds', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ claude_org_id, claude_session_key }),
-    })
-      .then(r => r.json())
-      .then(d => _showImportResult('quota-creds-popup', 'creds-status', !!d.ok))
-      .catch(() => _showImportResult('quota-creds-popup', 'creds-status', false));
+    document.getElementById('creds-org').value = claude_org_id;
+    document.getElementById('creds-key').value = claude_session_key;
+    showClaudeWebMeterSetup();
+    document.getElementById('quota-creds-popup').classList.add('open');
+    document.getElementById('creds-save').click();
   } else if (type === 'claude-org' && parts.length >= 2) {
     const claude_org_id = decodeURIComponent(parts[1]);
     const orgInput = document.getElementById('creds-org');
     const popup = document.getElementById('quota-creds-popup');
     const status = document.getElementById('creds-status');
     if (orgInput) orgInput.value = claude_org_id;
+    showClaudeWebMeterSetup();
     if (popup) popup.classList.add('open');
     if (status) { status.textContent = 'Org ID filled — paste session key below'; status.style.color = '#888'; }
     document.getElementById('creds-key')?.focus();

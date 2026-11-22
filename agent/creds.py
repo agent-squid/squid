@@ -5,6 +5,7 @@ Saved to ~/.squid/squid-creds.json alongside ~/.squid/squid.db and
 """
 
 import json
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -19,14 +20,28 @@ def load() -> dict:
         return {}
 
 
+def _write_credentials(data: dict) -> None:
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=_CREDS_PATH.parent,
+        prefix=f".{_CREDS_PATH.name}.", delete=False,
+    ) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(data, stream, indent=2)
+            stream.close()
+            temporary.replace(_CREDS_PATH)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def _save(data: dict) -> None:
     existing = load()
     existing.update(data)
-    _CREDS_PATH.write_text(json.dumps(existing, indent=2))
+    _write_credentials(existing)
 
 
-def save(org_id: str, session_key: str) -> None:
-    _save({"claude_org_id": org_id, "claude_session_key": session_key})
+def save(org_id: str, session_key: str, email: str = "") -> None:
+    _save({"claude_org_id": org_id, "claude_session_key": session_key, "claude_email": email})
 
 
 def save_codex(token: str, account_id: str = "") -> None:
@@ -60,34 +75,57 @@ def get_codex_cli_auth() -> dict:
     return tokens if isinstance(tokens, dict) else {}
 
 
-def _extract_cookies(domain: str) -> dict:
-    """Read all cookies for a domain from Chrome then Safari."""
-    import browser_cookie3
-    errors = []
-    for loader, name in [(browser_cookie3.chrome, "Chrome"), (browser_cookie3.safari, "Safari")]:
+def claude_browser_profiles() -> dict[str, tuple[str, Path | None]]:
+    """List host profiles without opening their cookie databases."""
+    chrome_root = Path.home() / "Library/Application Support/Google"
+    profiles = {}
+    for browser in ("Chrome", "Chrome Beta", "Chrome Dev"):
+        root = chrome_root / browser
         try:
-            jar = loader(domain_name=domain)
-            cookies = {c.name: c.value for c in jar}
-            if cookies:
-                return cookies
-        except PermissionError:
-            errors.append(
-                f"{name}: permission denied — grant Full Disk Access to Terminal in "
-                f"System Settings → Privacy & Security → Full Disk Access"
+            info = json.loads((root / "Local State").read_text())["profile"]["info_cache"]
+        except (OSError, ValueError, KeyError, TypeError):
+            info = {}
+        for directory in sorted(root.glob("*")):
+            if directory.name != "Default" and not directory.name.startswith("Profile "):
+                continue
+            cookie_file = next(
+                (directory / path for path in ("Network/Cookies", "Cookies")
+                 if (directory / path).is_file()),
+                None,
             )
-        except Exception as e:
-            errors.append(f"{name}: {e}")
-    raise RuntimeError(" | ".join(errors) if errors else
-                       f"No cookies found for {domain} in Chrome or Safari. Make sure you are logged in.")
+            if cookie_file:
+                metadata = info.get(directory.name, {}) if isinstance(info, dict) else {}
+                name = metadata.get("name") if isinstance(metadata, dict) else None
+                label = f"{browser} · {name} ({directory.name})" if name else f"{browser} · {directory.name}"
+                profile_id = f"{browser}/{directory.name}" if browser != "Chrome" else directory.name
+                profiles[profile_id] = (label, cookie_file)
+    profiles["safari"] = ("Safari", None)
+    return profiles
 
 
-def read_chrome_claude_creds() -> dict:
-    """Read sessionKey and lastActiveOrg from Chrome or Safari cookie store (macOS only)."""
-    cookies = _extract_cookies("claude.ai")
-    result = {k: v for k, v in cookies.items() if k in ("sessionKey", "lastActiveOrg")}
-    if not result.get("sessionKey"):
-        raise RuntimeError("sessionKey not found in claude.ai cookies. Make sure you are logged in.")
-    return result
+def read_claude_browser_creds(profile: str) -> dict:
+    import browser_cookie3
+
+    selected = claude_browser_profiles().get(profile)
+    if selected is None:
+        raise ValueError("Choose an available browser profile.")
+    _, cookie_file = selected
+    try:
+        jar = (browser_cookie3.chrome(cookie_file=str(cookie_file), domain_name="claude.ai")
+               if cookie_file else browser_cookie3.safari(domain_name="claude.ai"))
+        cookies = {}
+        for cookie in jar:
+            if (
+                cookie.name in ("sessionKey", "lastActiveOrg")
+                and cookie.domain.lstrip(".") == "claude.ai"
+                and cookie.path == "/"
+                and not cookie.is_expired()
+            ):
+                if cookie.name not in cookies or cookie.domain == "claude.ai":
+                    cookies[cookie.name] = cookie.value
+    except Exception as exc:
+        raise ValueError("Could not read Claude cookies from the selected browser profile.") from exc
+    return {key: cookies.get(key) for key in ("sessionKey", "lastActiveOrg")}
 
 
 def save_max_budget(gauge: str, amount: float) -> None:
@@ -97,7 +135,7 @@ def save_max_budget(gauge: str, amount: float) -> None:
     data["max_budgets"] = budgets
     if gauge == "deepseek":
         data.pop("deepseek_max_budget", None)  # superseded legacy flat key
-    _CREDS_PATH.write_text(json.dumps(data, indent=2))
+    _write_credentials(data)
 
 
 def get_max_budget(gauge: str) -> Optional[float]:
@@ -117,7 +155,7 @@ def clear_max_budget(gauge: str) -> None:
     data["max_budgets"] = budgets
     if gauge == "deepseek":
         data.pop("deepseek_max_budget", None)
-    _CREDS_PATH.write_text(json.dumps(data, indent=2))
+    _write_credentials(data)
 
 
 def get_cursor_token() -> Optional[str]:

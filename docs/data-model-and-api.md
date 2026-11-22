@@ -957,26 +957,55 @@ file or (if `file_path` omitted) all files in the diff. Recorded in
 
 ---
 
-### POST /config/creds
+### POST /config/creds/preview
 
-Save claude.ai session credentials (org ID + session key).
+Review a Claude web session before saving it.
 
 **Request body**: `{ "claude_org_id": "string", "claude_session_key": "string" }`
 
-**Response**: `{ "ok": true }`
+**Response** includes the verified `email`, `organization`, and `claude_org_id`, a
+one-time `confirmation`, and `account_changed`, `previous_email`, and
+`previous_org` for the replacement notice. A session whose account or organization
+cannot be verified returns HTTP 422.
+
+### POST /config/creds
+
+Legacy save endpoint. Returns HTTP 409 and tells the caller to refresh Squid.
 
 ### GET /config/creds/capabilities
 
-Returns `{ "host_browser_detection": true | false }`. Detection is offered for
-macOS hosts over direct loopback connections. Remote/headless clients can still
-import credentials using the usage setup dialog; client hostnames are not used
-to infer host access.
+Returns `{ "host_browser_detection": true | false }`. Host browser detection
+requires a direct macOS loopback connection.
+
+### GET /config/creds/profiles
+
+Lists host browser profiles as `[{ "id": "string", "label": "string" }]`. Requires
+a direct macOS loopback connection.
 
 ### POST /config/creds/auto
 
-Auto-detect Claude web credentials from local Chrome cookies. No request body.
+Reads Claude web credentials from the selected host browser profile. Requires a
+direct macOS loopback connection.
 
-**Response**: `{ "ok": true, "claude_org_id": "string" }` or `{ "error": "..." }`
+**Request body**: `{ "profile": "string" }` using an ID from the profiles endpoint.
+
+**Response** matches the review returned by `POST /config/creds/preview`. Requests
+from older clients that omit the body receive HTTP 409 and a refresh message.
+
+### POST /config/creds/confirm
+
+Checks that the reviewed session can load usage before saving it. A failed usage
+check returns HTTP 502 and preserves the saved session. A review expires after five minutes or when a newer
+review replaces it. A change to the saved credentials also invalidates the review.
+
+**Request body**: `{ "confirmation": "string" }`
+
+**Response**: `{ "ok": true }`
+
+### GET /quota/provider/{provider_id}/account
+
+Returns the `email`, `organization`, and `org_id` reported by Claude Code for a
+dedicated Claude meter. An account that cannot be verified returns HTTP 409.
 
 ### POST /config/creds/codex
 

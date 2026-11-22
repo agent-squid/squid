@@ -1805,6 +1805,22 @@ def test_provider_claude_quota_skips_fetch_without_credentials(monkeypatch):
     }
 
 
+def test_provider_claude_quota_reports_keychain_interaction_required(monkeypatch, tmp_path):
+    subscription = server.codex_subscription
+    monkeypatch.setattr(subscription, "home_for", lambda *_: tmp_path)
+    monkeypatch.setattr(subscription, "ensure_home", lambda *_: tmp_path)
+    monkeypatch.setattr(subscription.sys, "platform", "darwin")
+    monkeypatch.setattr(subscription.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=36))
+
+    response = asyncio.run(server._dedicated_claude_quota(Provider(id="personal")))
+
+    assert response.status_code == 401
+    assert json.loads(response.body) == {
+        "error": "Provider credentials unavailable",
+        "code": "keychain_interaction_required",
+    }
+
+
 def test_provider_subscription_quota_skips_fetch_without_credentials(monkeypatch):
     async def fail_quota_codex():
         raise AssertionError("quota_codex should not be called")
@@ -2961,17 +2977,22 @@ async def test_lifespan_releases_idle_database_connection(tmp_path, monkeypatch,
         opened[0].execute("SELECT 1")
 
 
+@pytest.mark.parametrize("remote_unlock", [False, True])
 @pytest.mark.parametrize("platform,host,headers,expected", [
     ("darwin", "127.0.0.1", {}, True),
     ("darwin", "100.64.0.2", {}, False),
     ("linux", "127.0.0.1", {}, False),
     ("darwin", "127.0.0.1", {"x-forwarded-for": "100.64.0.2"}, False),
 ])
-def test_credential_capabilities_use_server_connection(monkeypatch, platform, host, headers, expected):
+def test_credential_capabilities_use_server_connection(monkeypatch, platform, host, headers, expected, remote_unlock):
     monkeypatch.setattr(server.sys, "platform", platform)
+    monkeypatch.setattr(server, "ALLOW_REMOTE_KEYCHAIN_UNLOCK", remote_unlock)
     request = SimpleNamespace(client=SimpleNamespace(host=host), headers=headers)
     response = asyncio.run(server.credential_capabilities(request))
-    assert json.loads(response.body) == {"host_browser_detection": expected}
+    assert json.loads(response.body) == {
+        "host_browser_detection": expected,
+        "keychain_unlock": platform == "darwin" and (expected or remote_unlock),
+    }
 
 
 @pytest.mark.parametrize("remaining, expected", [(0.25, 75), (1, 0), (0, 100)])

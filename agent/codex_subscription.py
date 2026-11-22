@@ -109,6 +109,10 @@ class ClaudeIdentityUnavailable(ValueError):
     """The store can be opened, but its cached login needs verification."""
 
 
+class ClaudeKeychainInteractionRequired(ValueError):
+    """macOS could not complete the credential read without interaction."""
+
+
 class SubscriptionBusy(ValueError):
     """The credential store is locked by sign-in or a running turn."""
 
@@ -156,9 +160,7 @@ def _check_claude_profile(home: Path) -> None:
         raise ValueError("Claude account metadata must be local to the provider")
 
 
-def _claude_account(
-    home: Path, *, allow_unidentified: bool = False, identify_managed: bool = False,
-) -> str | None:
+def _claude_auth_status(home: Path) -> tuple[dict | None, str | None]:
     from .config import CLAUDE_PATH
 
     if not CLAUDE_PATH:
@@ -184,20 +186,42 @@ def _claude_account(
     if status.get("apiProvider") != "firstParty" or status.get("forcedLoginMethod") != "claudeai":
         raise ValueError("Claude provider policy does not allow a native claude.ai subscription")
     if result.returncode == 1 and status.get("authMethod") == "none":
-        return None
+        return None, None
     if (result.returncode != 0 or status.get("loggedIn") is not True
             or status.get("authMethod") != "claude.ai"):
         raise ValueError("Claude did not confirm native claude.ai subscription authentication")
+    if credential_before != _claude_file_revision(home):
+        raise ClaudeIdentityUnavailable("Claude credentials changed during the status check")
+    return status, credential_before
+
+
+def _claude_account(
+    home: Path, *, allow_unidentified: bool = False, identify_managed: bool = False,
+) -> str | None:
+    status, revision = _claude_auth_status(home)
+    if status is None:
+        return None
     email, organization = status.get("email"), status.get("orgId")
     if not all(isinstance(value, str) and value.strip() for value in (email, organization)):
         if allow_unidentified:
             return None
         raise ClaudeIdentityUnavailable("Claude did not report an account and organization")
-    if credential_before != _claude_file_revision(home):
-        raise ClaudeIdentityUnavailable("Claude credentials changed during the status check")
     if identify_managed:
         return hashlib.sha256(json.dumps([email.strip().casefold(), organization.strip()]).encode()).hexdigest()
-    return credential_before or CLAUDE_UNVERIFIED
+    return revision or CLAUDE_UNVERIFIED
+
+
+def claude_account_details(home: Path) -> dict[str, str] | None:
+    with lock(home, login=False):
+        status, _ = _claude_auth_status(home)
+    if status is None:
+        return None
+    email, organization = status.get("email"), status.get("orgId")
+    if not all(isinstance(value, str) and value.strip() for value in (email, organization)):
+        return None
+    name = status.get("orgName")
+    return {"email": email, "organization": name if isinstance(name, str) and name else organization,
+            "org_id": organization}
 
 
 def _codex_tokens(home: Path) -> dict:
@@ -332,6 +356,8 @@ def claude_quota_credentials(home: Path) -> tuple[str | None, str | None]:
             if not raw.startswith(b"{"):
                 raw = bytes.fromhex(raw.decode("ascii"))
             data = json.loads(raw)
+        elif result.returncode == 36:  # errSecInteractionNotAllowed (-25308)
+            raise ClaudeKeychainInteractionRequired("Claude Keychain access requires interaction")
         elif result.returncode != 44:  # errSecItemNotFound
             raise ValueError("Claude Keychain credentials unavailable")
     if data is None:

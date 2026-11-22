@@ -28,7 +28,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
   <link rel="stylesheet" href="/vendor/xterm.css" />
-  <link rel="stylesheet" href="style.css?v=20261122-108" />
+  <link rel="stylesheet" href="style.css?v=20261122-115" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -213,7 +213,7 @@
           <ol>
             <li>Open <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer">ChatGPT</a>, then open Developer Tools → Network.</li>
             <li>Reload the page and select a request to <code>backend-api</code>. Under Request Headers, copy the <code>Authorization</code> value into the token field below.</li>
-            <li>If present, copy <code>ChatGPT-Account-ID</code> into the workspace/account field. Save, then check that usage loads.</li>
+            <li>If present, copy <code>ChatGPT-Account-ID</code> into the workspace/account field. Review the account and organization, then save.</li>
           </ol>
           <p>On a phone or tablet, complete these steps from a desktop browser connected to this same Squid host. Browser imports override the host login for usage. Imported tokens can expire; repeat setup when needed.</p>
         </details>
@@ -227,33 +227,49 @@
       </div>
 
       <div id="quota-creds-popup">
-        <div class="creds-auto-row">
-          <div class="creds-auto-text">
-            <span class="creds-auto-label">Detect on Squid host</span>
-            <span class="creds-auto-desc">Runs on this Squid server machine only and requires a direct loopback connection. It reads the host's browser cookies; remote phone/tablet browsers cannot share their cookies automatically.</span>
-          </div>
-          <button id="creds-auto" type="button" class="creds-auto-btn">Detect</button>
+        <div id="claude-meter-guide" class="creds-guide" hidden>
+          <strong id="claude-meter-title"></strong>
+          <p id="claude-meter-message" role="status"></p>
+          <button id="claude-meter-action" type="button" class="btn-ghost" hidden></button>
+          <button id="claude-meter-retry" type="button" class="btn-ghost">Retry meter</button>
         </div>
-        <span id="creds-auto-status" class="creds-auto-status"></span>
-        <details class="creds-guide" id="claude-remote-guide">
-          <summary>Set up from this browser</summary>
-          <p>For a remote or headless Squid host, import credentials from your desktop browser. They will be saved on the Squid host.</p>
-          <ol>
-            <li>Open <a href="https://claude.ai" target="_blank" rel="noopener noreferrer">Claude</a> and select the organization whose usage you want to display.</li>
-            <li>Open Developer Tools → Application → Cookies → <code>https://claude.ai</code> (Safari: Storage → Cookies).</li>
-            <li>Copy <code>lastActiveOrg</code> into Org ID and <code>sessionKey</code> into Session key below. Save, then check that usage loads.</li>
-          </ol>
-          <p>On a phone or tablet, complete these steps from a desktop browser connected to this same Squid host. Repeat setup if the session expires.</p>
-        </details>
-        <div class="creds-divider"></div>
-        <div class="creds-inputs">
-          <input id="creds-org" type="text" placeholder="Org ID" spellcheck="false" />
-          <div class="creds-key-wrap">
-            <input id="creds-key" type="password" placeholder="Session key" />
-            <span class="creds-key-hint">DevTools → Application → Cookies → claude.ai → <code>sessionKey</code></span>
+        <div id="claude-web-meter-setup">
+          <div class="creds-auto-row">
+            <div class="creds-auto-text">
+              <span class="creds-auto-label">Detect on Squid host</span>
+              <span class="creds-auto-desc">Choose a browser profile on the Squid host to review its Claude account.</span>
+              <select id="creds-profile" aria-label="Browser profile" disabled>
+                <option value="">Choose a browser profile</option>
+              </select>
+            </div>
+            <button id="creds-auto" type="button" class="creds-auto-btn" disabled>Review</button>
           </div>
-          <button id="creds-save" type="button" class="btn-ghost">Save</button>
-          <span id="creds-status"></span>
+          <span id="creds-auto-status" class="creds-auto-status"></span>
+          <details class="creds-guide" id="claude-remote-guide">
+            <summary>Set up from this browser</summary>
+            <p>For a remote or headless Squid host, import credentials from your desktop browser. They will be saved on the Squid host.</p>
+            <ol>
+              <li>Open <a href="https://claude.ai" target="_blank" rel="noopener noreferrer">Claude</a> and select the organization whose usage you want to display.</li>
+              <li>Open Developer Tools → Application → Cookies → <code>https://claude.ai</code> (Safari: Storage → Cookies).</li>
+              <li>Copy <code>lastActiveOrg</code> into Org ID and <code>sessionKey</code> into Session key below. Select <strong>Review</strong>, confirm the account and organization, then select <strong>Save this account</strong>.</li>
+            </ol>
+            <p>On a phone or tablet, complete these steps from a desktop browser connected to this same Squid host. Repeat setup if the session expires.</p>
+          </details>
+          <div class="creds-divider"></div>
+          <div class="creds-inputs">
+            <input id="creds-org" type="text" placeholder="Org ID" spellcheck="false" />
+            <div class="creds-key-wrap">
+              <input id="creds-key" type="password" placeholder="Session key" />
+              <span class="creds-key-hint">DevTools → Application → Cookies → claude.ai → <code>sessionKey</code></span>
+            </div>
+            <button id="creds-save" type="button" class="btn-ghost">Review</button>
+            <span id="creds-status" role="status"></span>
+          </div>
+          <div id="creds-review" hidden>
+            <p id="creds-identity"></p>
+            <p id="creds-account-change" role="status"></p>
+            <button id="creds-confirm" type="button" class="btn-ghost">Save this account</button>
+          </div>
         </div>
       </div>
 
@@ -930,7 +946,7 @@
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="flow-lang.js?v=20261122-108"></script>
-  <script src="app.js?v=20261122-108"></script>
+  <script src="flow-lang.js?v=20261122-115"></script>
+  <script src="app.js?v=20261122-115"></script>
 </body>
 </html>

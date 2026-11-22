@@ -36,18 +36,35 @@ test('topbar quota gauge keeps its neutral original treatment', async ({ page })
   await expect(page.locator('#quota-creds-popup')).toHaveClass(/open/);
 });
 
-test('dedicated Claude meter opens the regular usage settings without starting login', async ({ page }) => {
+test('dedicated Claude meter guides Keychain recovery and retries without starting login', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await mockShell(page);
   await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'sse' } }));
-  let signedIn = false;
-  await page.route('**/quota/provider/anthropic_pers', route => signedIn
-    ? route.fulfill({ json: { status: 'ok', raw: 42, used_percent: 42 } })
-    : route.fulfill({ status: 401, json: { error: 'Provider is signed out' } }));
+  let usageError = 'Provider is signed out';
+  await page.route('**/quota/provider/anthropic_pers', route => usageError
+    ? route.fulfill({ status: usageError === 'Temporary outage' ? 502 : 401, json: { error: usageError, code: usageError === 'Provider credentials unavailable' ? 'keychain_interaction_required' : undefined } })
+    : route.fulfill({ json: { status: 'ok', raw: 42, used_percent: 42 } }));
+  let finishAccountLookup;
+  const accountLookup = new Promise(resolve => { finishAccountLookup = resolve; });
+  let accountRequests = 0;
+  await page.route('**/quota/provider/anthropic_pers/account', async route => {
+    accountRequests++;
+    await accountLookup;
+    await route.fulfill({
+      json: { email: 'personal@example.com', organization: 'Personal', org_id: 'personal-org' },
+    });
+  });
+  let allowUnlock = false;
   let authRequests = 0;
+  await page.route('**/config/creds/capabilities', route => route.fulfill({ json: { keychain_unlock: allowUnlock } }));
   await page.route('**/auth/session', route => {
     authRequests++;
-    return route.fulfill({ status: 500 });
+    expect(route.request().postDataJSON()).toMatchObject({ mode: 'unlock', harness: 'keychain' });
+    return route.fulfill({ json: { id: 'unlock-test', command: 'security unlock-keychain' } });
+  });
+  await page.route('**/auth/session/unlock-test/events', route => {
+    usageError = 'Temporary outage';
+    return route.fulfill({ contentType: 'text/event-stream', body: 'event: exit\ndata: 0\n\n' });
   });
 
   await page.goto('/');
@@ -71,20 +88,59 @@ test('dedicated Claude meter opens the regular usage settings without starting l
   await expect(meter.locator('#quota-label')).toBeEmpty();
 
   await meter.click();
-  await expect(page.locator('#claude-remote-guide')).toBeVisible();
-  await expect(page.locator('#creds-key')).toBeVisible();
+  await expect(page.locator('#claude-meter-guide')).toContainText('Sign in to Claude Code');
+  await expect(page.locator('#proc-status-popup')).toBeHidden();
+  await page.getByRole('button', { name: 'Status', exact: true }).click();
+  const row = page.locator('#proc-status-popup .quota-status-row').filter({ hasText: 'Anthropic Personal' });
+  await expect(row.locator('.quota-status-value')).toHaveText('—');
+  await expect(row.locator('.quota-status-detail')).toBeEmpty();
+
+  usageError = 'Claude login could not authorize usage';
+  await page.evaluate(() => fetchQuotaForBackend('anthropic_pers'));
+  await row.getByRole('button', { name: 'Show Claude usage help' }).click();
+  await expect(page.locator('#claude-meter-guide')).toContainText('Claude usage unavailable');
+  await expect(page.getByRole('button', { name: 'Sign in to Claude Code', exact: true })).toBeHidden();
+
+  usageError = 'Provider credentials unavailable';
+  await page.evaluate(() => fetchQuotaForBackend('anthropic_pers'));
+  await expect(meter).toHaveAttribute('title', 'Provider credentials unavailable');
+  await page.getByRole('button', { name: 'Status', exact: true }).click();
+  await expect(row.locator('.quota-status-detail')).toBeEmpty();
+  await row.getByRole('button', { name: 'Show Claude usage help' }).click();
+  await expect(page.locator('#claude-meter-guide')).toContainText('On the Mac running Squid');
+  await expect(page.getByRole('button', { name: 'Unlock Keychain', exact: true })).toBeHidden();
+  await expect(page.locator('#claude-web-meter-setup')).toBeHidden();
   await expect(page.locator('#auth-panel')).toBeHidden();
   expect(authRequests).toBe(0);
-
   await meter.click();
-  await expect(page.locator('#quota-creds-popup')).toBeHidden();
-
-  signedIn = true;
-  await page.evaluate(() => fetchQuotaForBackend('anthropic_pers'));
+  allowUnlock = true;
+  await meter.click();
+  await page.getByRole('button', { name: 'Unlock Keychain', exact: true }).click();
+  await expect(page.locator('#claude-meter-guide')).toContainText('Claude usage is temporarily unavailable.');
+  await expect(page.getByRole('button', { name: 'Unlock Keychain', exact: true })).toBeHidden();
+  expect(authRequests).toBe(1);
+  usageError = null;
+  await page.getByRole('button', { name: 'Retry meter' }).click();
+  await expect(page.locator('#claude-meter-guide')).toContainText('Usage is connected.');
   await expect(marker).toHaveText('42');
   await expect(ring).toHaveCSS('stroke', 'rgb(42, 42, 60)');
   await expect(meter).toHaveCount(0);
   await expect(page.locator('#quota-display .quota-7d-group')).toBeVisible();
+  await page.getByRole('button', { name: 'Status', exact: true }).click();
+  const showAccount = row.getByRole('button', { name: 'Show Claude Code account' });
+  await showAccount.click();
+  await expect.poll(() => accountRequests).toBe(1);
+  await page.evaluate(() => renderProcPopup(cachedProcRows, cachedQueueRows));
+  await expect(showAccount).toBeDisabled();
+  finishAccountLookup();
+  await expect(row).toContainText('personal@example.com · Personal (personal-org)');
+  const hideAccount = row.getByRole('button', { name: 'Hide Claude Code account' });
+  await expect(hideAccount).toHaveAttribute('aria-expanded', 'true');
+  await hideAccount.click();
+  await expect(page.locator('#proc-status-popup')).toBeVisible();
+  await expect(row.locator('.quota-account-detail')).toHaveCount(0);
+  await expect(row.getByRole('button', { name: 'Show Claude Code account' }))
+    .toHaveAttribute('aria-expanded', 'false');
 });
 
 test('credential popups describe their auth source', async ({ page }) => {
@@ -95,8 +151,8 @@ test('credential popups describe their auth source', async ({ page }) => {
 
   await page.goto('/');
   await page.locator('#quota-display').click();
-  await expect(page.locator('#quota-creds-popup')).toContainText('Runs on this Squid server machine only');
-  await expect(page.locator('#quota-creds-popup')).toContainText('remote phone/tablet browsers cannot share their cookies');
+  await expect(page.locator('#quota-creds-popup')).toContainText('Choose a browser profile on the Squid host');
+  await expect(page.locator('#claude-remote-guide')).toContainText('For a remote or headless Squid host');
 
   await page.evaluate(() => document.getElementById('codex-creds-popup').classList.add('open'));
   await expect(page.locator('#codex-creds-popup')).toContainText('Run codex in the terminal to authenticate on the Squid host');
@@ -105,7 +161,7 @@ test('credential popups describe their auth source', async ({ page }) => {
   await expect(page.locator('#codex-creds-auto')).toHaveCount(0);
 });
 
-test('auto-detected Claude credentials reveal the status gauge without a refresh', async ({ page }) => {
+test('reviewing a selected Claude profile before saving reveals the status gauge', async ({ page }) => {
   await mockShell(page);
   await page.route('**/health', route => route.fulfill({
     json: {
@@ -114,16 +170,51 @@ test('auto-detected Claude credentials reveal the status gauge without a refresh
       providers: { anthropic: { label: 'Claude', gauge: { type: 'claude' }, gauge_authed: false } },
     },
   }));
-  await page.route('**/config/creds/auto', route => route.fulfill({
-    json: { ok: true, claude_org_id: 'org-12345678' },
+  await page.route('**/config/creds/profiles', route => route.fulfill({
+    json: [{ id: 'Default', label: 'Chrome · Personal' }, { id: 'Profile 1', label: 'Chrome · Work' }],
   }));
+  await page.route('**/config/creds/preview', route => {
+    expect(route.request().postDataJSON()).toEqual({
+      claude_org_id: 'manual-org', claude_session_key: 'manual-session',
+    });
+    return route.fulfill({ json: {
+      confirmation: 'manual-review-token', claude_org_id: 'manual-org',
+      email: 'manual@example.com', organization: 'Manual',
+    } });
+  });
+  await page.route('**/config/creds/auto', route => {
+    expect(route.request().postDataJSON()).toEqual({ profile: 'Profile 1' });
+    return route.fulfill({ json: {
+      confirmation: 'review-token', claude_org_id: 'org-12345678', email: 'personal@example.com',
+      organization: 'Personal', account_changed: true, previous_email: 'work@example.com', previous_org: 'old-org',
+    } });
+  });
+  let confirmed = false;
+  await page.route('**/config/creds/confirm', route => {
+    expect(route.request().postDataJSON()).toEqual({ confirmation: 'review-token' });
+    confirmed = true;
+    return route.fulfill({ json: { ok: true } });
+  });
   await page.route('**/quota/provider/*', route => route.fulfill({
     json: { status: 'ok', raw: 42, used_percent: 42 },
   }));
 
   await page.goto('/');
   await page.locator('#quota-display').click();
+  await expect(page.locator('#creds-auto')).toBeDisabled();
+  await page.locator('#creds-org').fill('manual-org');
+  await page.locator('#creds-key').fill('manual-session');
+  await page.locator('#creds-save').click();
+  await expect(page.locator('#creds-identity')).toContainText('manual@example.com · Manual');
+  expect(confirmed).toBe(false);
+  await page.locator('#creds-profile').selectOption('Profile 1');
+  await expect(page.locator('#creds-review')).toBeHidden();
   await page.locator('#creds-auto').click();
+  await expect(page.locator('#creds-identity')).toContainText('personal@example.com · Personal');
+  await expect(page.locator('#creds-account-change')).toContainText('work@example.com');
+  expect(confirmed).toBe(false);
+  await page.getByRole('button', { name: 'Save this account' }).click();
+  await expect.poll(() => confirmed).toBe(true);
   await page.getByRole('button', { name: 'Status' }).click();
 
   const claudeRow = page.locator('#proc-status-popup .quota-status-row').filter({ hasText: 'Claude' });
@@ -930,7 +1021,7 @@ test('remote setup remains available without credentials and imports a Codex wor
       openai: { label: 'Codex', gauge: { type: 'codex' }, gauge_authed: false },
     },
   } }));
-  await page.route('**/config/creds/capabilities', route => route.fulfill({ json: { host_browser_detection: false } }));
+  await page.route('**/config/creds/profiles', route => route.fulfill({ status: 403, json: {} }));
   await page.route('**/quota/provider/*', route => route.fulfill({ json: { status: 'ok', used_percent: 12 } }));
   let imported;
   await page.route('**/config/creds/codex', route => {
