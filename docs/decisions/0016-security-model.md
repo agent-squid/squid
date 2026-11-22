@@ -61,13 +61,15 @@ when the caller or its scope cannot be verified.
 
 This covers file access, chat and command APIs, and terminal and auth-session
 streams. Validate browser origins for protected state changes and WebSocket
-handshakes. Browser Keychain unlock requires a paired owner session, explicit
-user initiation, and the existing remote-unlock opt-in unless the host can
-positively establish local access. TCP loopback, browser headers, and a
-loopback address behind SSH or Tailscale forwarding cannot establish local
-access on their own. With browser unlock disabled, the owner can still use
-macOS Keychain tools on the host. Keep password input in the dedicated
-auth-session flow.
+handshakes. Browser Keychain unlock requires a paired owner session and
+explicit user initiation on both HTTP and WebSocket. Once that boundary is
+enforced, unlock is available by default to paired owners on supported macOS
+hosts regardless of transport. Retire `auth.allow_remote_keychain_unlock`
+in that same release. Ignore legacy values, including explicit `false`, so
+upgraded installations get the same unlock flow as fresh installations for
+Cursor login and Claude metering. Keep password input in the dedicated
+auth-session flow and bind the session and its I/O to the initiating device.
+Owners can also unlock using macOS Keychain tools on the host.
 
 Keep existing scoped credentials for tools such as `agentsquid watch`,
 `agentsquid search`, and `agentsquid continue`. A browser-started turn records

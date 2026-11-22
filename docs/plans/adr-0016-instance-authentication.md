@@ -22,7 +22,7 @@ The pairing lifetime and session lifetime can be tuned during implementation. Bo
 ## 3. Protect browser operations and preserve local tools
 
 - Authenticate browser requests and WebSocket handshakes with the session cookie. Validate the browser origin for state changes and upgrade requests. Enforce capabilities again when accepting privileged frames, including terminal input, auth-session input, and restart commands.
-- Require a paired owner browser and an explicit action for Keychain unlock. Keep password input inside the existing auth-session flow. Require the remote-unlock opt-in for forwarded and ambiguous TCP requests, including ones whose peer appears to be loopback. Skip the opt-in only with positive host-local proof independent of peer address and browser headers. If the browser transport offers no such proof, apply the opt-in to all browser unlock requests.
+- Require a paired owner browser and an explicit unlock action on both HTTP and WebSocket. Keep password input inside the existing auth-session flow and restrict session I/O to its initiating device. Enable unlock by default for paired owners on macOS across supported transports. Retire `auth.allow_remote_keychain_unlock` only in the release that enforces those checks. Ignore legacy values on upgrade, including explicit `false`, without requiring a YAML edit.
 - Keep `agentsquid watch`, `search`, and `continue` working with their existing turn or host-control credentials. Check their operation and target scopes where those credentials are consumed. Keep turn credentials out of browser responses and browser credentials out of subprocess environments.
 - Store the initiating browser session ID on browser-started turns where available. Link subsequent tool activity to that turn for attribution. The recorded ID confers no authorization.
 - Keep developer API keys out of this implementation. Exercise machine callers with the existing scoped credentials or ephemeral credentials in integration tests.
@@ -44,7 +44,7 @@ The pairing lifetime and session lifetime can be tuned during implementation. Bo
 | HTTP and realtime | Protected routes and sockets reject missing or expired credentials. Cross-origin state changes and upgrades fail. A paired client can use its granted operations. |
 | Scope | Turn credentials work for their granted operation and target. They cannot call browser or operator endpoints. Existing host lifecycle and scoped CLI operations work. |
 | Revocation | Revoking one device closes its sockets, stops its interactive terminal and auth processes, and preserves other device sessions. Reattach and replay are denied after revoke. Revoke-all also invalidates outstanding pairing codes. |
-| Keychain | Unlock requires a paired owner session and an explicit action. Forwarded or ambiguous requests obey the opt-in even when the TCP peer appears local. |
+| Keychain | A paired owner can initiate unlock from the host or a remote browser on a fresh install and after upgrading from an omitted, `true`, or `false` setting. Exercise Cursor login and Claude meter recovery with a locked Keychain. Reject unauthenticated and revoked sessions on HTTP and WebSocket, including through loopback forwarding. Only the initiating session can interact with the unlock prompt. |
 | Shore | Existing Shore pairing and relay authorization still work with their declared caller scopes. |
 
 Build and verify the bootstrap path before enforcing the boundary on existing
