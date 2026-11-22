@@ -1270,7 +1270,7 @@ async def _prepare_chat_turn(
         dependencies = steps.get(flow_step_id, {}).get('dependencies', [])
         deferred_ids = {steps[dep].get('assistant_msg_id') for dep in dependencies if dep in steps}
         effective_pinned_ids = [pid for pid in pinned_ids or [] if pid not in deferred_ids]
-    stored_context_ids = list({*(context_ids or []), *(effective_pinned_ids or [])}) or None
+    stored_context_ids = list(dict.fromkeys([*(context_ids or []), *(effective_pinned_ids or [])])) or None
     if watch_run_id is not None:
         from .watch_runs import prepare_messages
         user_msg_id, asst_msg_id = await asyncio.to_thread(
@@ -1281,6 +1281,7 @@ async def _prepare_chat_turn(
                                           context_ids=stored_context_ids,
                                           mem=bool(memory_revision),
                                           mem_revision=memory_revision,
+                                          attached_paths=attached_paths,
                                           lookback=lookback,
                                           source=source,
                                           flow_run_id=flow_run_id,

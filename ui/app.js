@@ -6193,6 +6193,11 @@ async function sendMessage(text, opts = {}) {
       parsedInput: { ...parsed, agent: resolvedAgent || parsed.agent },
       displayFlowRoute,
       updateComposerRoute: false,
+      retryContext: {
+        pins: _contextIds,
+        mem: _includeTopicMemory,
+        attachedPaths: _attachedFiles.map(file => file.path),
+      },
     }));
     scrollToBottom();
   }
@@ -6573,16 +6578,22 @@ async function sendMessage(text, opts = {}) {
     } catch {}
   }
   const _topicMemoryForSend = await _topicMemoryStateForSend(topic, _effectiveAgent, adhoc);
-  const _includeTopicMemory = _topicMemoryForSend.selected;
-  const _lookbackItems = _activeLookbackItems(adhoc, lookback);
-  const _lookbackIds = _lookbackItems.map(item => item.id);
-  const _pinnedIds = nativeShell
-    ? getPinnedItems().map(item => item.id)
-    : _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
-  const _extraPinnedIds = Array.isArray(opts.extraPinnedIds) ? opts.extraPinnedIds : [];
-  const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds, ..._extraPinnedIds])];
-  await pruneMissingAttachedFiles();
-  const _attachedFiles = _attachedFilesState({ topic, agent: _effectiveAgent, adhoc }).selected;
+  const _includeTopicMemory = opts.retryContext?.mem ?? _topicMemoryForSend.selected;
+  let _contextIds;
+  let _attachedFiles;
+  if (opts.retryContext) {
+    _contextIds = opts.retryContext.pins;
+    _attachedFiles = opts.retryContext.attachedPaths.map(path => ({ path }));
+  } else {
+    const lookbackIds = _activeLookbackItems(adhoc, lookback).map(item => item.id);
+    const pinnedIds = nativeShell
+      ? getPinnedItems().map(item => item.id)
+      : _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
+    const extraPinnedIds = Array.isArray(opts.extraPinnedIds) ? opts.extraPinnedIds : [];
+    _contextIds = [...new Set([...lookbackIds, ...pinnedIds, ...extraPinnedIds])];
+    await pruneMissingAttachedFiles();
+    _attachedFiles = _attachedFilesState({ topic, agent: _effectiveAgent, adhoc }).selected;
+  }
   if (!nativeShell) {
     const activeSessionId = !adhoc ? (_sessionIds[`${topic}@${_effectiveAgent || '_'}`] || null) : null;
     const activeSessionTurns = activeSessionId ? (_sessionTurnCounts[activeSessionId] || 0) : 0;
@@ -8606,15 +8617,22 @@ function historySnapshot(item) {
     ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
 }
 
+function historyPromptContext(item) {
+  const empty = { pins: [], mem: false, attachedPaths: [] };
+  try {
+    const value = JSON.parse(item.prompt_context || 'null');
+    if (Array.isArray(value)) return { ...empty, pins: value };
+    if (value) return {
+      pins: value.pins || [],
+      mem: !!value.mem,
+      attachedPaths: value.attached_paths || [],
+    };
+  } catch {}
+  return empty;
+}
+
 function makeHistoryContextControl(item, nativeShell) {
-  const _pc = (() => {
-    try {
-      const v = JSON.parse(item.prompt_context || 'null');
-      if (!v) return { pins: [], mem: false };
-      if (Array.isArray(v)) return { pins: v, mem: false };
-      return { pins: v.pins || [], mem: !!v.mem };
-    } catch { return { pins: [], mem: false }; }
-  })();
+  const _pc = historyPromptContext(item);
   const ctxSpan = document.createElement('span');
   ctxSpan.className = 'user-ctx';
   if (item.id != null) ctxSpan.dataset.msgId = String(item.id);
@@ -8693,12 +8711,23 @@ function appendHistoryItem(item, container) {
     const raw = ((authReq ? authReq.message : item.content) || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
     asstContent.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message, authReq.provider) : '')
       + `<span class="msg-error">${escapeHtml(raw) || 'Response interrupted.'}</span>`;
-    // No auto-retry here (unlike the live-turn path in showError) — a
-    // history row only has item.prompt as plain text, not the original
-    // composer opts (route/broadcast/lookback) sendMessage needs to
-    // reconstruct the exact same send; the button still logs in, the user
-    // just resends manually afterward.
-    if (authReq) wireAuthLoginButtons(asstContent, null);
+    if (authReq) {
+      const retry = typeof item.prompt === 'string' && item.prompt.trim() && item.agent
+        ? () => sendMessage(item.prompt, {
+          parsedInput: {
+            message: item.prompt,
+            topic: item.topic || 'default',
+            agent: item.agent,
+            adhoc: !!item.adhoc,
+            lookback: item.prompt_lookback ?? lb,
+          },
+          displayFlowRoute: item.flow_route,
+          updateComposerRoute: false,
+          retryContext: historyPromptContext(item),
+        })
+        : null;
+      wireAuthLoginButtons(asstContent, retry);
+    }
   } else if (item.status === 'cancelled') {
     asstContent.innerHTML = `<span class="msg-error">${cancelledTurnLabel(item.content)}</span>`;
   } else {

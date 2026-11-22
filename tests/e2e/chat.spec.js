@@ -3138,10 +3138,15 @@ test.describe('response bubble', () => {
       status: 200, headers: SSE_HEADERS, body: sse({ event: 'exit', data: loginResult }),
     }));
 
+    await page.route('**/localfile/**', route => route.fulfill({ status: 200, body: '' }));
+    await page.evaluate(() => setAttachedFiles([{ path: '/original.txt' }]));
     await sendMsg(page, '#original@clape Run this prompt');
     const login = page.locator(RESPONSE).locator('.auth-login-btn');
     await expect(login).toBeVisible();
-    await page.evaluate(() => setTopicChip('other', 'other-agent'));
+    await page.evaluate(() => {
+      setTopicChip('other', 'other-agent');
+      setAttachedFiles([{ path: '/new.txt' }]);
+    });
     const authRequest = page.waitForRequest('**/auth/session');
     await login.click();
     expect((await authRequest).postDataJSON()).toMatchObject({
@@ -3156,8 +3161,41 @@ test.describe('response bubble', () => {
     await expect(page.locator(RESPONSE)).toHaveCount(2);
     await expect(page.locator(RESPONSE).last()).toContainText('Retried response');
     expect(turns).toHaveLength(2);
+    expect(turns[0].attached_paths).toEqual(['/original.txt']);
+    expect(turns[1].attached_paths).toEqual(['/original.txt']);
     expect(turns[1]).toMatchObject({
       topic: 'original', agent: 'clape', message: 'Run this prompt', adhoc: false,
+    });
+  });
+
+  test('login from history retries with the stored request context', async ({ page }) => {
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: [{
+        id: 86, topic: 'original', agent: 'clape', status: 'error', adhoc: true,
+        prompt: 'Retry this from history', prompt_lookback: 2,
+        prompt_context: JSON.stringify({ pins: [14, 22], mem: true, attached_paths: ['/original.txt'] }),
+        content: '[[cli-auth-required:claudecode:anthropic_pers]] Sign in to this subscription provider.',
+      }],
+      has_more: false,
+    }}));
+    await page.route('**/auth/session', route => route.fulfill({
+      json: { id: 'claude-login', command: 'claude auth login' },
+    }));
+    await page.route('**/auth/session/claude-login', route => route.fulfill({ json: { state: 'running' } }));
+    await page.route('**/auth/session/claude-login/events', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS, body: sse({ event: 'exit', data: '0' }),
+    }));
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS, body: sse(META, { data: 'Retried response' }, STATS, DONE),
+    }));
+
+    await page.reload();
+    const retry = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/chat');
+    await page.locator('.history-item[data-msg-id="86"] .auth-login-btn').click();
+    expect((await retry).postDataJSON()).toMatchObject({
+      topic: 'original', agent: 'clape', message: 'Retry this from history',
+      adhoc: true, lookback: 2, lookback_via_pins: true,
+      pinned_ids: [14, 22], include_topic_memory: true, attached_paths: ['/original.txt'],
     });
   });
 

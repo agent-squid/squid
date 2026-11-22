@@ -1860,13 +1860,16 @@ def insert_user_message(
     flow_run_id: Optional[str] = None,
     flow_route: Optional[str] = None,
     flow_step_id: Optional[str] = None,
+    attached_paths: Optional[list[str]] = None,
 ) -> int:
     if source not in {"human", "workflow", "diff_viewer", "continuation"}:
         source = "human"
-    if context_ids or mem or mem_revision:
+    if context_ids or mem or mem_revision or attached_paths:
         context = {"pins": context_ids or [], "mem": mem}
         if mem_revision:
             context["mem_revision"] = mem_revision
+        if attached_paths:
+            context["attached_paths"] = attached_paths
         context_json = json.dumps(context)
     else:
         context_json = None
@@ -2532,7 +2535,7 @@ def get_message(msg_id: int) -> Optional[dict]:
                       m.context, m.status_raw, m.created_at AS timestamp,
                       {_turn_end_expr("m")} AS completed_at, m.reply_to,
                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                      u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
+                      u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source, u.lookback AS prompt_lookback,
                       m.session_turn_index AS session_turn_count,
                       re.payload AS stats_payload,
                       {_marked_bad_expr("m")} AS marked_bad,
@@ -2602,7 +2605,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
+                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source, u.lookback AS prompt_lookback,
                        m.session_turn_index AS session_turn_count,
                        re.payload AS stats_payload,
                        {_marked_bad_expr("m")} AS marked_bad
@@ -2676,7 +2679,7 @@ def _history_rows(conn: sqlite3.Connection, where: str, params: list,
                    m.context, m.status_raw, m.created_at AS timestamp,
                    {_turn_end_expr("m")} AS completed_at, m.reply_to,
                    m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                   u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
+                   u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source, u.lookback AS prompt_lookback,
                    m.session_turn_index AS session_turn_count,
                    re.payload AS stats_payload,
                    {_marked_bad_expr("m")} AS marked_bad
@@ -2857,7 +2860,7 @@ def get_history_items_by_ids(ids: list[int], bookmarked: bool = False, marked_ba
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
+                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source, u.lookback AS prompt_lookback,
                        m.session_turn_index AS session_turn_count,
                        re.payload AS stats_payload,
                        {_marked_bad_expr("m")} AS marked_bad
@@ -2933,7 +2936,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
+                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source, u.lookback AS prompt_lookback,
                        m.session_turn_index AS session_turn_count,
                        re.payload AS stats_payload,
                        {_marked_bad_expr("m")} AS marked_bad
@@ -3004,7 +3007,7 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
+                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source, u.lookback AS prompt_lookback,
                        m.session_turn_index AS session_turn_count,
                        re.payload AS stats_payload,
                        {_marked_bad_expr("m")} AS marked_bad
