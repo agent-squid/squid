@@ -698,6 +698,15 @@ Route autocomplete should support this workflow as a first-class input form:
 
 Autocomplete must not need to read profile directories.
 
+### Removing recent routes
+
+Recent route rows in prefix autocomplete and completed-route browsing use the
+same browser-local dismissal list, keyed by normalized route including session
+mode. Removing a recent route hides it from both views and preserves its prompts,
+sessions, and availability as a typed route. Sending a new prompt on the route
+restores it to recents. Generated completions and the session/ad hoc switch do
+not carry the recent-route removal action.
+
 ## Session Type
 
 Existing Squid semantics are:

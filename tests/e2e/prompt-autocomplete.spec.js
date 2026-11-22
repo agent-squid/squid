@@ -217,6 +217,32 @@ test('left and right browse recent routes from an empty composer', async ({ page
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('squid_sticky_chip')).topic)).toBe('other');
 });
 
+test('deleting a recent route persists without removing its prompts', async ({ page }) => {
+  await mockBackend(page);
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  const rows = page.locator('#autocomplete .ac-item');
+  const removed = rows.filter({ hasText: '#squid@haiku!' });
+  const other = rows.filter({ hasText: '#other@codex' });
+  await composer.press('ArrowLeft');
+  await expect(other).toHaveClass(/selected/);
+  await removed.getByRole('button', { name: 'Remove from history' }).click();
+  await expect(removed).toHaveCount(0);
+  await expect(other).toHaveClass(/selected/);
+
+  await page.reload();
+  await composer.press('ArrowLeft');
+  await expect(other).toBeVisible();
+  await expect(removed).toHaveCount(0);
+  await composer.press('Escape');
+  await composer.fill('push');
+  await expect(removed).toContainText('push the changes');
+});
+
 test('left opens route autocomplete when the composer contains only a route', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
@@ -265,6 +291,10 @@ test('tapping a completed route shows only the other mode below recent topic rou
     const switchRow = picker.locator('.ac-item-divider');
     const chip = page.locator('#topic-chip');
     await page.evaluate(() => clearTopicChip());
+    await page.route('**/topics/other/agents/history', r => r.fulfill({ json: [] }));
+    await composer.fill('#other@co');
+    await expect(picker.locator('.ac-item', { hasText: '#other@codex' })).toBeVisible();
+
     await composer.fill('#');
     await expect(labels).toHaveText(['#older@haiku', '#other@codex', '#squid@codex']);
 
@@ -332,9 +362,24 @@ test('tapping a completed route shows only the other mode below recent topic rou
     topicsUnavailable = false;
     await composer.tap({ position: { x: 10, y: 10 } });
     await expect(labels).toHaveText(['#older@haiku', '#other@codex', '#squid@codex!']);
+    const otherRow = picker.locator('.ac-item', { hasText: '#other@codex' });
+    await expect(switchRow.getByTitle('Remove from history')).toHaveCount(0);
+    await otherRow.getByTitle('Remove from history').tap();
+    await expect(otherRow).toHaveCount(0);
     await picker.locator('.ac-item', { hasText: '#older@haiku' }).tap();
     await expect(chip).toContainText('#older@haiku!');
     await expect(composer).toHaveValue('keep this draft');
+
+    await page.evaluate(() => clearTopicChip());
+    await composer.fill('#other@co');
+    await expect(otherRow).toHaveCount(0);
+    await composer.fill('push');
+    await expect(otherRow).toContainText('push the changes');
+
+    await page.evaluate(() => clearTopicChip());
+    await composer.fill('#squid@codex');
+    await composer.tap();
+    await expect(labels).toHaveText(['#older@haiku', '#squid@codex!']);
   } finally {
     await page.close();
   }

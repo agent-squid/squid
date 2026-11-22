@@ -2583,6 +2583,8 @@ let commandEditRestore = null; // prompt replaced by clicking an editable search
 let _draftSaveTimer = null;
 const STASHED_PROMPTS_KEY = 'squid_stashed_prompts';
 const HIDDEN_PROMPTS_KEY  = 'squid_hidden_prompts';
+const HIDDEN_ROUTES_KEY = 'squid_hidden_routes';
+const hiddenRouteKeys = new Set(JSON.parse(localStorage.getItem(HIDDEN_ROUTES_KEY) || '[]'));
 let hiddenPromptKeys = new Set(JSON.parse(localStorage.getItem(HIDDEN_PROMPTS_KEY) || '[]'));
 
 function createTopSentinel() {
@@ -3370,6 +3372,10 @@ function recordPrompt(text) {
   if (hiddenPromptKeys.delete(key)) {
     localStorage.setItem(HIDDEN_PROMPTS_KEY, JSON.stringify([...hiddenPromptKeys]));
   }
+  const routeKey = normalizePromptHistoryRoute(splitPromptHistoryEntry(t).route).toLowerCase();
+  if (hiddenRouteKeys.delete(routeKey)) {
+    localStorage.setItem(HIDDEN_ROUTES_KEY, JSON.stringify([...hiddenRouteKeys]));
+  }
   promptHistory = [t, ...promptHistory.filter(x => promptHistoryDedupKey(x) !== key)].slice(0, 200);
   saveStashedPrompt(t);
   promptHistoryPos = -1;
@@ -3644,6 +3650,7 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
     const routeTarget = parseHistoryRouteTarget(routeKey);
     const dedupeKey = routeKey.toLowerCase();
     if (!routeKey || !routeTarget || seen.has(dedupeKey)) return;
+    if (!current && hiddenRouteKeys.has(dedupeKey)) return;
     seen.add(dedupeKey);
     items.push({
       routeHtml: _acRouteHtml(routeKey),
@@ -3662,6 +3669,7 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
       // set this flag.
       previewApply: true,
       currentRoute: current,
+      deleteRouteKey: current ? null : dedupeKey,
       sub: prompt ? _acLastPrompt(prompt) : '',
     });
   };
@@ -3688,6 +3696,8 @@ function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
     if (hiddenPromptKeys.has(promptHistoryDedupKey(entry))) continue;
     const { route, prompt } = splitPromptHistoryEntry(entry);
     const normalizedRouteKey = normalizePromptHistoryRoute(route);
+    const historyKey = normalizedRouteKey.toLowerCase();
+    if (hiddenRouteKeys.has(historyKey)) continue;
     const rawRouteKey = String(route || '').trim().replace(/\s+/g, '');
     const routeKey = [normalizedRouteKey, rawRouteKey]
       .find(candidate => candidate && candidate.toLowerCase().startsWith(lowerPrefix));
@@ -3709,6 +3719,7 @@ function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
       insert: routeKey,
       trail: false,
       routeTarget,
+      deleteRouteKey: historyKey,
       sub: prompt ? _acLastPrompt(prompt) : '',
     });
   }
@@ -15628,14 +15639,14 @@ function _acRender(items, title = 'Suggestions') {
   if (!items.length) { hideAutocomplete(); return; }
   acItems = items; acSel = 0;
   const rows = items.map((item, i) =>
-    `<div class="ac-item${item.dividerAbove ? ' ac-item-divider' : ''}" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
+    `<div class="ac-item${item.dividerAbove && i < items.length - 1 ? ' ac-item-divider' : ''}" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
     `<div class="ac-row${item.rowClass ? ` ${item.rowClass}` : ''}">` +
     (item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="Switch to this route">${item.routeHtml}${item.routeSwitchIcon === false ? '' : '<span class="ac-route-switch-icon" aria-hidden="true"></span>'}</button> ` : '') +
     `<span class="ac-label${item.labelClass ? ` ${item.labelClass}` : ''}">${item.label}</span>` +
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
     (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') +
     (item.deleteTopic ? `<button class="ac-del-btn" data-topic="${item.deleteTopic}" type="button" title="Delete #${item.deleteTopic} sessions">✕</button>` : '') +
-    (item.deletePromptEntry != null ? `<button class="ac-del-btn ac-del-prompt-btn" data-i="${i}" type="button" title="Remove from history">✕</button>` : '') +
+    ((item.deletePromptEntry != null || item.deleteRouteKey) ? `<button class="ac-del-btn ac-del-prompt-btn" data-i="${i}" type="button" title="Remove from history" aria-label="Remove from history">✕</button>` : '') +
     `</div>` +
     `</div>`
   ).reverse().join('');
@@ -15649,7 +15660,7 @@ function _acRender(items, title = 'Suggestions') {
     `</div>`;
   acEl.querySelectorAll('.ac-item').forEach(el =>
     el.addEventListener('mousedown', e => {
-      if (e.target.classList.contains('ac-del-btn') || e.target.classList.contains('ac-del-prompt-btn')) return;
+      if (e.target.closest('.ac-del-btn')) return;
       const routeBtn = e.target.closest('.ac-route-btn');
       if (routeBtn) {
         e.preventDefault();
@@ -15684,18 +15695,30 @@ function _acRender(items, title = 'Suggestions') {
       if (!acEl.querySelector('.ac-item')) hideAutocomplete();
     })
   );
-  acEl.querySelectorAll('.ac-del-prompt-btn').forEach(btn =>
+  acEl.querySelectorAll('.ac-del-prompt-btn').forEach(btn => {
     btn.addEventListener('mousedown', e => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       const idx = Number(btn.dataset.i);
       if (idx < 0 || idx >= acItems.length) return;
-      const entry = acItems[idx].deletePromptEntry;
-      if (entry) hidePrompt(entry);
-      acItems = acItems.filter((_, i) => i !== idx);
-      btn.closest('.ac-item').remove();
-      if (!acEl.querySelector('.ac-item')) hideAutocomplete();
-    })
-  );
+      const { deletePromptEntry, deleteRouteKey } = acItems[idx];
+      if (deleteRouteKey) {
+        hiddenRouteKeys.add(deleteRouteKey);
+        localStorage.setItem(HIDDEN_ROUTES_KEY, JSON.stringify([...hiddenRouteKeys]));
+      } else if (deletePromptEntry) {
+        hidePrompt(deletePromptEntry);
+      }
+      const items = acItems.filter((item, i) => i !== idx && (!deleteRouteKey || item.deleteRouteKey !== deleteRouteKey));
+      const acSelBeforeRemoval = acSel;
+      const selected = acItems[acSel];
+      const nextSelection = items.indexOf(selected);
+      _acRender(items, title);
+      if (items.length) {
+        acSel = nextSelection >= 0 ? nextSelection : Math.min(acSelBeforeRemoval, items.length - 1);
+        _acHighlight();
+      }
+    });
+  });
   acEl.querySelector('.ac-close').addEventListener('mousedown', e => {
     e.preventDefault();
     e.stopPropagation();
@@ -16159,6 +16182,12 @@ async function updateAutocomplete() {
       const backend = backendByAgent.get(agent) || null;
       const otherTopics = topics.filter(t =>
         t.name.toLowerCase() !== topic.toLowerCase() || t.agent?.toLowerCase() !== prefix);
+      const recentItems = otherTopics.flatMap(t => {
+        const route = promptHistoryRoute(t.name, t.agent, !!t.sticky_adhoc);
+        const deleteRouteKey = normalizePromptHistoryRoute(route).toLowerCase();
+        if (hiddenRouteKeys.has(deleteRouteKey)) return [];
+        return topicAutocompleteItems([t], replacingSlug).map(item => ({ ...item, deleteRouteKey }));
+      });
       const switchToAdhoc = !preserveAdhocSuffix;
       if (switchToAdhoc || !isDefault) {
         const suffix = switchToAdhoc ? '!' : '';
@@ -16167,10 +16196,10 @@ async function updateAutocomplete() {
           insert: `#${topic}@${agent}${suffix}`,
           sub: _acLastPrompt(switchToAdhoc ? currentHistory?.last_adhoc_prompt : currentHistory?.last_prompt),
           meta: switchToAdhoc ? 'adhoc' : 'session',
-          dividerAbove: otherTopics.length > 0,
+          dividerAbove: recentItems.length > 0,
         });
       }
-      items.push(...topicAutocompleteItems(otherTopics, replacingSlug));
+      items.push(...recentItems);
       _acRender(items.map(item => ({
         ...item, replaceSlug: replacingSlug, deleteTopic: null, collapseSlug: true, highlightOnly: true,
       })), 'Routes');
