@@ -3114,6 +3114,53 @@ test.describe('response bubble', () => {
     await look(page);  // pause — observe: login button leads the error text
   });
 
+  test('dedicated Claude login retries the failed prompt on its original route', async ({ page }) => {
+    const turns = [];
+    await page.route('**/chat', route => {
+      turns.push(route.request().postDataJSON());
+      const meta = { ...META, data: { ...META.data, agent: 'clape', msg_id: turns.length } };
+      return route.fulfill({
+        status: 200, headers: SSE_HEADERS,
+        body: turns.length === 1
+          ? sse(meta, {
+            event: 'error',
+            data: '[[cli-auth-required:claudecode:anthropic_pers]] Sign in to this subscription provider.',
+          })
+          : sse(meta, { data: 'Retried response' }, STATS, DONE),
+      });
+    });
+    let loginResult = '1';
+    await page.route('**/auth/session', route => route.fulfill({
+      json: { id: 'claude-login', command: 'claude auth login' },
+    }));
+    await page.route('**/auth/session/claude-login', route => route.fulfill({ json: { state: 'running' } }));
+    await page.route('**/auth/session/claude-login/events', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS, body: sse({ event: 'exit', data: loginResult }),
+    }));
+
+    await sendMsg(page, '#original@clape Run this prompt');
+    const login = page.locator(RESPONSE).locator('.auth-login-btn');
+    await expect(login).toBeVisible();
+    await page.evaluate(() => setTopicChip('other', 'other-agent'));
+    const authRequest = page.waitForRequest('**/auth/session');
+    await login.click();
+    expect((await authRequest).postDataJSON()).toMatchObject({
+      harness: 'claudecode', provider: 'anthropic_pers', mode: 'login',
+    });
+    const retryLogin = page.locator('#auth-panel-retry-btn');
+    await expect(retryLogin).toBeVisible();
+    expect(turns).toHaveLength(1);
+
+    loginResult = '0';
+    await retryLogin.click();
+    await expect(page.locator(RESPONSE)).toHaveCount(2);
+    await expect(page.locator(RESPONSE).last()).toContainText('Retried response');
+    expect(turns).toHaveLength(2);
+    expect(turns[1]).toMatchObject({
+      topic: 'original', agent: 'clape', message: 'Run this prompt', adhoc: false,
+    });
+  });
+
   test('locked Cursor keychain error offers unlock instead of login', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200,
@@ -4851,8 +4898,6 @@ test('cancelling during the auth.start round-trip cancels the spawned session, n
           // Hold the command.result open so the test can cancel while the
           // auth.start round-trip is still in flight.
           window.__pendingAuthStart = frame;
-        } else if (frame.type === 'auth.cancel') {
-          window.__authFrames.push(frame);
         }
       }
       receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
@@ -4863,7 +4908,15 @@ test('cancelling during the auth.start round-trip cancels the spawned session, n
   await mockBackend(page);
   await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
 
+  await page.route('**/auth/session/sess-1/cancel', route => route.fulfill({ json: { ok: true } }));
   await page.goto('/');
+  await page.evaluate(async () => {
+    const opening = openAuthPanel('claudecode', null);
+    await closeAuthPanel();
+    await opening;
+  });
+  expect(await page.evaluate(() => window.__authFrames)).toEqual([]);
+
   // Don't await the panel open — it blocks on the held command.result.
   await page.evaluate(() => { window.__openAuthPanel = openAuthPanel('claudecode', null); });
   await page.waitForFunction(() => window.__pendingAuthStart);
@@ -4871,6 +4924,8 @@ test('cancelling during the auth.start round-trip cancels the spawned session, n
   // Cancel while auth.start is in flight; the server has already spawned the
   // PTY, but the client doesn't have its session_id yet.
   await page.evaluate(() => closeAuthPanel());
+
+  const cancellation = page.waitForRequest('**/auth/session/sess-1/cancel');
 
   // The command.result finally lands for the session that was just spawned.
   await page.evaluate(() => {
@@ -4881,8 +4936,6 @@ test('cancelling during the auth.start round-trip cancels the spawned session, n
 
   // The orphaned session must be cancelled, and the panel must stay closed
   // (no resurrection onto the disposed terminal).
-  await page.waitForFunction(() => window.__authFrames.some(f => f.type === 'auth.cancel'));
-  const cancelFrame = await page.evaluate(() => window.__authFrames.find(f => f.type === 'auth.cancel'));
-  expect(cancelFrame.payload).toEqual({ session_id: 'sess-1' });
+  expect((await cancellation).method()).toBe('POST');
   await expect(page.locator('#auth-panel')).not.toHaveClass(/open/);
 });

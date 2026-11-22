@@ -409,6 +409,18 @@ body {
 }
 #quota-display:hover { color: var(--text-mid); }
 #quota-display.loaded { color: var(--text-lo); }
+#quota-display:disabled { cursor: default; }
+#quota-display.auth-required .quota-7d-group,
+#quota-display.auth-required #quota-label { display: none; }
+#quota-display.auth-required #quota-pie > circle:first-child {
+  stroke: var(--danger);
+  stroke-width: 2;
+}
+#quota-display.auth-required #quota-5h-pct {
+  fill: var(--danger);
+  font-size: 12px;
+  font-weight: 700;
+}
 
 #quota-bar-wrap { display: none; }
 #quota-bar { display: none; }

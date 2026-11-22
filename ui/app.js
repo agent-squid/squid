@@ -4946,7 +4946,7 @@ function wireAuthLoginButtons(root, onSuccessRetry) {
         return;
       }
       const provider = btn.dataset.provider;
-      openAuthPanel(btn.dataset.harness, provider ? null : onSuccessRetry, { provider });
+      openAuthPanel(btn.dataset.harness, onSuccessRetry, { provider });
     });
   });
 }
@@ -5261,18 +5261,6 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
     const rows = isCatalogOperation ? 10 : Math.max(5, Math.min(200, term.rows));
     if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
   };
-  // #auth-panel just flipped from display:none to flex this same tick, so
-  // its box has no layout yet — give it one frame before fit() measures it.
-  await new Promise(resolve => requestAnimationFrame(resolve));
-  fitTerminal();
-  // Catalog commands render animated progress against the PTY width they
-  // start with. Keep at least a small usable grid on very narrow phones;
-  // the Agents panel scrolls horizontally when the viewport cannot fit it.
-  // Focusing xterm opens the software keyboard on phones, collapsing the
-  // viewport until only the first terminal line is visible. Mobile login
-  // pickers use the dedicated navigation keypad below the terminal instead.
-  if (!deviceLogin && !window.matchMedia('(max-width: 768px)').matches) term.focus();
-
   // Make URLs clickable — avoids macOS "open with" system modal.
   term.registerLinkProvider({
     provideLinks(y, callback) {
@@ -5333,6 +5321,20 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   _authSession = { id: null, harness, mode, model, provider, providerLabel, panel, panelTitle, panelTerm,
     panelRetryBtn, anchor, term, fitAddon, handleResize, onSuccessRetry, running: true };
 
+  const pendingSession = _authSession;
+  // #auth-panel just flipped from display:none to flex this same tick, so
+  // its box has no layout yet — give it one frame before fit() measures it.
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  if (_authSession !== pendingSession) return;
+  fitTerminal();
+  // Catalog commands render animated progress against the PTY width they
+  // start with. Keep at least a small usable grid on very narrow phones;
+  // the Agents panel scrolls horizontally when the viewport cannot fit it.
+  // Focusing xterm opens the software keyboard on phones, collapsing the
+  // viewport until only the first terminal line is visible. Mobile login
+  // pickers use the dedicated navigation keypad below the terminal instead.
+  if (!deviceLogin && !window.matchMedia('(max-width: 768px)').matches) term.focus();
+
   const finishExit = (code, { cancelSession = true } = {}) => {
     if (_authSession?.term !== term || !_authSession.running) return;
     _authSession.stopCompletionMonitor?.();
@@ -5367,9 +5369,11 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
           .setAttribute('role', 'status');
         session.loginSucceeded = true;
         if (session.provider && _providerMetadata[session.provider]?.dedicated_login
-            && gaugeTypeFor(session.provider) === 'codex') {
+            && quotaConfigFor(session.provider)) {
           const state = quotaStateFor(session.provider);
-          showQuotaError(session.provider, `${label} loading…`);
+          if (gaugeTypeFor(session.provider) === 'codex') {
+            showQuotaError(session.provider, `${label} loading…`);
+          }
           const refreshQuota = async () => {
             await state.requestDone;
             await fetchQuotaForBackend(session.provider);
@@ -5406,14 +5410,9 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   // default size and get a SIGWINCH mid-render once the resize arrives, which
   // is what corrupted the opencode login list on up-arrow.
   const transportMode = await realtimeTransportMode;
+  if (_authSession !== pendingSession) return;
   let data;
   let authError = null;
-  // The in-flight session object (id:null, no transport) this invocation
-  // created above. Cancel/Esc during either await below runs closeAuthPanel,
-  // which nulls _authSession and disposes the term — so once an await resolves
-  // we must not write to the disposed term or resurrect _authSession on a dead
-  // panel, and any PTY the server already spawned has to be cancelled.
-  const pendingSession = _authSession;
   if (transportMode !== 'sse' && realtimeV1) {
     try {
       data = await realtimeV1.startAuth(
@@ -5434,6 +5433,9 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
             finishExit(code == null ? -1 : Number(code));
           }
         },
+        result => {
+          if (result?.ok && result.session_id) void cancelAuthSession(result.session_id, 'ws');
+        },
       );
     } catch (err) {
       data = null;
@@ -5444,7 +5446,8 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
       // server already spawned a PTY when it returned ok — cancel it so it
       // doesn't leak until the idle reaper, and don't resurrect the panel.
       if (data && data.ok === true && data.session_id) {
-        realtimeV1.authSend('auth.cancel', { session_id: data.session_id });
+        if (!_authSession) realtimeV1.clearAuth();
+        void cancelAuthSession(data.session_id, 'ws');
       }
       return;
     }
@@ -5508,7 +5511,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
     // Cancel/Esc during the fetch: the server already spawned the session
     // (res.ok) — cancel it and don't resurrect the panel.
     if (res && res.ok && data && data.id) {
-      fetch(`/auth/session/${data.id}/cancel`, { method: 'POST' }).catch(() => {});
+      void cancelAuthSession(data.id, 'sse');
     }
     return;
   }
@@ -5550,6 +5553,16 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   });
 }
 
+async function cancelAuthSession(id, transport) {
+  try {
+    const response = await fetch(`/auth/session/${id}/cancel`, { method: 'POST', keepalive: true });
+    if (!response.ok || !(await response.json()).ok) throw new Error('Cancellation was not confirmed');
+  } catch {
+    if (transport === 'ws' && realtimeV1?.authSend('auth.cancel', { session_id: id })) return;
+    showCmdFeedback('Could not confirm that the session stopped.');
+  }
+}
+
 async function closeAuthPanel({ refreshCatalog = true, cancelSession = true } = {}) {
   const session = _authSession;
   _authSession = null;
@@ -5562,8 +5575,7 @@ async function closeAuthPanel({ refreshCatalog = true, cancelSession = true } = 
     // The endpoint only signals a running child; for a completed session it
     // simply releases the retained server-side replay buffer immediately.
     if (session.id && cancelSession && !session.loginSucceeded) {
-      if (session.transport === 'ws') realtimeV1?.authSend('auth.cancel', { session_id: session.id });
-      else fetch(`/auth/session/${session.id}/cancel`, { method: 'POST' }).catch(() => {});
+      void cancelAuthSession(session.id, session.transport);
     }
     if (session.term) session.term.dispose();
   }
@@ -5634,7 +5646,7 @@ async function sendMessage(text, opts = {}) {
   const followSubmission = source === 'human' || isAtBottom();
   const updateComposerRoute = source === 'human' && opts.updateComposerRoute !== false;
   const suppressChipTurnCount = !!opts.suppressChipTurnCount;
-  const parsed = parseInput(text);
+  const parsed = opts.parsedInput ?? parseInput(text);
   const { lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, message } = parsed;
   const nativeShell = message.trimStart().startsWith('!');
   // Origin Broadcast (ADR-0032): N independent origins, one per sendMessage
@@ -6176,7 +6188,12 @@ async function sendMessage(text, opts = {}) {
     placeResponseBubble();
     contentDiv.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message, authReq.provider) : '')
       + `<span class="msg-error">${escapeHtml(errDisplay) || 'Response interrupted.'}</span>`;
-    if (authReq) wireAuthLoginButtons(contentDiv, () => sendMessage(text, opts));
+    if (authReq) wireAuthLoginButtons(contentDiv, () => sendMessage(text, {
+      ...opts,
+      parsedInput: { ...parsed, agent: resolvedAgent || parsed.agent },
+      displayFlowRoute,
+      updateComposerRoute: false,
+    }));
     scrollToBottom();
   }
 
@@ -9315,7 +9332,7 @@ const realtimeV1 = (() => {
         timeoutMessage: 'WebSocket auto-resolve command timed out after submission.',
       });
     },
-    startAuth(payload, onFrame) {
+    startAuth(payload, onFrame, onLateResult) {
       onAuthFrame = onFrame;
       // auth.start is `unscoped` (filtered out of scopes()), so it does not itself
       // keep subscribe() from no-oping, and sendCommand only flushes a queued
@@ -9331,6 +9348,7 @@ const realtimeV1 = (() => {
         topic: null,
         agent: null,
         unscoped: true,
+        onLateResult,
         freshScope: false,
         timeoutMessage: 'WebSocket command timed out after submission.',
       });
@@ -10860,6 +10878,13 @@ function setVisibleQuotaBackend(backend) {
     const displayEl = document.getElementById(cfg.displayId);
     displayEl?.classList.remove('quota-hidden', 'loaded', 'error');
     const snapshot = quotaSnapshots[activeQuotaBackend];
+    const authRequired = snapshot?.authRequired === true;
+    if (gaugeType === 'claude') {
+      quotaDisplay.classList.toggle('auth-required', authRequired);
+      quotaDisplay.disabled = !!_providerMetadata[backend]?.dedicated_login && !authRequired;
+      if (authRequired) quotaDisplay.setAttribute('aria-label', `${backendDisplayName(backend)} usage settings`);
+      else quotaDisplay.removeAttribute('aria-label');
+    }
     if (snapshot?.status === 'loaded') {
       displayEl?.classList.add('loaded');
       if (displayEl) displayEl.title = snapshot.title ?? '';
@@ -10867,11 +10892,13 @@ function setVisibleQuotaBackend(backend) {
       updateSevenDayGauge(activeQuotaBackend);
     } else if (snapshot?.status === 'error') {
       displayEl?.classList.add('error');
-      if (displayEl) displayEl.title = cfg.errorTitle ?? '';
+      if (displayEl) displayEl.title = authRequired ? snapshot.text : (cfg.errorTitle ?? '');
       updateGaugeLabel(activeQuotaBackend);
       updateSevenDayGauge(activeQuotaBackend);
       const label = document.getElementById(cfg.labelId);
-      if (label) label.textContent = snapshot.text;
+      if (label) label.textContent = authRequired ? '' : snapshot.text;
+      const pct = document.getElementById(cfg.fiveHourPctId);
+      if (authRequired && pct) pct.textContent = '!';
       const arc = document.getElementById(cfg.pieArcId);
       if (arc) arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
     } else {
@@ -11004,7 +11031,6 @@ function clearQuotaRetry(state) {
 }
 
 function renderQuotaLoaded(backend, snapshot) {
-  const cfg = quotaConfigFor(backend);
   const state = quotaStateFor(backend);
   clearQuotaRetry(state);
   state.raw = snapshot.raw;
@@ -11013,14 +11039,6 @@ function renderQuotaLoaded(backend, snapshot) {
   state.displayText = snapshot.displayText ?? null;
   state.sevenDay = snapshot.sevenDay ?? null;
 
-  if (backend === activeQuotaBackend) {
-    const displayEl = document.getElementById(cfg.displayId);
-    displayEl.classList.remove('error');
-    displayEl.classList.add('loaded');
-    displayEl.title = snapshot.title ?? '';
-  }
-  updateGaugeLabel(backend);
-  if (cfg.sevenDayArcId) updateSevenDayGauge(backend);
   if (state.timer) clearTimeout(state.timer);
   state.timer = null;
   scheduleGaugeTick(backend);
@@ -11033,6 +11051,7 @@ function renderQuotaLoaded(backend, snapshot) {
     displayText: snapshot.displayText ?? null,
     sevenDay: snapshot.sevenDay ?? null,
   });
+  if (backend === activeQuotaBackend) setVisibleQuotaBackend(backend);
 }
 
 function showQuotaError(backend, text, options = {}) {
@@ -11045,7 +11064,7 @@ function showQuotaError(backend, text, options = {}) {
   state.sevenDay = null;
   if (state.timer) { clearTimeout(state.timer); state.timer = null; }
 
-  setQuotaSnapshot(backend, { status: 'error', text });
+  setQuotaSnapshot(backend, { status: 'error', text, authRequired: options.authRequired });
 
   if (backend === activeQuotaBackend) setVisibleQuotaBackend(backend);
 }
@@ -11068,9 +11087,9 @@ function showTransientQuotaError(backend, text) {
   }, delay);
 }
 
-function showRecoverableQuotaError(backend, text) {
+function showRecoverableQuotaError(backend, text, options = {}) {
   const state = quotaStateFor(backend);
-  showQuotaError(backend, text, { clearRetry: false });
+  showQuotaError(backend, text, { ...options, clearRetry: false });
   if (state.retryTimer) return;
   state.retryTimer = setTimeout(async () => {
     state.retryTimer = null;
@@ -11107,7 +11126,11 @@ async function fetchQuotaForBackend(backend, requireFresh = false) {
         state.raw = null;
         state.pct = null;
         state.sevenDay = null;
-        showRecoverableQuotaError(provider, `${label} auth`);
+        if (gaugeTypeFor(provider) === 'claude') {
+          showRecoverableQuotaError(provider, `Sign in to ${label}`, { authRequired: true });
+        } else {
+          showRecoverableQuotaError(provider, `${label} auth`);
+        }
       } else if (isAuthFailure && gaugeTypeFor(provider) === 'codex') {
         showRecoverableQuotaError(provider, `${label} auth`);
       } else if (isAuthFailure) showQuotaError(provider, `${label} auth`);
@@ -11210,9 +11233,8 @@ function initQuota() {
 
   const credsPopup = document.getElementById(cfg.credsPopupId);
   quotaDisplay.addEventListener('click', () => {
-    if (gaugeTypeFor(activeQuotaBackend) === 'claude' && !_providerMetadata[activeQuotaBackend]?.dedicated_login) {
-      credsPopup.classList.toggle('open');
-    }
+    if (gaugeTypeFor(activeQuotaBackend) !== 'claude') return;
+    credsPopup.classList.toggle('open');
   });
   document.addEventListener('click', (e) => {
     if (!quotaDisplay.contains(e.target) && !credsPopup.contains(e.target))

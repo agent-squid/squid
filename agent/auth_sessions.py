@@ -591,5 +591,9 @@ async def cancel_session(session_id: str) -> bool:
         except asyncio.TimeoutError:
             if not session.child_reaped:
                 _signal_process_group(session.pid, signal.SIGKILL)
+            try:
+                await asyncio.wait_for(session._closed.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                return False
     _sessions.pop(session_id, None)
     return True

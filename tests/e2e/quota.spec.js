@@ -36,6 +36,57 @@ test('topbar quota gauge keeps its neutral original treatment', async ({ page })
   await expect(page.locator('#quota-creds-popup')).toHaveClass(/open/);
 });
 
+test('dedicated Claude meter opens the regular usage settings without starting login', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockShell(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'sse' } }));
+  let signedIn = false;
+  await page.route('**/quota/provider/anthropic_pers', route => signedIn
+    ? route.fulfill({ json: { status: 'ok', raw: 42, used_percent: 42 } })
+    : route.fulfill({ status: 401, json: { error: 'Provider is signed out' } }));
+  let authRequests = 0;
+  await page.route('**/auth/session', route => {
+    authRequests++;
+    return route.fulfill({ status: 500 });
+  });
+
+  await page.goto('/');
+  await page.evaluate(async () => {
+    await bootBannerSettled;
+    _providerMetadata.anthropic_pers = {
+      label: 'Anthropic Personal', gauge: { type: 'claude' }, dedicated_login: true,
+    };
+    setVisibleQuotaBackend('anthropic_pers');
+    await fetchQuotaForBackend('anthropic_pers');
+  });
+
+  const meter = page.getByRole('button', { name: 'Anthropic Personal usage settings' });
+  const marker = page.locator('#quota-5h-pct');
+  const ring = page.locator('#quota-pie > circle').first();
+  await expect(meter).toBeVisible();
+  await expect(marker).toHaveText('!');
+  await expect(marker).toHaveCSS('fill', 'rgb(224, 80, 48)');
+  await expect(ring).toHaveCSS('stroke', 'rgb(224, 80, 48)');
+  await expect(meter.locator('.quota-7d-group')).toBeHidden();
+  await expect(meter.locator('#quota-label')).toBeEmpty();
+
+  await meter.click();
+  await expect(page.locator('#claude-remote-guide')).toBeVisible();
+  await expect(page.locator('#creds-key')).toBeVisible();
+  await expect(page.locator('#auth-panel')).toBeHidden();
+  expect(authRequests).toBe(0);
+
+  await meter.click();
+  await expect(page.locator('#quota-creds-popup')).toBeHidden();
+
+  signedIn = true;
+  await page.evaluate(() => fetchQuotaForBackend('anthropic_pers'));
+  await expect(marker).toHaveText('42');
+  await expect(ring).toHaveCSS('stroke', 'rgb(42, 42, 60)');
+  await expect(meter).toHaveCount(0);
+  await expect(page.locator('#quota-display .quota-7d-group')).toBeVisible();
+});
+
 test('credential popups describe their auth source', async ({ page }) => {
   await mockShell(page);
   await page.route('**/quota/provider/*', route => route.fulfill({
