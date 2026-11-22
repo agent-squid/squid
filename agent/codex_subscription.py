@@ -273,11 +273,6 @@ def uses_managed_claude_login(harness: str) -> bool:
     return harness == "claudecode" and sys.platform == "darwin"
 
 
-def clear_managed_claude_login(home: Path) -> None:
-    """Revoke the previous login before starting a replacement under the login lock."""
-    (home / _CLAUDE_MANAGED_GENERATION).unlink(missing_ok=True)
-
-
 def complete_managed_claude_login(home: Path) -> bool:
     """Verify native auth and record a new generation under the login lock."""
     identity = _claude_account(home, identify_managed=True)

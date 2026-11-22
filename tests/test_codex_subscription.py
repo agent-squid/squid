@@ -566,6 +566,9 @@ assert sys.argv[sys.argv.index("--setting-sources") + 1] == ""
 profile = home / "fixture-login"
 if "login" in sys.argv:
     assert "--claudeai" in sys.argv
+    if (home / "hold-login").exists():
+        import time
+        time.sleep(60)
     profile.touch()
     credentials = home / ".credentials.json"
     credentials.write_text(json.dumps({"claudeAiOauth": {"accessToken": "fixture"}}))
@@ -630,6 +633,18 @@ else:
             results, _ = await turn()
             assert "resumed" in results
             if platform == "darwin":
+                hold_login = home / "hold-login"
+                hold_login.touch()
+                try:
+                    cancelled = await auth_sessions.create_session("claudecode", 100, 10, provider_id="clape")
+                    assert await auth_sessions.cancel_session(cancelled.id)
+                finally:
+                    hold_login.unlink()
+                binding = subscription.bind(provider, "personal", "claudecode", verify_claude=False)
+                assert binding.account == first_binding.account
+                results, _ = await turn()
+                assert "resumed" in results
+
                 (home / "fixture-login").write_text("replacement@example.invalid")
                 with pytest.raises(ValueError, match="Claude account changed outside Squid"):
                     subscription.account_identity(home, "claudecode")

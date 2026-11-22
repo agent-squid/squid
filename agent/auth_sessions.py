@@ -319,9 +319,6 @@ async def create_session(
                     or current_provider.subscription_harness != target_id
                 ):
                     raise ValueError("Subscription provider changed before sign-in. Reopen sign-in.")
-                if managed_claude:
-                    codex_subscription.clear_managed_claude_login(home)
-                    codex_subscription.invalidate_provider(provider_id)
             except asyncio.CancelledError:
                 if credential_lock is not None:
                     credential_lock.close()
@@ -444,7 +441,9 @@ async def _finalize(session: AuthSession) -> None:
             if codex_subscription.uses_managed_claude_login(session.harness_id):
                 if returncode == 0:
                     home = codex_subscription.ensure_home(session.credential_provider, session.harness_id)
-                    if not await settled_thread_call(codex_subscription.complete_managed_claude_login, home):
+                    if await settled_thread_call(codex_subscription.complete_managed_claude_login, home):
+                        codex_subscription.invalidate_provider(session.credential_provider)
+                    else:
                         session.broadcast(b"\r\nNo verified subscription login was saved for this provider.\r\n")
                         returncode = -1
             else:
