@@ -4609,7 +4609,7 @@ body {
 
 #form {
   display: flex;
-  align-items: flex-end;
+  align-items: stretch;
   min-height: 0;
   gap: 0.5rem;
 }
