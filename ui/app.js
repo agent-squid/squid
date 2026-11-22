@@ -7570,25 +7570,9 @@ function _withinRevertWindow(timestamp) {
   return Number.isFinite(t) && Date.now() - t < REVERT_WINDOW_MS;
 }
 
-function openTurnDiffViewer(endpoint, label) {
-  const dialog = document.createElement('dialog');
-  dialog.className = 'turn-diff-viewer';
-  dialog.setAttribute('aria-labelledby', 'turn-diff-title');
-
-  const header = document.createElement('header');
-  const title = document.createElement('h2');
-  title.id = 'turn-diff-title';
-  title.textContent = label;
-  const close = document.createElement('button');
-  close.type = 'button';
-  close.className = 'btn-ghost';
-  close.textContent = 'Close';
-  close.autofocus = true;
-  close.addEventListener('click', () => dialog.close());
-  header.append(title, close);
-
+function makeDeferredDiff(endpoint, toggle, container, expandedClass) {
   const scroll = document.createElement('div');
-  scroll.className = 'turn-diff-scroll';
+  scroll.className = 'diff-scroll';
   scroll.tabIndex = 0;
   scroll.setAttribute('aria-label', 'Diff');
   const lines = document.createElement('div');
@@ -7599,19 +7583,20 @@ function openTurnDiffViewer(endpoint, label) {
   more.className = 'btn-ghost';
   more.hidden = true;
   scroll.append(lines, status, more);
-  dialog.append(header, scroll);
 
-  const controller = new AbortController();
+  let started = false;
+  toggle.setAttribute('aria-expanded', 'false');
   let offset = 0;
   let cursor = null;
   async function loadPage() {
-    more.disabled = true;
+    if (more.getAttribute('aria-disabled') === 'true') return;
+    more.setAttribute('aria-disabled', 'true');
     status.textContent = 'Loading diff…';
     try {
       const url = new URL(endpoint, location.href);
       url.searchParams.set('offset', offset);
       if (cursor !== null) url.searchParams.set('cursor', cursor);
-      const response = await fetch(url, { signal: controller.signal });
+      const response = await fetch(url);
       const data = await response.json();
       if (response.status === 409) {
         offset = 0;
@@ -7629,28 +7614,30 @@ function openTurnDiffViewer(endpoint, label) {
       status.textContent = '';
       offset = data.next_offset;
       cursor = data.next_cursor ?? null;
-      if (offset == null && document.activeElement === more) scroll.focus({ preventScroll: true });
+      if (offset == null && document.activeElement === more) {
+        scroll.focus({ preventScroll: true });
+      }
       more.hidden = offset == null;
       more.textContent = 'Load more';
     } catch (error) {
-      if (controller.signal.aborted) return;
       status.textContent = error.message || 'Unable to load diff';
       more.textContent = 'Retry';
       more.hidden = false;
     } finally {
-      more.disabled = false;
+      more.removeAttribute('aria-disabled');
     }
   }
 
   more.addEventListener('click', loadPage);
-  dialog.addEventListener('keydown', event => event.stopPropagation());
-  dialog.addEventListener('close', () => {
-    controller.abort();
-    dialog.remove();
-  }, { once: true });
-  document.body.append(dialog);
-  dialog.showModal();
-  void loadPage();
+  toggle.addEventListener('click', () => {
+    const expanded = container.classList.toggle(expandedClass);
+    toggle.setAttribute('aria-expanded', String(expanded));
+    if (expanded && !started) {
+      started = true;
+      void loadPage();
+    }
+  });
+  return scroll;
 }
 
 function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
@@ -7677,18 +7664,17 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
 
   const toggle = document.createElement('button');
   toggle.className = 'tool-toggle';
+  const body = document.createElement('div');
+  body.className = 'tool-body';
   if (Number.isInteger(tool.detail_index) && msgId) {
     toggle.textContent = toolLabel(tool);
-    toggle.setAttribute('aria-haspopup', 'dialog');
-    toggle.addEventListener('click', () => {
-      openTurnDiffViewer(`/chat/${msgId}/diff-tool/${tool.detail_index}`, toggle.textContent);
-    });
-    block.appendChild(toggle);
+    body.appendChild(makeDeferredDiff(
+      `/chat/${msgId}/diff-tool/${tool.detail_index}`, toggle, block, 'tool-expanded',
+    ));
+    block.append(toggle, body);
     return block;
   }
 
-  const body = document.createElement('div');
-  body.className = 'tool-body';
   const scroll = document.createElement('div');
   scroll.className = 'diff-scroll';
   if (name !== 'GitDiff') body.appendChild(scroll);
@@ -8158,11 +8144,12 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
           counts = `+${file.additions} -${file.deletions}`;
         }
         if (msgId && sourceRepo) {
-          fileToggle.setAttribute('aria-haspopup', 'dialog');
-          fileToggle.addEventListener('click', () => {
-            const query = new URLSearchParams({ repo: tool.repo || sourceRepo, path: file.path });
-            openTurnDiffViewer(`/chat/${msgId}/diff-file?${query}`, fullDisplayPath);
-          });
+          const query = new URLSearchParams({ repo: tool.repo || sourceRepo, path: file.path });
+          fileBody = document.createElement('div');
+          fileBody.className = 'gitdiff-file-body';
+          fileBody.appendChild(makeDeferredDiff(
+            `/chat/${msgId}/diff-file?${query}`, fileToggle, row, 'gitdiff-file-expanded',
+          ));
         } else {
           fileToggle.classList.add('gitdiff-file-toggle--no-diff');
         }

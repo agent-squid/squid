@@ -1916,7 +1916,7 @@ test.describe('response bubble', () => {
     await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
   });
 
-  test('large GitDiff opens a paged viewer on demand and closes back to chat', async ({ page }) => {
+  test('large GitDiff loads and pages inline on demand', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 800 });
     const offsets = [];
     let changed = false;
@@ -1955,27 +1955,28 @@ test.describe('response bubble', () => {
     await expect(file).toContainText('M app.js  +9000 -1');
     expect(offsets).toEqual([]);
     await file.click();
-    const viewer = page.getByRole('dialog', { name: 'ui/app.js' });
-    await expect(viewer).toBeVisible();
+    const viewer = page.locator('.gitdiff-file-body');
+    await expect(file).toHaveAttribute('aria-expanded', 'true');
     await expect(viewer.locator('.diff-add')).toHaveText('+first page');
-    await viewer.getByRole('button', { name: 'Load more' }).click();
-    await expect(viewer.locator('.diff-add')).toHaveText(['+first page', '+second page']);
-    await expect(viewer.getByRole('button', { name: 'Load more' })).toBeHidden();
-    expect(offsets).toEqual(['0', '22']);
-    await viewer.getByRole('button', { name: 'Close' }).click();
-    await expect(viewer).toHaveCount(0);
-    await expect(file).toBeFocused();
+    await file.click();
+    await expect(viewer).toBeHidden();
+    await expect(file).toHaveAttribute('aria-expanded', 'false');
     await file.click();
     await expect(viewer.locator('.diff-add')).toHaveText('+first page');
+    expect(offsets).toEqual(['0']);
+
     changed = true;
     await viewer.getByRole('button', { name: 'Load more' }).click();
     await expect(viewer.getByRole('status')).toContainText('The diff changed');
     await expect(viewer.locator('.diff-add')).toHaveCount(0);
     await viewer.getByRole('button', { name: 'Reload diff' }).click();
     await expect(viewer.locator('.diff-add')).toHaveText('+first page');
-    await page.keyboard.press('Escape');
-    await expect(viewer).toHaveCount(0);
-    expect(offsets).toEqual(['0', '22', '0', '22', '0']);
+
+    changed = false;
+    await viewer.getByRole('button', { name: 'Load more' }).click();
+    await expect(viewer.locator('.diff-add')).toHaveText(['+first page', '+second page']);
+    await expect(viewer.getByRole('button', { name: 'Load more' })).toBeHidden();
+    expect(offsets).toEqual(['0', '22', '0', '22']);
   });
 
   test('deferred tool diff fetches its stored patch only when opened', async ({ page }) => {
@@ -2000,7 +2001,7 @@ test.describe('response bubble', () => {
     await expect(toggle).toBeVisible();
     expect(reads).toBe(0);
     await toggle.click();
-    const viewer = page.getByRole('dialog', { name: 'Diff: ui/app.js' });
+    const viewer = page.locator('.tool-block').filter({ has: toggle }).locator('.tool-body');
     await expect(viewer.locator('.diff-remove')).toHaveText('-old line');
     await expect(viewer.locator('.diff-add')).toHaveText('+new line');
     expect(reads).toBe(1);
