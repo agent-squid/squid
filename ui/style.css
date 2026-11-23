@@ -5670,6 +5670,7 @@ button {
   line-height: 1;
   border-radius: 3px;
 }
+.ac-label + .ac-del-prompt-btn { margin-left: auto; }
 .ac-prompt-row .ac-del-prompt-btn {
   margin-left: 0;
   position: absolute;
