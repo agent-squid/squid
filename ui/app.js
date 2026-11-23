@@ -1930,6 +1930,7 @@ async function updateComposerActionTitles() {
 
 chipFilterBtn.addEventListener('click', async e => {
   e.stopPropagation();
+  if (acOpen) hideAutocomplete();
   const active = historyFilter;
   if (active?.flow_route || active?.topic || active?.agent) {
     clearFilter();
@@ -1943,16 +1944,24 @@ chipFilterBtn.addEventListener('click', async e => {
 });
 
 function openHistoryPanel(suppressFocus = false) {
+  const keywords = document.getElementById('search-bar-keywords');
+  if (!suppressFocus && acOpen) {
+    hideAutocomplete();
+    if (searchPanelOpen) {
+      keywords.focus();
+      return;
+    }
+  }
   searchPanelOpen = true;
   searchScopeContext = { ...historyFilter };
   closeSearchScopes();
   document.getElementById('search-bar-scope').value = searchScopeText(historyFilter) || '#all';
-  document.getElementById('search-bar-keywords').value = searchActive ? searchState.keywords : '';
+  keywords.value = searchActive ? searchState.keywords : '';
   setSearchOperator(searchState?.operator);
   updateHistoryToggleButtons();
   document.getElementById('search-bar').classList.add('active');
   updateSearchButton();
-  if (!suppressFocus) document.getElementById('search-bar-keywords').focus();
+  if (!suppressFocus) keywords.focus();
 }
 
 function syncHistoryPanel() {
@@ -1969,7 +1978,8 @@ function closeHistoryPanel() {
 
 chipSearchBtn.addEventListener('click', e => {
   e.stopPropagation();
-  if (searchActive) {
+  if (acOpen) openHistoryPanel();
+  else if (searchActive) {
     clearSearch();
     syncHistoryPanel();
   }
@@ -2247,7 +2257,7 @@ function updateSearchButton() {
   chipSearchBtn?.classList.toggle('active', searchActive);
   document.getElementById('search-bar').classList.toggle('search-filtered', searchActive);
   chipSearchBtn?.setAttribute('aria-pressed', searchActive ? 'true' : 'false');
-  chipSearchBtn?.setAttribute('aria-expanded', searchPanelOpen ? 'true' : 'false');
+  chipSearchBtn?.setAttribute('aria-expanded', String(searchPanelOpen && !acEl.classList.contains('open')));
 }
 
 function hasHistoryFilterScope() {
@@ -5005,6 +5015,7 @@ function closeEscSurfaces() {
   // Floating popup
   if (procStatusPopup?.classList.contains('open')) { procStatusPopup.classList.remove('open'); return true; }
   // Search overlay
+  if (acOpen) { hideAutocomplete(); return true; }
   if (searchPanelOpen) { closeHistoryPanel(); input.focus(); return true; }
   // Inline panels (below search, above composer)
   if (pinPanel.classList.contains('open')) { closePinPanel({ restoreFocus: true }); return true; }
@@ -5025,7 +5036,7 @@ input.addEventListener('keydown', (e) => {
     restoreStashedInput();
     return;
   }
-  if (e.key === 'Tab' && !sessionAdvisoryEl.hidden) { e.preventDefault(); stashComposerAndEdit('/clear'); return; }
+  if (e.key === 'Tab' && !acOpen && !sessionAdvisoryEl.hidden) { e.preventDefault(); stashComposerAndEdit('/clear'); return; }
   if (acOpen) {
     if (acItems[0]?.routeTarget && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
       e.preventDefault();
@@ -15977,7 +15988,10 @@ function hideAutocomplete() {
   browseCompletedRoute = false;
   acEl.classList.remove('open');
   acOpen = false; acItems = []; acSel = -1; _acStashedForNav = false;
-  if (wasOpen) resizeComposer();
+  if (wasOpen) {
+    updateSearchButton();
+    resizeComposer();
+  }
 }
 
 function _acPreview() {
@@ -16129,6 +16143,7 @@ function _acRender(items, title = 'Suggestions') {
     messages.focus();
   });
   acEl.classList.add('open');
+  if (!acOpen) updateSearchButton();
   acOpen = true;
   _acHighlight();
   requestAnimationFrame(() => {
@@ -19512,9 +19527,10 @@ async function showScopeOptions(kind, query = '') {
             submitFilterScope();
             if (document.getElementById('filter-scope-picker').hidden) input.focus();
             else { scopeInput.focus(); closeScopeOptions(kind); }
-          } else if (value === '#all') {
-            applyHistoryFilter({ explicitAll: true });
-          } else document.getElementById('search-bar-keywords').focus();
+          } else {
+            if (value === '#all') applyHistoryFilter({ explicitAll: true });
+            document.getElementById('search-bar-keywords').focus();
+          }
         });
         list.appendChild(option);
       }
@@ -19658,7 +19674,7 @@ document.addEventListener('keydown', e => {
     openHistoryPanel();
     return;
   }
-  if (e.key === 'Escape' && closeEscSurfaces()) {
+  if (e.key === 'Escape' && !e.defaultPrevented && closeEscSurfaces()) {
     e.preventDefault();
   }
 });

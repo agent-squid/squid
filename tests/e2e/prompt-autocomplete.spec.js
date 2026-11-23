@@ -862,20 +862,82 @@ test('ArrowUp moves within a multiline draft before recalling prompt history', a
   await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
 });
 
-test('autocomplete can be dismissed with its touch-accessible close button', async ({ page }) => {
-  await mockBackend(page);
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/');
+for (const [layout, width] of [['mobile', 390], ['desktop', 1280]]) {
+  test(`autocomplete hides the advisory and history controls on ${layout}`, async ({ page }) => {
+    await mockBackend(page);
+    await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+      topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+    })));
+    await page.route('**/topics/squid/session?agent=codex', r => r.fulfill({ json: {
+      session_id: 'test-session', session_turn_count: 13,
+    } }));
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto('/');
 
-  await page.fill('#input', 'push');
-  await expect(page.locator('.ac-close-mobile')).toHaveText('×');
-  await expect(page.locator('.ac-close-mobile')).toBeVisible();
-  await page.getByRole('button', { name: 'Close suggestions' }).click();
+    const composer = page.locator('#input');
+    await composer.fill('/f #squid@codex');
+    await composer.press('Enter');
+    await expect(page.locator('#search-bar-scope')).toHaveValue('#squid@codex');
+    await page.evaluate(() => {
+      _sessionIds['squid@codex'] = 'test-session';
+      _advisoryTurnCount = 13;
+      evaluateAdvisory();
+    });
 
-  await expect(page.locator('#autocomplete')).not.toHaveClass(/open/);
-  await expect(page.locator('#messages')).toBeFocused();
-  await expect(page.locator('#input')).toHaveValue('push');
-});
+    const advisory = page.locator('#session-advisory');
+    const filter = page.locator('#search-bar');
+    const filterButton = page.locator('#chip-filter-btn');
+    const searchButton = page.locator('#chip-search-btn');
+    const keywords = page.locator('#search-bar-keywords');
+    const autocomplete = page.locator('#autocomplete');
+    const sendButton = page.locator('#send-btn');
+    await expect(advisory).toBeVisible();
+    await expect(filter).toBeVisible();
+    const sendPosition = await sendButton.boundingBox();
+
+    await composer.fill('push');
+    await expect(page.locator(`.ac-close-${layout}`)).toBeVisible();
+    await expect(advisory).toBeHidden();
+    await expect(filter).toBeHidden();
+    await expect(searchButton).toHaveAttribute('aria-expanded', 'false');
+    await expect(filterButton).toBeVisible();
+    await expect(filterButton).toHaveAttribute('aria-pressed', 'true');
+    const openSendPosition = await sendButton.boundingBox();
+    expect(openSendPosition.x).toBeCloseTo(sendPosition.x);
+    expect(openSendPosition.y + openSendPosition.height).toBeCloseTo(sendPosition.y + sendPosition.height);
+    await page.getByRole('button', { name: 'Close suggestions' }).click();
+
+    await expect(autocomplete).toBeHidden();
+    await expect(advisory).toBeVisible();
+    await expect(filter).toBeVisible();
+    await expect(searchButton).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('#search-bar-scope')).toHaveValue('#squid@codex');
+    await expect(page.locator('#messages')).toBeFocused();
+    await expect(composer).toHaveValue('push');
+
+    await keywords.fill('unfinished');
+    await composer.fill('pus');
+    await expect(autocomplete).toBeVisible();
+    await composer.press('Escape');
+    await expect(autocomplete).toBeHidden();
+    await expect(filter).toBeVisible();
+    await expect(keywords).toHaveValue('unfinished');
+
+    await composer.fill('push');
+    await expect(autocomplete).toBeVisible();
+    if (layout === 'mobile') await searchButton.click();
+    else await composer.press('Control+f');
+    await expect(autocomplete).toBeHidden();
+    await expect(keywords).toBeFocused();
+    await expect(keywords).toHaveValue('unfinished');
+    await expect(composer).toHaveValue('push');
+
+    await composer.fill('pus');
+    await expect(autocomplete).toBeVisible();
+    await composer.press('Tab');
+    await expect(composer).toHaveValue('push the changes');
+  });
+}
 
 test('plain Enter sends the message without selecting from autocomplete', async ({ page }) => {
   await mockBackend(page);
@@ -924,8 +986,8 @@ test('mobile composer actions stay compact', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
 
-  await expect(page.locator('#chip-bookmark-btn')).toBeHidden();
-  await expect(page.locator('#chip-prompts-btn')).toBeHidden();
+  await expect(page.locator('#chip-bookmark-btn')).toBeVisible();
+  await expect(page.locator('#chip-prompts-btn')).toHaveCount(0);
   await expect(page.locator('#chip-filter-btn')).toBeVisible();
   await expect(page.locator('#chip-filter-btn')).toHaveCSS('width', '28px');
   await expect(page.locator('#chip-filter-btn')).toHaveCSS('height', '28px');

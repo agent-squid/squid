@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -983,6 +984,9 @@ async def test_real_edit_commit_edit_commit_push_sequence(setup, monkeypatch, tm
         prompt = kwargs['message']
         assert user_request not in prompt
         assert 'continue result --input -' in prompt
+        assert row['prompt'] in prompt
+        for step in json.loads(row['remaining_json']):
+            assert step['prompt'] not in prompt
         user = db.insert_user_message('test', 'codex', prompt, source='continuation')
         child = db.insert_assistant_message('test', 'codex', user, source='continuation')
         isolated = isolate(child)

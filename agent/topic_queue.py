@@ -794,11 +794,10 @@ class TopicWorker:
             # authority. A failed resume may have yielded to a stop or revoke.
             await _check_launch_scope()
             if not item.native_shell:
-                from .turn_context import launch_context
+                from .turn_context import bound_continuation_context, launch_context
                 additions, delivery = await asyncio.to_thread(
                     launch_context, item.msg_id, kw.get('resume_session_id'), runtime_blocks, kw.get('history'))
-                if additions:
-                    prompt = '\n\n'.join(additions + [prompt])
+                prompt, kw['history'] = bound_continuation_context(prompt, additions, delivery, kw.get('history'))
             if item.msg_id is not None:
                 message = await asyncio.to_thread(get_message, item.msg_id)
                 if message and message['status'] != 'pending':

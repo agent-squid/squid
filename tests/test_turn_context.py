@@ -45,15 +45,65 @@ def test_session_match_and_fresh_fallback_restore_sources(continuation):
     assert resumed['instructions'][0]['source'] == 'agent/runtime/oneshot.md'
 
 
-def test_island_history_is_not_injected_twice(continuation):
+@pytest.mark.parametrize('owner_kind', ['human', 'human_flow', 'route'])
+def test_island_history_is_not_injected_twice(continuation, owner_kind):
     child, parent, user = continuation
+    if owner_kind != 'human':
+        request_prefix = 'Original request from another Flow step'.ljust(16_000, 'x')
+        request = db.insert_user_message('test', 'codex', request_prefix + 'y' * 300_000)
+        with db._connection() as conn:
+            conn.execute("UPDATE continuations SET mode='isolated',owner_json=? WHERE child_id=?",
+                         (json.dumps(dict(kind=owner_kind, request_id=request)), child))
+        additions, delivery = launch_context(child, 'original-session', [])
+        assert {s['message_id']: s['delivery'] for s in delivery['sources']} == {
+            request: 'injected', parent: 'session history',
+        }
+        assert f'original request (message #{request}):\n{request_prefix}\n[Source truncated]' in additions
+        assert 'Fixed and validated' not in '\n'.join(additions)
     history = [db.get_message(user), db.get_message(parent)]
     additions, delivery = launch_context(child, None, [], history)
-    assert all(s['delivery'] == 'context history' for s in delivery['sources'])
+    assert next(s for s in delivery['sources'] if s['message_id'] == parent)['delivery'] == 'context history'
     assert 'Fixed and validated' not in '\n'.join(additions)
     # Resuming another session ignores runner history, so content is required.
     additions, _ = launch_context(child, 'other-session', [], history)
     assert 'Fixed and validated' in '\n'.join(additions)
+
+
+@pytest.mark.parametrize('kind', ['human_flow', 'route'])
+def test_continuation_reuses_request_delivered_to_parent_session(continuation, kind):
+    child, parent, _ = continuation
+    content = 'Original request from another Flow step'
+    request = db.insert_user_message('test', 'codex', content)
+    with db._connection() as conn:
+        conn.execute("UPDATE continuations SET mode='isolated',owner_json=? WHERE child_id=?",
+                     (json.dumps(dict(kind=kind, request_id=request)), child))
+
+    def record(seq, delivery, resumed=None):
+        db.insert_run_event(parent, seq, 'context', json.dumps(dict(
+            resume_session_id=resumed,
+            sources=[dict(message_id=request, delivery=delivery)],
+        )))
+
+    record(1, 'injected')
+    additions, context = launch_context(child, 'original-session', [])
+    assert content not in '\n'.join(additions)
+    assert next(s for s in context['sources'] if s['message_id'] == request)['delivery'] == 'session history'
+
+    for session in (None, 'other-session'):
+        additions, _ = launch_context(child, session, [])
+        assert content in '\n'.join(additions)
+
+    # A later fresh attempt with a reference alone supersedes the earlier delivery.
+    record(2, 'reference')
+    additions, _ = launch_context(child, 'original-session', [])
+    assert content in '\n'.join(additions)
+
+    # Routed Flow prompts may already contain the entire referenced request.
+    with db._connection() as conn:
+        conn.execute('UPDATE chat_messages SET content=? WHERE id=(SELECT reply_to FROM chat_messages WHERE id=?)',
+                     (f'Original user request:\n{content}\nRequested route work:\nReview the fix', parent))
+    additions, _ = launch_context(child, 'original-session', [])
+    assert content not in '\n'.join(additions)
 
 
 def test_missing_sources_preserve_existing_diff_context(continuation):
@@ -105,6 +155,39 @@ async def test_worker_records_resume_and_fresh_attempts(continuation, tmp_path, 
                for i in record['attempts'][1]['instructions'])
 
 
+@pytest.mark.asyncio
+async def test_worker_bounds_combined_continuation_context_on_fresh_launch(continuation, tmp_path):
+    from agent.runners import _build_prompt
+    from agent.topic_queue import QueueItem, TopicWorker
+
+    child, parent, user = continuation
+    db.update_assistant_message(parent, 'Parent result ' + '界' * 16_000, 'original-session', 'done')
+    history = [
+        db.get_message(user),
+        dict(role='assistant', content='First result ' + '😊' * 50_000),
+        dict(role='user', content='Review the first result'),
+        dict(role='assistant', content='Second result ' + 'é' * 50_000),
+    ]
+    calls = []
+
+    async def runner(prompt, **kwargs):
+        calls.append(_build_prompt(prompt, kwargs['history']))
+        yield 'Committed'
+
+    item = QueueItem(seq=0, topic='test', agent='codex', prompt='Commit the fix', context_history=history,
+                     backend='codex', model=None, cwd=str(tmp_path), code_roots=[],
+                     adhoc=True, msg_id=child)
+    with patch('agent.runners.run_codex', runner):
+        await TopicWorker('test')._process(item)
+
+    sent, = calls
+    assert len(sent.encode('utf-8')) <= 96 * 1024
+    for text in ('First result', 'Second result', 'Parent result', 'Review the first result',
+                 'Fix the issue and commit; do not push', 'Commit the fix', '[Source truncated]'):
+        assert text in sent
+    assert history[1]['content'].endswith('😊' * 50_000)
+
+
 def test_instruction_snapshot_survives_template_changes(continuation, monkeypatch):
     child, _, _ = continuation
     _, delivery = launch_context(child, None, assemble_runtime(protocol='oneshot-cli'))
@@ -115,15 +198,31 @@ def test_instruction_snapshot_survives_template_changes(continuation, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_context_endpoint_reports_references_and_recorded_delivery(continuation):
+@pytest.mark.parametrize('mode', ['backing_git', 'dependency_sync', 'task_publication'])
+async def test_context_endpoint_reports_references_and_recorded_delivery(continuation, mode):
     import httpx
+    from agent import instance_auth
     from agent.server import app
-    child, _, _ = continuation
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+    child, parent, user = continuation
+    if mode != 'backing_git':
+        kind = 'human_flow' if mode == 'task_publication' else 'human'
+        with db._connection() as conn:
+            conn.execute('UPDATE continuations SET mode=?,owner_json=? WHERE child_id=?',
+                         (mode, json.dumps(dict(kind=kind, request_id=user)), child))
+    origin = 'http://127.0.0.1'
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=origin) as client:
+        code = instance_auth.instance_credentials().issue()
+        paired = await client.post('/instance/exchange', json={'code': code}, headers={'Origin': origin})
+        assert paired.status_code == 204
         response = await client.get(f'/chat/{child}/context')
         assert response.status_code == 200
         assert response.json()['instructions'] == []
-        assert all(s['delivery'] == 'reference' for s in response.json()['sources'])
+        assert {s['message_id']: s['delivery'] for s in response.json()['sources']} == {
+            parent: 'reference', user: 'reference',
+        }
+        if mode != 'backing_git':
+            assert response.json()['attempts'] == []
+            return
         _, delivery = launch_context(child, 'original-session', assemble_runtime(protocol='oneshot-cli'))
         db.insert_run_event(child, 4, 'context', json.dumps(delivery))
         response = await client.get(f'/chat/{child}/context')

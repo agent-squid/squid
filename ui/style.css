@@ -5567,6 +5567,7 @@ button {
 }
 #autocomplete.open { display: flex; }
 #view-chat:has(> #autocomplete.open) #form { flex-shrink: 0; }
+#view-chat > #autocomplete.open + #tag-bar { display: none; }
 .ac-list {
   min-height: 0;
   overflow-y: auto;

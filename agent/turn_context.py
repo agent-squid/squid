@@ -11,6 +11,12 @@ from . import stats_db as db
 from .context import load_template
 
 
+CONTINUATION_SOURCE_CHAR_LIMIT = 16_000
+# Leave headroom below Linux's 128 KiB argument limit for launch notices.
+CONTINUATION_PROMPT_BYTE_LIMIT = 96 * 1024
+_TRUNCATION_NOTICE = b'\n[Source truncated]'
+
+
 def continuation_instruction(mode):
     if mode not in {'backing_git', 'dependency_sync', 'task_review', 'isolated'}:
         raise ValueError('unsupported continuation instruction mode')
@@ -32,33 +38,34 @@ def sources_for_turn(msg_id):
             parent = db.get_message(row['parent_id'])
             origin = db.get_message(row['origin_parent_id'] or row['parent_id'])
             request_id = owner.get('request_id') or (origin or {}).get('reply_to')
-            # Flow-owned continuations retain their existing scoped prompt.
-            if owner['kind'] in {'human', 'watch'}:
-                if owner['kind'] == 'watch':
-                    from .watch_runs import details, execution_scope
-                    _, _, grant, _ = details(owner['run_id'])
-                    source = 'agent/runtime/continuation-watch.md'
-                    template = files('agent').joinpath('runtime/continuation-watch.md').read_text(encoding='utf-8')
-                    instructions.append(dict(asdict(load_template(template, source).render(
-                        {'instructions': grant['instructions'], 'scope': execution_scope(grant)})), delivery='injected'))
-                    request_id = (origin or {}).get('reply_to')
-                if owner['kind'] != 'watch' or row['mode'] != 'isolated' or not grant.get('external_actions'):
-                    instructions.append(continuation_instruction(row['mode']))
-                sources.extend([
-                    dict(message_id=request_id, label='original request',
-                         session_id=(origin or {}).get('session_id')),
-                    dict(message_id=row['parent_id'], label='parent result',
-                         session_id=(parent or {}).get('session_id')),
-                ])
-                # A later step can land in a fresh session. Retain all bounded
-                # sequence results, rather than relying on the immediate
-                # parent's now-compact input to contain its predecessors.
-                from .continuations import _sequence_history
-                ancestors = _sequence_history(dict(row))
-                for ancestor in ancestors:
-                    if ancestor['role'] == 'assistant' and ancestor['id'] != row['parent_id']:
-                        sources.append(dict(message_id=ancestor['id'], label='earlier sequence result',
-                                            session_id=ancestor.get('session_id')))
+            host_step = row['mode'] in {'dependency_sync', 'task_publication'}
+            external_watch = False
+            if owner['kind'] == 'watch':
+                request_id = (origin or {}).get('reply_to')
+            if owner['kind'] == 'watch' and not host_step:
+                from .watch_runs import details, execution_scope
+                _, _, grant, _ = details(owner['run_id'])
+                source = 'agent/runtime/continuation-watch.md'
+                template = files('agent').joinpath('runtime/continuation-watch.md').read_text(encoding='utf-8')
+                instructions.append(dict(asdict(load_template(template, source).render(
+                    {'instructions': grant['instructions'], 'scope': execution_scope(grant)})), delivery='injected'))
+                external_watch = bool(grant.get('external_actions'))
+            if not host_step and (not external_watch or row['mode'] != 'isolated'):
+                instructions.append(continuation_instruction(row['mode']))
+            if origin and request_id == origin['reply_to']:
+                request_session = origin.get('session_id')
+            else:
+                request_session = _delivered_request_session(parent, request_id)
+            sources.extend([
+                dict(message_id=request_id, label='original request', session_id=request_session),
+                dict(message_id=row['parent_id'], label='parent result',
+                     session_id=(parent or {}).get('session_id')),
+            ])
+            from .continuations import _sequence_history
+            for ancestor in _sequence_history(dict(row)):
+                if ancestor['role'] == 'assistant' and ancestor['id'] != row['parent_id']:
+                    sources.append(dict(message_id=ancestor['id'], label='earlier sequence result',
+                                        session_id=ancestor.get('session_id')))
     if message.get('flow_run_id'):
         run = db.get_flow_run(message['flow_run_id'])
         step = db.get_flow_step_for_message(msg_id)
@@ -87,8 +94,8 @@ def sources_for_turn(msg_id):
 
 
 def launch_context(msg_id, resume_session_id, runtime_blocks, history=()):
-    sources, instructions = sources_for_turn(msg_id)
-    instructions = [dict(asdict(block), delivery='injected') for block in runtime_blocks] + instructions
+    sources, continuation_instructions = sources_for_turn(msg_id)
+    instructions = [dict(asdict(block), delivery='injected') for block in runtime_blocks] + continuation_instructions
     additions = []
     history_ids = {message.get('id') for message in history or ()} if not resume_session_id else set()
     for source in sources:
@@ -106,19 +113,92 @@ def launch_context(msg_id, resume_session_id, runtime_blocks, history=()):
                 pair = db.get_messages_by_ids([message['id']])
                 if pair:
                     content = pair[-1]['content']
+            if continuation_instructions and len(content) > CONTINUATION_SOURCE_CHAR_LIMIT:
+                content = content[:CONTINUATION_SOURCE_CHAR_LIMIT] + '\n[Source truncated]'
             additions.append(f"{source['label']} (message #{source['message_id']}):\n{content}")
     # Runtime blocks are already rendered by runtime_prompt; append only the
     # continuation policy here, without assembling another handoff prompt.
-    additions = [i['content'] for i in instructions if i['source'].startswith('agent/runtime/continuation-')] + additions
+    additions = [i['content'] for i in continuation_instructions] + additions
     return additions, dict(sources=sources, instructions=instructions,
                            resume_session_id=resume_session_id)
 
 
-def recorded_context(msg_id):
+def bound_continuation_context(prompt, additions, delivery, history):
+    """Share the launch budget across injected sources and replayed messages."""
+    policy_count = sum(i['source'].startswith('agent/runtime/continuation-')
+                       for i in delivery['instructions'])
+    if not policy_count:
+        return '\n\n'.join([*additions, prompt]), history
+
+    from .runners import _build_prompt
+
+    policies, sources = additions[:policy_count], additions[policy_count:]
+    replay = history if not delivery['resume_session_id'] and history else []
+    empty_replay = [dict(message, content='') for message in replay]
+    base = '\n\n'.join([*policies, *([''] * len(sources)), prompt])
+    remaining = CONTINUATION_PROMPT_BYTE_LIMIT - len(_build_prompt(base, empty_replay).encode('utf-8'))
+    if remaining < 0:
+        raise RuntimeError('Continuation prompt exceeds the byte limit before adding history or sources')
+
+    entries = [text.encode('utf-8') for text in sources]
+    entries.extend((message.get('content') or '').strip().encode('utf-8') for message in replay)
+    if sum(map(len, entries)) <= remaining:
+        return '\n\n'.join([*additions, prompt]), history
+
+    # Keep short entries intact and divide the remaining space across long ones.
+    bounded = [''] * len(entries)
+    for count, index in enumerate(sorted(range(len(entries)), key=lambda index: len(entries[index]))):
+        value = entries[index]
+        allowance = remaining // (len(entries) - count)
+        if len(value) > allowance:
+            prefix = value[:max(0, allowance - len(_TRUNCATION_NOTICE))].decode('utf-8', errors='ignore')
+            value = prefix.encode('utf-8') + _TRUNCATION_NOTICE[:allowance]
+        bounded[index] = value.decode('utf-8')
+        remaining -= len(value)
+
+    if replay:
+        history = [dict(message, content=content)
+                   for message, content in zip(replay, bounded[len(sources):])]
+    return '\n\n'.join([*policies, *bounded[:len(sources)], prompt]), history
+
+
+def _delivered_request_session(parent, request_id):
+    if not request_id or not parent or parent['status'] != 'done' or not parent.get('session_id'):
+        return None
+    attempts = _recorded_attempts(parent['id'])
+    if not attempts:
+        return None
+    # A failed resume may have been followed by a fresh launch. Only the last
+    # attempt can establish what the completed parent's session received.
+    attempt = attempts[-1]
+    session_id = parent['session_id']
+    for source in attempt['sources']:
+        if source['message_id'] != request_id:
+            continue
+        delivery = source['delivery']
+        if delivery in {'injected', 'context history'}:
+            return session_id
+        if delivery == 'session history' and attempt['resume_session_id'] == session_id:
+            return session_id
+        if delivery == 'reference':
+            # A routed Flow can carry the request in its own prompt. Verify
+            # the complete text because the handoff may have truncated it.
+            request = db.get_message(request_id)
+            content = (request or {}).get('content')
+            if content and content in (parent.get('prompt') or ''):
+                return session_id
+    return None
+
+
+def _recorded_attempts(msg_id):
     with db._connection() as conn:
         rows = conn.execute("SELECT payload FROM run_events WHERE msg_id=? AND event_type='context' ORDER BY seq",
                             (msg_id,)).fetchall()
-    attempts = [json.loads(row['payload']) for row in rows]
+    return [json.loads(row['payload']) for row in rows]
+
+
+def recorded_context(msg_id):
+    attempts = _recorded_attempts(msg_id)
     if attempts:
         return dict(attempts[-1], attempts=attempts)
     sources, _ = sources_for_turn(msg_id)

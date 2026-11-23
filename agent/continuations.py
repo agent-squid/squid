@@ -779,32 +779,22 @@ async def dispatch(row, dispatcher):
             or original['role'] != 'user' or original['source'] != 'human'):
         await asyncio.to_thread(fail, row['id'], 'original_request_unavailable')
         return
-    from .turn_context import continuation_instruction
-    scope = continuation_instruction(row['mode'])['content']
-    remaining = json.loads(row['remaining_json'])
-    sequence_notice = (f'{len(remaining)} predeclared steps remain after this step. They run only after successful completion and sync. '
-                       'Do not perform later steps in this turn.\nRemaining steps:\n' + json.dumps(remaining)
-                       if remaining else 'No further automatic successor is available.')
+    prompt = (
+        f"Continuation of response #{row['parent_id']}. Parent sync succeeded. "
+        "Recheck any repository preconditions before acting.\n"
+        f"Requested next step within the original scope:\n{row['prompt']}"
+    )
+    if json.loads(row['remaining_json']):
+        prompt += "\nRun only this step. Later steps depend on successful completion and sync."
     if row['requires_result']:
-        sequence_notice += ('\nBefore responding, record this step outcome with `agentsquid continue result --input -` '
-                            'using JSON {"success":true} only after all requested actions and checks succeed, '
-                            'or {"success":false} on any failure or incomplete work. '
-                            'Missing or false results stop the sequence. Recording success does not bypass sync.')
-    if owner['kind'] not in {'human', 'watch'}:
-        prompt = ('Squid continuation ' + row['id'] + ' of assistant message ' + str(row['parent_id']) + '.\n'
-                  + scope + '\n' + sequence_notice + '\nParent sync succeeded; '
-                  'other work may have changed the repos since then.\nOriginal user request:\n'
-                  + original['content'][:16000] + '\nParent result:\n' + parent['content'][:16000]
-                  + '\nRequested next step (within original scope):\n' + row['prompt']
-                  + '\nReport actual completed steps and any remaining failure or limitation concisely. '
-                    'A scheduled step is not a completed step. If commit succeeds and push fails, report both; '
-                    'do not imply rollback or promise another automatic turn.')
-    else:
-        prompt = (f"Squid continuation {row['id']} of assistant message {row['parent_id']}.\n"
-                  + sequence_notice + '\nParent sync succeeded; other work may have changed the repos.\n'
-                  + 'Requested next step (within original scope):\n' + row['prompt']
-                  + '\nReport actual completed steps and remaining failures concisely. '
-                    'If commit succeeds and push fails, report both.')
+        prompt += (
+            '\nBefore responding, use `agentsquid continue result --input -` with JSON '
+            '{"success":true} after all required actions and checks succeed, '
+            'or {"success":false} on failure or incomplete work.'
+        )
+    prompt += '\nReport completed actions and any failures.'
+    if row['mode'] == 'backing_git':
+        prompt += ' If commit succeeds and push fails, report both.'
     island = bool(origin['adhoc']) or owner['kind'] != 'human'
     history = await asyncio.to_thread(_sequence_history, row) if island else None
     from .task_workspaces import for_turn
