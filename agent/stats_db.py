@@ -1410,7 +1410,7 @@ def delete_agent(name: str) -> bool:
 
 # ── topics ────────────────────────────────────────────────────────────────────
 
-def get_topics_summary() -> list[dict]:
+def get_topics_summary(*, include_agent_history: bool = False) -> list[dict]:
     last_backend_expr = _runtime_ref_expr("last_harness", "last_provider")
     with _connection() as conn:
         rows = conn.execute(
@@ -1421,7 +1421,24 @@ def get_topics_summary() -> list[dict]:
                WHERE agent = '' AND hidden = 0
                ORDER BY last_at DESC NULLS LAST"""
         ).fetchall()
-    return [dict(r) for r in rows]
+        topics = [dict(row) for row in rows]
+        if include_agent_history:
+            by_name = {topic["name"]: topic for topic in topics}
+            for topic in topics:
+                topic["agent_history"] = []
+            for row in conn.execute(
+                """SELECT lanes.topic, lanes.agent, lanes.last_prompt, lanes.last_adhoc_prompt,
+                          lanes.last_session_at, lanes.last_adhoc_at, lanes.last_at
+                   FROM topics AS lanes
+                   JOIN agents ON agents.name = lanes.agent
+                   JOIN topics AS summary ON summary.topic = lanes.topic AND summary.agent = ''
+                   WHERE lanes.agent != '' AND summary.hidden = 0"""
+            ):
+                history = dict(row)
+                topic = by_name.get(history.pop("topic"))
+                if topic is not None:
+                    topic["agent_history"].append(history)
+    return topics
 
 
 def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:

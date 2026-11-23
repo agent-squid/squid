@@ -1160,6 +1160,34 @@ def test_topic_agent_history_uses_mode_specific_prompts(tmp_path, monkeypatch):
     assert rows[0]["last_adhoc_prompt"] == "adhoc prompt"
 
 
+def test_topic_summary_can_include_mode_specific_history_for_visible_topics(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.upsert_agent("older-agent", "codex", None, None)
+    stats_db.upsert_agent("latest-agent", "codex", None, None)
+    stats_db.upsert_topic("squid", "older-agent", last_prompt="session prompt")
+    stats_db.upsert_topic("squid", "older-agent", last_prompt="adhoc prompt", adhoc=True)
+    stats_db.upsert_topic("squid", "latest-agent", last_prompt="latest prompt")
+    stats_db.upsert_topic("hidden", "older-agent", last_prompt="hidden prompt")
+    stats_db.set_topic_hidden("hidden", True)
+    stats_db.upsert_topic("squid", "removed-agent", last_prompt="unavailable route")
+    stats_db.upsert_topic("squid", "latest-agent", last_prompt="latest prompt")
+
+    regular = {row["name"]: row for row in stats_db.get_topics_summary()}
+    assert "agent_history" not in regular["squid"]
+
+    summary = {row["name"]: row for row in stats_db.get_topics_summary(include_agent_history=True)}
+    assert "hidden" not in summary
+    assert summary["squid"]["agent"] == "latest-agent"
+    history = {row["agent"]: row for row in summary["squid"]["agent_history"]}
+    assert set(history) == {"older-agent", "latest-agent"}
+    assert history["older-agent"]["last_prompt"] == "session prompt"
+    assert history["older-agent"]["last_adhoc_prompt"] == "adhoc prompt"
+    assert history["older-agent"]["last_session_at"]
+    assert history["older-agent"]["last_adhoc_at"]
+
+
 def test_topics_management_summary_includes_hidden_and_agent_lanes(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

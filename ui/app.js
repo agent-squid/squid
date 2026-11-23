@@ -2632,6 +2632,7 @@ let composerHistoryRefreshTimer = null;
 let composerHistoryRefreshPending = false;
 let lastComposerHistoryWrite = 0;
 let recentRoutes = [];
+let promptHistoryTimes = new Map();
 const HIDDEN_PROMPTS_KEY  = 'squid_hidden_prompts';
 const HIDDEN_ROUTES_KEY = 'squid_hidden_routes';
 const hiddenRouteKeys = new Set(JSON.parse(localStorage.getItem(HIDDEN_ROUTES_KEY) || '[]'));
@@ -3429,6 +3430,7 @@ function recordPrompt(text, { shareStash = false, submitted = false } = {}) {
   recordHistoryRoute(splitPromptHistoryEntry(t).route);
   promptHistory = [t, ...promptHistory.filter(x => promptHistoryDedupKey(x) !== key)].slice(0, 200);
   saveStashedPrompt(t);
+  promptHistoryTimes.set(key, Date.now());
   promptHistoryPos = -1;
   promptDraft = '';
   promptDraftChip = null;
@@ -3699,6 +3701,24 @@ function applyRouteTarget(routeTarget) {
   resizeComposer();
 }
 
+function recentRouteHistoryEntries() {
+  const promptsByRoute = new Map();
+  const promptRoutes = [];
+  for (const entry of promptHistory) {
+    const { route, prompt } = splitPromptHistoryEntry(entry);
+    if (!route) continue;
+    const normalized = normalizePromptHistoryRoute(route).toLowerCase();
+    const key = `${normalized}\0${prompt}`;
+    if (hiddenPromptKeys.has(key)) continue;
+    if (!promptsByRoute.has(normalized)) promptsByRoute.set(normalized, prompt);
+    promptRoutes.push({ route, prompt, time: promptHistoryTimes.get(key) || 0 });
+  }
+  const entries = recentRoutes.map(({ key, value, updated_at }) => ({
+    route: value, prompt: promptsByRoute.get(key) || '', time: updated_at,
+  }));
+  return entries.concat(promptRoutes).sort((a, b) => b.time - a.time);
+}
+
 function routeHistoryAutocompleteItems(currentRoute = '') {
   const normalizedCurrent = normalizePromptHistoryRoute(currentRoute);
   const items = [];
@@ -3735,15 +3755,9 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
   };
 
   addRoute(normalizedCurrent, '', true);
-  for (const { value } of recentRoutes) {
+  for (const { route, prompt } of recentRouteHistoryEntries()) {
     if (items.length >= 9) break;
-    addRoute(value, lastPromptForFlowRoute(value));
-  }
-  for (const entry of promptHistory) {
-    if (items.length >= 9) break;
-    const { route, prompt } = splitPromptHistoryEntry(entry);
-    if (hiddenPromptKeys.has(promptHistoryDedupKey(entry))) continue;
-    addRoute(route, prompt, false);
+    addRoute(route, prompt);
   }
   return items;
 }
@@ -3756,11 +3770,7 @@ function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
     return normalizePromptHistoryRoute(route).toLowerCase();
   }).filter(Boolean));
 
-  const routes = recentRoutes.map(({ value }) => ({ route: value, prompt: lastPromptForFlowRoute(value) }));
-  for (const entry of promptHistory) {
-    if (!hiddenPromptKeys.has(promptHistoryDedupKey(entry))) routes.push(splitPromptHistoryEntry(entry));
-  }
-  for (const { route, prompt } of routes) {
+  for (const { route, prompt } of recentRouteHistoryEntries()) {
     const normalizedRouteKey = normalizePromptHistoryRoute(route);
     const historyKey = normalizedRouteKey.toLowerCase();
     if (hiddenRouteKeys.has(historyKey)) continue;
@@ -3888,6 +3898,7 @@ function applyComposerHistory() {
   }
   recentRoutes = routes.sort((a, b) => b.updated_at - a.updated_at).slice(0, 200);
   entries.sort((a, b) => b.time - a.time);
+  promptHistoryTimes = new Map(entries.map(({ text, time }) => [promptHistoryDedupKey(text), time]).reverse());
   promptHistory = mergePromptHistory(entries
     .map(({ text }) => localPrompts.get(promptHistoryDedupKey(text)) || text)
     .filter(text => !hiddenPromptKeys.has(promptHistoryDedupKey(text))));
@@ -15930,16 +15941,19 @@ let _acStashedForNav = false;
 
 function invalidateTopicsCache() { _topicsCache = null; }
 
-async function _acTopics() {
-  if (_topicsCache) return _topicsCache;
+async function _acTopics({ includeAgentHistory = false } = {}) {
+  if (!includeAgentHistory && _topicsCache) return _topicsCache;
   try {
-    const response = await fetch('/topics');
+    const response = await fetch(includeAgentHistory ? '/topics?include_agent_history=true' : '/topics');
     if (response.ok) {
       const topics = await response.json();
-      if (Array.isArray(topics)) _topicsCache = topics;
+      if (Array.isArray(topics)) {
+        if (!includeAgentHistory) _topicsCache = topics;
+        return topics;
+      }
     }
-  } catch { /* Leave the cache empty so a later lookup can retry. */ }
-  return _topicsCache || [];
+  } catch { /* A later lookup can retry. */ }
+  return includeAgentHistory ? [] : _topicsCache || [];
 }
 
 async function _acAgents() {
@@ -16557,7 +16571,7 @@ async function updateAutocomplete() {
     const [agents, history, topics] = await Promise.all([
       _acAgents(),
       fetch(`/topics/${encodeURIComponent(topic)}/agents/history`).then(r => r.ok ? r.json() : []).catch(() => []),
-      browseRoutes ? _acTopics() : [],
+      browseRoutes ? _acTopics({ includeAgentHistory: true }) : [],
     ]);
     if (input.value !== val || browseCompletedRoute !== browseRoutes) return;
 
@@ -16571,14 +16585,53 @@ async function updateAutocomplete() {
     if (currentHistory || currentAgent) {
       const agent = currentHistory?.agent || currentAgent.name;
       const backend = backendByAgent.get(agent) || null;
-      const otherTopics = topics.filter(t =>
-        t.name.toLowerCase() !== topic.toLowerCase() || t.agent?.toLowerCase() !== prefix);
-      const recentItems = otherTopics.flatMap(t => {
-        const route = promptHistoryRoute(t.name, t.agent, !!t.sticky_adhoc);
-        const deleteRouteKey = normalizePromptHistoryRoute(route).toLowerCase();
-        if (hiddenRouteKeys.has(deleteRouteKey)) return [];
-        return topicAutocompleteItems([t], replacingSlug).map(item => ({ ...item, deleteRouteKey }));
-      });
+      const topicByName = new Map(topics.map(t => [t.name.toLowerCase(), t]));
+      const currentTopic = topic.toLowerCase();
+      const isCurrentAgent = (name, agent) => name.toLowerCase() === currentTopic && agent?.toLowerCase() === prefix;
+      const otherRoutes = [];
+      for (const t of topics) {
+        if (!isCurrentAgent(t.name, t.agent)) {
+          const route = promptHistoryRoute(t.name, t.agent, !!t.sticky_adhoc) || `#${t.name}`;
+          otherRoutes.push({ route, prompt: t.last_prompt, time: Date.parse(t.last_at) || 0 });
+        }
+        for (const lane of t.agent_history || []) {
+          if (isCurrentAgent(t.name, lane.agent)) continue;
+          for (const [adhoc, prompt, timestamp] of [
+            [false, lane.last_prompt, lane.last_session_at],
+            [true, lane.last_adhoc_prompt, lane.last_adhoc_at],
+          ]) {
+            if (!prompt) continue;
+            const route = promptHistoryRoute(t.name, lane.agent, adhoc);
+            otherRoutes.push({ route, prompt, time: Date.parse(timestamp || lane.last_at) || 0 });
+          }
+        }
+      }
+      for (const entry of recentRouteHistoryEntries()) {
+        const target = parseHistoryRouteTarget(normalizePromptHistoryRoute(entry.route));
+        if (!target?.agent || target.route || !topicByName.has(target.topic)) continue;
+        if (isCurrentAgent(target.topic, target.agent)) continue;
+        otherRoutes.push(entry);
+      }
+      const seen = new Set();
+      const recentItems = [];
+      for (const { route, prompt } of otherRoutes.sort((a, b) => b.time - a.time)) {
+        const insert = normalizePromptHistoryRoute(route) || route;
+        const deleteRouteKey = insert.toLowerCase();
+        if (seen.has(deleteRouteKey) || hiddenRouteKeys.has(deleteRouteKey)) continue;
+        const target = parseHistoryRouteTarget(insert);
+        if (!target) continue;
+        seen.add(deleteRouteKey);
+        const summary = topicByName.get(target.topic);
+        const backend = backendByAgent.get(target.agent) || (target.agent === summary?.agent ? summary.last_backend : null);
+        const topicStatus = target.agent ? null : summary;
+        recentItems.push({
+          label: _acRouteLabel(target.topic, (target.agent || '') + (target.adhoc ? '!' : ''), backend),
+          insert,
+          sub: _acLastPrompt(prompt),
+          meta: topicStatus?.active ? '● live' : topicStatus?.queue_depth > 0 ? `queue ${topicStatus.queue_depth}` : '',
+          deleteRouteKey,
+        });
+      }
       const switchToAdhoc = !preserveAdhocSuffix;
       if (switchToAdhoc || !isDefault) {
         const suffix = switchToAdhoc ? '!' : '';

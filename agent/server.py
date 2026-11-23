@@ -2639,8 +2639,8 @@ async def flow_run_steps(flow_run_id: str, after_id: int = 0):
 
 
 @app.get("/topics")
-async def topics_list():
-    db_topics = get_topics_summary()
+async def topics_list(include_agent_history: bool = False):
+    db_topics = get_topics_summary(include_agent_history=include_agent_history)
     queue_map = {t["name"]: t for t in dispatcher.topics_info()}
     for t in db_topics:
         info = queue_map.get(t["name"], {})
