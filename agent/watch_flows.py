@@ -2,6 +2,8 @@
 import hashlib
 import json
 
+from .topic_provider_policy import BLOCK_REASONS
+
 
 def target(route, topic, *, verify_claude=True):
     from .flow import parse_flow_route, durable_flow_plan
@@ -116,10 +118,11 @@ async def dispatch(runtime, run_id):
                 source='watch', adhoc=step['fresh'], pinned_ids=previous, lookback=0,
                 watch_run_id=run_id, flow_run_id=flow_id, flow_route=grant['flow_route'], flow_step_id=step['step_id'])
             if isinstance(prepared, JSONResponse):
-                if run['started_at'] is None and not previous and json.loads(prepared.body).get('error') == 'watch_worktree_blocked':
+                reason = json.loads(prepared.body).get('error')
+                if run['started_at'] is None and not previous and reason == 'watch_worktree_blocked':
                     await runtime.defer(run_id, 'worktree_blocked')
                 else:
-                    await runtime.reject(run_id, 'preparation_failed')
+                    await runtime.reject(run_id, reason if reason in BLOCK_REASONS else 'preparation_failed')
                 return
             await call(watch_runs.set_state, run_id, 'queued')
             await call(mark_step, flow_id, step['step_id'], 'running')

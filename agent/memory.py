@@ -1,4 +1,6 @@
 import hashlib
+import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -34,14 +36,20 @@ def _split_frontmatter(content: str) -> tuple[Optional[str], str]:
     return None, content
 
 
-def _load_frontmatter(content: str) -> dict:
+def _load_frontmatter(content: str, *, strict: bool = False) -> dict:
     yaml_text, _body = _split_frontmatter(content)
     if yaml_text is None:
+        if strict and content.startswith("---") and content.split("\n", 1)[0].strip() == "---":
+            raise ValueError("Topic memory front matter is missing its closing delimiter.")
         return {}
     try:
-        data = yaml.safe_load(yaml_text) or {}
+        data = yaml.safe_load(yaml_text)
     except yaml.YAMLError:
+        if strict:
+            raise ValueError("Topic memory front matter contains invalid YAML.") from None
         return {}
+    if strict and data is not None and not isinstance(data, dict):
+        raise ValueError("Topic memory front matter must be a mapping.")
     return data if isinstance(data, dict) else {}
 
 
@@ -139,15 +147,32 @@ def ensure_topic_memory_placeholder(topic: str) -> dict:
     path = topic_memory_path(slug)
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_PLACEHOLDER_MEMORY, encoding="utf-8")
+        try:
+            with path.open("x", encoding="utf-8") as stream:
+                stream.write(_PLACEHOLDER_MEMORY)
+        except FileExistsError:
+            pass
     return read_topic_memory(slug)
+
+
+def _write_memory(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(content)
+            stream.close()
+            if path.exists():
+                temporary.chmod(path.stat().st_mode & 0o777)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def write_topic_memory(topic: str, content: str) -> dict:
     slug = memory_root_slug(topic)
     path = topic_memory_path(slug)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    _write_memory(path, content)
     return read_topic_memory(slug)
 
 
@@ -161,7 +186,7 @@ def write_topic_memory_squid_code_roots(
     path = topic_memory_path(slug)
     content = path.read_text(encoding="utf-8") if path.exists() else ""
     yaml_text, body = _split_frontmatter(content)
-    frontmatter = _load_frontmatter(content) if yaml_text is not None else {}
+    frontmatter = _load_frontmatter(content, strict=True)
     squid = frontmatter.get("squid")
     if not isinstance(squid, dict):
         squid = {}
@@ -179,8 +204,7 @@ def write_topic_memory_squid_code_roots(
         frontmatter["squid"] = squid
     else:
         frontmatter.pop("squid", None)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_dump_memory(frontmatter, body if yaml_text is not None else content), encoding="utf-8")
+    _write_memory(path, _dump_memory(frontmatter, body if yaml_text is not None else content))
     return read_topic_memory(slug)
 
 

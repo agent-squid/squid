@@ -188,7 +188,7 @@ def test_worker_defers_worktree_setup_until_queued_item_runs(tmp_path, monkeypat
         yield "done"
 
     async def run():
-        topic = "queued-defer"
+        topic = "queued_defer"
         worker = TopicWorker(topic)
         first = QueueItem(
             seq=0, topic=topic, agent="codex", prompt="first turn",

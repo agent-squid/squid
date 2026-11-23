@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from . import codex_subscription, topic_provider_policy
 from .config import SQUID_HOME
 from .resolve import resolve_agent
 from .runners import run_claude, runner_for_agent
@@ -121,7 +122,7 @@ Bullet list of what failed and why, or what worked better than expected. If none
 *Generated {datetime.date.today().isoformat()} by squid*"""
 
 
-async def _run_generation(prompt: str) -> str:
+async def _run_generation(prompt: str, topics: tuple[str, ...]) -> str:
     agent_cfg = get_default_agent() or {}
     harness = agent_cfg.get("harness") or "claudecode"
     provider = agent_cfg.get("provider")
@@ -132,6 +133,13 @@ async def _run_generation(prompt: str) -> str:
     except ValueError:
         resolved = None
     runner = runner_for_agent(resolved, adhoc=True) if resolved else None
+    rules = [(topic, rule) for topic in topics if (rule := topic_provider_policy.rule_for(topic))]
+    for topic, rule in rules:
+        # The fallback Claude runner has no resolved provider binding.
+        provider_id = resolved.provider.id if runner else None
+        decision = rule.decision(provider_id)
+        if decision:
+            raise ValueError(topic_provider_policy.detail(decision, topic, gen_agent, provider_id))
     runner = runner or run_claude
 
     runner_kwargs = {}
@@ -142,6 +150,12 @@ async def _run_generation(prompt: str) -> str:
             "backend_settings": resolved.harness_settings(),
             "backend_args": resolved.args,
         }
+        if rules and resolved.provider.dedicated_login:
+            binding = await asyncio.to_thread(codex_subscription.bind, resolved.provider, gen_agent, harness)
+            if binding.error:
+                raise ValueError(binding.error)
+            runner_kwargs.update(codex_home=binding.home, codex_account=binding.account,
+                                 subscription_revision=binding.revision)
 
     chunks = []
     async for chunk in runner(
@@ -166,7 +180,7 @@ async def _generate_journal(
 
     prompt = _build_prompt(topic, agent, week_key, week_start, week_end, messages)
     try:
-        text = await _run_generation(prompt)
+        text = await _run_generation(prompt, (topic,))
     except Exception:
         log.exception("journal generation failed for %s", scope)
         return None
@@ -242,7 +256,7 @@ All deferred items across topics.
 *Generated {datetime.date.today().isoformat()} by squid*"""
 
     try:
-        text = await _run_generation(prompt)
+        text = await _run_generation(prompt, tuple(name for name, _ in existing))
     except Exception:
         log.exception("_all journal generation failed")
         return None

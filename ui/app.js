@@ -1385,6 +1385,7 @@ let editingExpandedSlug = false;
 let expandedSlugEditToken = 0;
 let browseCompletedRoute = false;
 let composerActionTitleSeq = 0;
+let lastCommittedComposerScope = null;
 const TOPIC_SLUG_SRC = '[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)*';
 const TOPIC_SLUG_PARTIAL_SRC = '[A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]*)*';
 const AGENT_SLUG_SRC = '\\w+';
@@ -1729,6 +1730,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
     refreshRouteTurnCounts(route, { force: true });
   }
   input.placeholder = 'message…';
+  if (!opts.preview) updateRouteHistoryFilter(stickyChip, opts.followHistoryFilter !== false);
   updateComposerActionTitles();
   updateActiveQuotaGauge();
   updatePinCount();
@@ -2296,13 +2298,35 @@ function togglePromptOnlyHistory() {
   }
 }
 
+function updateRouteHistoryFilter(route, follow) {
+  const previousScope = lastCommittedComposerScope;
+  const flowRoute = route.route ? canonicalFlowRoute(route.route) : null;
+  const nextScope = flowRoute || routeScopeText(route);
+  lastCommittedComposerScope = nextScope;
+  if (!follow || !previousScope || previousScope === nextScope) return;
+
+  const scope = searchActive && searchState ? searchState : historyFilter;
+  const activeScope = scope.flow_route
+    ? canonicalFlowRoute(scope.flow_route)
+    : searchScopeText(scope);
+  if (scope.explicitAll || activeScope !== previousScope) return;
+
+  applyHistoryFilter({
+    flow_route: flowRoute,
+    topic: flowRoute ? null : route.topic,
+    agent: flowRoute ? null : route.agent,
+    adhoc: flowRoute || !route.agent ? null : !!route.adhoc,
+  });
+  blinkRouteField(document.getElementById('search-bar-scope'));
+}
+
 function filterByTopic(topic) {
-  setTopicChip(topic, null);
+  setTopicChip(topic, null, false, 0, { followHistoryFilter: false });
   applyHistoryFilter({ topic, agent: null, adhoc: null, flow_route: null });
 }
 
 function filterByAgent(topic, agent, adhoc = false, lookback = 0) {
-  setTopicChip(topic, agent, adhoc, lookback);
+  setTopicChip(topic, agent, adhoc, lookback, { followHistoryFilter: false });
   applyHistoryFilter({ topic, agent, adhoc, flow_route: null });
 }
 
@@ -2316,6 +2340,7 @@ function filterByFlowRoute(route, routeParts = null) {
     chainOperator: parsed.chainOperator || '>',
     chainRounds: parsed.chainRounds || 0,
     chainTargetTopic: parsed.chainTargetTopic,
+    followHistoryFilter: false,
   });
   applyHistoryFilter({ flow_route: flowRoute, topic: null, agent: null, adhoc: null });
 }
@@ -3560,12 +3585,13 @@ function lastPromptForFlowRoute(route) {
   return '';
 }
 
-function applyPromptHistoryEntry(entry) {
+function applyPromptHistoryEntry(entry, { preview = false } = {}) {
   const { route, prompt } = splitPromptHistoryEntry(entry);
   if (route) {
     const chain = parseRouteChain(route);
     if (chain) {
       setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
+        preview,
         route: chain.route,
         chainTarget: chain.target,
         chainTargetFresh: chain.targetFresh,
@@ -3577,6 +3603,7 @@ function applyPromptHistoryEntry(entry) {
     const broadcast = !chain ? parseOriginBroadcast(route) : null;
     if (broadcast) {
       setTopicChip(broadcast.topic, null, false, 0, {
+        preview,
         route: broadcast.route,
         broadcastAgents: broadcast.agents,
       });
@@ -3588,6 +3615,7 @@ function applyPromptHistoryEntry(entry) {
         match[2] || null,
         !!match[3],
         0,
+        { preview },
       );
     }
   }
@@ -3694,9 +3722,10 @@ function parseHistoryRouteTarget(route) {
   };
 }
 
-function applyRouteTarget(routeTarget) {
+function applyRouteTarget(routeTarget, { preview = false } = {}) {
   if (!routeTarget) return;
   setTopicChip(routeTarget.topic, routeTarget.agent, routeTarget.adhoc, routeTarget.lookback || 0, {
+    preview,
     route: routeTarget.route,
     chainTarget: routeTarget.chainTarget,
     chainTargetFresh: routeTarget.chainTargetFresh,
@@ -4500,7 +4529,10 @@ form.addEventListener('submit', async (e) => {
   editingExpandedSlug = false;
   expandedSlugEditToken++;
   const text = input.value.trim();
-  if (!text) return;
+  if (!text) {
+    if (acOpen && acItems[acSel]?.previewApply) _acSelect(acSel);
+    return;
+  }
   commandEditRestore = null;
   const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, message } = parseInput(text);
   if (!message) {
@@ -5070,10 +5102,7 @@ input.addEventListener('keydown', (e) => {
     if (e.key === 'Tab') { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
     if (e.key === 'Escape') {
       e.preventDefault();
-      // Route-history navigation applies the highlighted route immediately.
-      // Dismiss its list without restoring the route from before navigation.
-      if (acItems[acSel]?.previewApply) hideAutocomplete();
-      else _acRestoreDraft();
+      _acRestoreDraft();
       return;
     }
   }
@@ -6838,12 +6867,27 @@ async function sendMessage(text, opts = {}) {
     ...(_attachedFiles.length ? { attached_paths: _attachedFiles.map(f => f.path) } : {}),
   };
 
+  async function approveProvider(result) {
+    if (result.error !== 'provider_approval_required' || !result.approval_token
+        || chatPayload.provider_approval || controller.signal.aborted
+        || document.getElementById('restart-modal').classList.contains('open')) return false;
+    const approved = await confirmRestartWithRunningPrompts([], {
+      header: 'Provider approval',
+      title: 'Allow this provider for one turn?',
+      copy: result.detail,
+      confirmLabel: 'Allow once',
+    });
+    if (!approved || controller.signal.aborted) return false;
+    chatPayload.provider_approval = result.approval_token;
+    return true;
+  }
+
   try {
     startProcPoll({ hold: true });
     const transportMode = await realtimeTransportMode;
     if (transportMode !== 'sse' && realtimeV1) {
       try {
-        const result = await realtimeV1.start(chatPayload, lateResult => {
+        const startChat = () => realtimeV1.start(chatPayload, lateResult => {
           // The chat.start command timed out client-side (see the
           // "everSent" branch of rejectCommand) but actually reached the
           // server, and this is its delayed, authoritative reply arriving
@@ -6865,6 +6909,8 @@ async function sendMessage(text, opts = {}) {
             startStatusFallback(msgId);
           }
         });
+        let result = await startChat();
+        if (!result.ok && await approveProvider(result)) result = await startChat();
         if (!result.ok) {
           if (result.msg_id) attachMsgId(result.msg_id);
           if (result.status === 409 && Array.isArray(result.worktrees) && result.worktrees.length) {
@@ -6922,15 +6968,20 @@ async function sendMessage(text, opts = {}) {
     } else if (transportMode === 'websocket') {
       throw new Error('WebSocket transport is unavailable in this browser.');
     }
-    const res = await fetch('/chat', {
+    const postChat = () => fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(chatPayload),
       // For UI sends, !N is resolved into explicit pinned_ids from the current list.
       signal: controller.signal,
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
+    let res = await postChat();
+    let err = res.ok ? null : await res.json().catch(() => ({}));
+    if (err && await approveProvider(err)) {
+      res = await postChat();
+      err = res.ok ? null : await res.json().catch(() => ({}));
+    }
+    if (err) {
       if (res.status === 400 && err.error && err.error.includes('not found')) {
         freezeThinking();
         showAgentCreatePrompt(agent, () => sendMessage(text));
@@ -6943,7 +6994,7 @@ async function sendMessage(text, opts = {}) {
         completionRendered = true;
         return;
       }
-      throw new Error(err.error || `HTTP ${res.status}`);
+      throw new Error(err.detail || err.error || `HTTP ${res.status}`);
     }
     if (!res.body) throw new Error(`HTTP ${res.status}`);
     const responseFlowRunId = res.headers.get('X-Squid-Flow-Run-Id');
@@ -16004,9 +16055,9 @@ function _acPreview() {
     _acStashedForNav = true;
   }
   if (item.fullEntry) {
-    applyPromptHistoryEntry(item.fullEntry);
+    applyPromptHistoryEntry(item.fullEntry, { preview: true });
   } else if (item.routeTarget && item.previewApply) {
-    applyRouteTarget(item.routeTarget);
+    applyRouteTarget(item.routeTarget, { preview: true });
   } else {
     // A route-less history prompt belongs to the route navigation started
     // from, not to the route an earlier previewed row applied.
@@ -16020,6 +16071,7 @@ function _acPreview() {
 function _acRestoreDraftChip() {
   if (promptDraftChip) {
     setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0, {
+      preview: true,
       route: promptDraftChip.route,
       chainTarget: promptDraftChip.chainTarget,
       chainTargetFresh: promptDraftChip.chainTargetFresh,
@@ -16139,7 +16191,7 @@ function _acRender(items, title = 'Suggestions') {
   acEl.querySelector('.ac-close').addEventListener('mousedown', e => {
     e.preventDefault();
     e.stopPropagation();
-    hideAutocomplete();
+    _acRestoreDraft();
     messages.focus();
   });
   acEl.classList.add('open');
@@ -16161,6 +16213,7 @@ function _acSelect(idx, { fromPointer = false } = {}) {
     updateAutocomplete();
     return;
   }
+  if (item.deletePromptEntry && !item.fullEntry && _acStashedForNav) _acRestoreDraftChip();
   hideAutocomplete();
   if (item.execute) {
     input.value = item.insert;
@@ -16179,6 +16232,11 @@ function _acSelect(idx, { fromPointer = false } = {}) {
       if (item.collapseSlug) _maybeCollapseExpandedSlug(true, true);
       return;
     }
+  }
+  if (item.fullEntry) {
+    applyPromptHistoryEntry(item.fullEntry);
+    input.focus();
+    return;
   }
   if (item.routeTarget) {
     applyRouteTarget(item.routeTarget);
@@ -19104,15 +19162,17 @@ function addReplyButton(bubbleEl, topic, agent, adhoc) {
   bubbleEl.appendChild(btn);
 }
 
-function blinkTopicChip() {
-  if (!topicChipEl) return;
-  topicChipEl.classList.remove('reply-blink');
-  void topicChipEl.offsetWidth; // restart the animation if it's already running
-  topicChipEl.classList.add('reply-blink');
+function blinkRouteField(field) {
+  if (!field) return;
+  field.classList.remove('route-blink');
+  void field.offsetWidth; // restart the animation if it's already running
+  field.classList.add('route-blink');
 }
-topicChipEl?.addEventListener('animationend', e => {
-  if (e.animationName === 'topic-chip-reply-blink') topicChipEl.classList.remove('reply-blink');
-});
+for (const field of [topicChipEl, document.getElementById('search-bar-scope')]) {
+  field?.addEventListener('animationend', e => {
+    if (e.animationName === 'route-field-blink') field.classList.remove('route-blink');
+  });
+}
 
 // Reply is one click: land on the message's route if we're elsewhere, or —
 // if already on that route but the message belongs to an earlier session —
@@ -19130,14 +19190,13 @@ async function replyToMessage(bubbleEl, topic, agent, adhoc) {
     && !!active.adhoc === msgAdhoc;
 
   if (!sameRoute) {
-    // Point the composer at this message's route only — reply shouldn't
-    // also filter the visible history, unlike clicking the topic chip does.
+    // Select the message's route and let any matching history scope follow.
     setTopicChip(msgTopic, msgAgent, msgAdhoc);
   }
   // Blink either way: on a route switch it confirms the new target, and on
   // an already-matching route it's the only feedback the click did anything
   // — otherwise a same-route reply looks like a no-op.
-  blinkTopicChip();
+  blinkRouteField(topicChipEl);
   if (!sameRoute) return;
 
   const msgId = bubbleEl.dataset.msgId ? parseInt(bubbleEl.dataset.msgId, 10) : null;

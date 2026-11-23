@@ -20,6 +20,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from .topic_provider_policy import BLOCK_REASONS
 from .stats_db import (
     claim_flow_step,
     get_due_flow_steps,
@@ -807,7 +808,9 @@ async def _dispatch_next_step(flow_run_id: str, step: dict) -> None:
         flow_route=step["route"],
     )
     if isinstance(prepared, JSONResponse):
-        log.warning("flow continuation failed to prepare turn: route=%s flow_run_id=%s", step["route"], flow_run_id)
+        reason = json.loads(prepared.body).get("error")
+        log.warning("flow continuation failed to prepare turn: route=%s flow_run_id=%s reason=%s",
+                    step["route"], flow_run_id, reason if reason in BLOCK_REASONS else "preparation_failed")
         return
 
     log.info(
@@ -890,7 +893,8 @@ async def _dispatch_claimed_durable_step(flow_run_id: str, step: dict) -> bool:
             flow_step_id=step["step_id"],
         )
         if isinstance(prepared, JSONResponse):
-            raise RuntimeError("chat turn preparation was rejected")
+            reason = json.loads(prepared.body).get("error")
+            raise RuntimeError(reason if reason in BLOCK_REASONS else "chat turn preparation was rejected")
         if not link_flow_step_messages(
             flow_run_id, step["step_id"], prepared["user_msg_id"], prepared["asst_msg_id"],
         ):

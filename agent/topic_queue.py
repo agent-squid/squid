@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import topic_provider_policy as provider_policy
 from .codex_subscription import Binding
 
 log = logging.getLogger(__name__)
@@ -201,6 +202,7 @@ class QueueItem:
     watch_run_id: Optional[str] = None
     refresh_session_at_start: bool = False
     codex_binding: Optional[Binding] = None
+    approved_runtime: Optional[provider_policy.Runtime] = None
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -510,11 +512,23 @@ class TopicWorker:
 
         from . import codex_subscription, sandbox_home
         binding = item.codex_binding
+        def check_provider_policy(resolved, rule):
+            decision = rule.decision(resolved.provider.id) if rule else None
+            if decision:
+                fingerprint = (codex_subscription.session_fingerprint(resolved.fingerprint, binding)
+                               if binding else resolved.fingerprint)
+                runtime = provider_policy.Runtime(item.topic, item.agent, fingerprint, item.model,
+                                                  codex_subscription.agent_revision(item.agent))
+                if decision != "provider_approval_required" or item.approved_runtime != runtime:
+                    raise ValueError(provider_policy.detail(decision, item.topic, item.agent, resolved.provider.id))
+
         try:
             if binding is not None and binding.revision != codex_subscription.agent_revision(item.agent):
                 raise ValueError("Subscription provider changed while queued. Resubmit the turn.")
             harness, provider = split_agent_ref(item.harness or item.backend, item.provider)
             resolved = resolve_agent(harness, provider)
+            rule = None if item.native_shell else provider_policy.rule_for(item.topic)
+            check_provider_policy(resolved, rule)
             from .effort import effort_args
             selected_effort_args = () if item.native_shell else effort_args(
                 harness, resolved.provider.id, item.model, item.effort
@@ -816,6 +830,16 @@ class TopicWorker:
                 nonlocal run_seq
                 if binding is not None and binding.revision != codex_subscription.agent_revision(item.agent):
                     raise CLIError("Subscription provider changed before launch. Resubmit the turn.")
+                if not item.native_shell:
+                    try:
+                        rule = provider_policy.rule_for(item.topic)
+                        if rule:
+                            current_runtime = resolve_agent(harness, provider)
+                            check_provider_policy(current_runtime, rule)
+                            if current_runtime.fingerprint != resolved.fingerprint:
+                                raise ValueError("Provider changed before launch. Resubmit the turn.")
+                    except ValueError as exc:
+                        raise CLIError(str(exc)) from exc
                 if delivery is not None and item.msg_id is not None:
                     tools = dict(tools)
                     delivery['instructions'] = tools.pop('instructions', []) + delivery['instructions']
@@ -1222,6 +1246,7 @@ class TopicDispatcher:
         shell_topic_memory: Optional[str] = None,
         watch_run_id: Optional[str] = None,
         codex_binding: Optional[Binding] = None,
+        approved_runtime: Optional[provider_policy.Runtime] = None,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         from .resolve import split_agent_ref
         resolved_harness, resolved_provider = split_agent_ref(harness or backend, provider)
@@ -1268,7 +1293,13 @@ class TopicDispatcher:
             queue_key = f"{topic}@{agent}" if agent else topic
         worker = self._get_or_create(queue_key, topic)
         self._sweep_worktrees(topic)
-        if resolved_harness in {"codex", "claudecode"} and provider_obj is not None and not native_shell:
+        try:
+            rule = None if native_shell else provider_policy.rule_for(topic)
+            decision = rule.decision(provider_obj.id if provider_obj else None) if rule else None
+            can_bind = decision is None or (decision == "provider_approval_required" and approved_runtime is not None)
+        except provider_policy.InvalidPolicy:
+            can_bind = False  # The worker reports the policy error before launch.
+        if can_bind and resolved_harness in {"codex", "claudecode"} and provider_obj is not None and not native_shell:
             from . import codex_subscription
             if codex_binding is None:
                 revision = codex_subscription.agent_revision(agent)
@@ -1294,7 +1325,7 @@ class TopicDispatcher:
             shell_attached_paths=shell_attached_paths,
             shell_topic_memory=shell_topic_memory,
             refresh_session_at_start=True,
-            codex_binding=codex_binding,
+            codex_binding=codex_binding, approved_runtime=approved_runtime,
             watch_run_id=watch_run_id,
         )
         seq = await worker.enqueue(item)

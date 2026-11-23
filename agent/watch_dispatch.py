@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 
+from .topic_provider_policy import BLOCK_REASONS
 from . import watch_runs as store
 from .watch_async import call
 from . import watches
@@ -69,10 +70,11 @@ class WatchDispatch:
             prepared = await _prepare_chat_turn(message=store.prompt_for(run, watch, grant, events),
                 topic=watch['topic'], agent=grant['agent'], source='watch', watch_run_id=run_id)
             if isinstance(prepared, JSONResponse):
-                if json.loads(prepared.body).get('error') == 'watch_worktree_blocked':
+                reason = json.loads(prepared.body).get('error')
+                if reason == 'watch_worktree_blocked':
                     await self.defer(run_id, 'worktree_blocked')
                 else:
-                    await self.reject(run_id, 'preparation_failed')
+                    await self.reject(run_id, reason if reason in BLOCK_REASONS else 'preparation_failed')
                 return
             await call(store.set_state, run_id, 'queued')
             keys = ('topic', 'context_history', 'harness', 'provider', 'backend', 'model', 'agent',

@@ -1291,3 +1291,26 @@ test('bar search icon highlights applied keywords rather than draft input', asyn
   await expect(page.locator('#chip-bookmark-btn')).toHaveClass(/active/);
   await expect(submit).toHaveCSS('color', normalColor);
 });
+
+for (const { background, search, expected } of [
+  { background: '#shore', search: '#squid', expected: '#next' },
+  { background: '#squid', search: '#all', expected: '#all' },
+  { background: '#squid', search: '#squid*', expected: '#squid*' },
+  { background: '#squid', search: '#shore', expected: '#shore' },
+]) {
+  test(`composer route change respects visible search scope ${search}`, async ({ page }) => {
+    await mockBackend(page);
+    await page.goto('/');
+    await page.waitForFunction(() => typeof setTopicChip === 'function');
+    await page.evaluate(() => setTopicChip('squid', null));
+    await editFilterScope(page, background);
+    await page.fill('#search-bar-scope', search);
+    await page.fill('#search-bar-keywords', 'provider policy');
+    await page.locator('#search-bar-keywords').press('Enter');
+    await expect(activeScope(page)).toHaveValue(search);
+
+    await page.evaluate(() => setTopicChip('next', null));
+    await expect(activeScope(page)).toHaveValue(expected);
+    await expect(page.locator('#search-bar-keywords')).toHaveValue('provider policy');
+  });
+}

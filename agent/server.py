@@ -65,6 +65,7 @@ from .config import (
 )
 from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harnesses
 from .providers import Provider, _validate_provider, get_provider, reload_providers, require_provider
+from . import topic_provider_policy as provider_policy
 from .resolve import agent_ref_for_storage, remove_pi_models_store, resolve_agent, split_agent_ref
 from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic, set_process_change_listener
 from .history import list_history, list_history_by_ids, list_history_around
@@ -634,6 +635,7 @@ class ChatRequest(BaseModel):
     pinned_ids: Optional[list[int]] = None
     attached_paths: Optional[list[str]] = None
     include_topic_memory: bool = Field(False)
+    provider_approval: Optional[str] = None
     flow_run_id: Optional[str] = None
     flow_route: Optional[str] = None
     task_workspace: Optional[dict] = None
@@ -1128,12 +1130,16 @@ async def _prepare_chat_turn(
     watch_run_id: Optional[str] = None,
     task_workspace: Optional[dict] = None,
     task_id: Optional[str] = None,
+    provider_confirmation: Optional[tuple[str, str, Optional[str]]] = None,
 ) -> Union[dict, JSONResponse]:
     native_shell = message.lstrip().startswith("!")
-    # 1. Resolve agent — explicit wins, else use topic sticky
-    resolved_agent: Optional[str] = agent
-    agent_config: dict = {}
-
+    try:
+        rule = None if native_shell else provider_policy.rule_for(topic)
+    except provider_policy.InvalidPolicy as exc:
+        return JSONResponse({"error": "provider_policy_invalid", "detail": str(exc), "topic": topic},
+                            status_code=403)
+    resolved_agent = agent
+    agent_config = {}
     if agent:
         agent_config = get_agent(agent) or {}
         if not agent_config:
@@ -1142,21 +1148,50 @@ async def _prepare_chat_turn(
                 status_code=400,
             )
     else:
-        topic_row = get_topic(topic)
-        if topic_row:
-            resolved_agent = topic_row.get("agent")
-            if resolved_agent:
-                agent_config = get_agent(resolved_agent) or {}
-        if not agent_config:
+        sticky_agent = (get_topic(topic) or {}).get("agent")
+        if sticky_agent:
+            agent_config = get_agent(sticky_agent) or {}
+            resolved_agent = sticky_agent
+
+        def preference(candidate):
+            if not candidate:
+                return 3
+            try:
+                provider_id = _resolve_agent_runtime(candidate)[3].provider.id
+            except ValueError:
+                return 2
+            decision = rule.decision(provider_id)
+            if decision is None:
+                return 0
+            return 1 if decision == "provider_approval_required" else 2
+
+        sticky_rank = preference(agent_config) if rule else (0 if agent_config else 3)
+        if sticky_rank:
             default = get_default_agent()
-            if default:
+            if default and (not agent_config or preference(default) < sticky_rank):
                 resolved_agent = default["name"]
                 agent_config = default
+
+    def policy_error(decision, provider_id, **extra):
+        return JSONResponse({
+            "error": decision, "detail": provider_policy.detail(decision, topic, resolved_agent, provider_id),
+            "topic": topic, "agent": resolved_agent, "provider": provider_id, **extra,
+        }, status_code=409 if decision == "provider_approval_required" else 403)
 
     try:
         harness, provider, backend, resolved_runtime = _resolve_agent_runtime(agent_config)
     except ValueError as exc:
+        if rule and rule.deny:
+            return policy_error("provider_unverified", None)
         return JSONResponse({"error": str(exc)}, status_code=400)
+    provider_id = resolved_runtime.provider.id if rule else None
+    decision = rule.decision(provider_id) if rule else None
+    if decision and (decision != "provider_approval_required" or not provider_confirmation or source != "human"):
+        return policy_error(decision, provider_id)
+    if decision is None and provider_confirmation and provider_confirmation[2]:
+        return JSONResponse({"error": "provider_approval_stale",
+                             "detail": "Provider approval no longer matches this turn. Resubmit the turn."},
+                            status_code=409)
     codex_binding = None
     if harness in {"codex", "claudecode"} and not native_shell:
         revision = codex_subscription.agent_revision(resolved_agent)
@@ -1177,6 +1212,15 @@ async def _prepare_chat_turn(
         if codex_binding is not None else resolved_runtime.fingerprint
     )
     model: Optional[str] = agent_config.get("model") or None
+    approved_runtime = None
+    if decision == "provider_approval_required":
+        session, request_digest, token = provider_confirmation
+        runtime = provider_policy.Runtime(topic, resolved_agent, runtime_fingerprint, model,
+                                          codex_subscription.agent_revision(resolved_agent))
+        if not provider_policy.accept(token, session, request_digest, runtime):
+            return policy_error(decision, provider_id,
+                                approval_token=provider_policy.challenge(session, request_digest, runtime))
+        approved_runtime = runtime
     native_backend_command = _is_backend_native_chat_command(message)
 
     if watch_run_id is None and source != "continuation":
@@ -1435,6 +1479,7 @@ async def _prepare_chat_turn(
         "harness": harness,
         "provider": provider,
         "codex_binding": codex_binding,
+        "approved_runtime": approved_runtime,
         "worktree_setup_elapsed_ms": None,
         "worktree_isolated": False,
         "native_shell": native_shell,
@@ -1543,6 +1588,7 @@ async def stream_response(
     shell_topic_memory: Optional[str] = None,
     effort: Optional[str] = None,
     codex_binding: Optional[codex_subscription.Binding] = None,
+    approved_runtime: Optional[provider_policy.Runtime] = None,
 ) -> AsyncGenerator[str, None]:
     meta_payload = {
         "agent": agent,
@@ -1583,7 +1629,7 @@ async def stream_response(
         native_shell=native_shell,
         shell_pinned_contents=shell_pinned_contents,
         shell_attached_paths=shell_attached_paths,
-        shell_topic_memory=shell_topic_memory, codex_binding=codex_binding,
+        shell_topic_memory=shell_topic_memory, codex_binding=codex_binding, approved_runtime=approved_runtime,
     )
 
     raw = ""
@@ -1694,6 +1740,13 @@ async def stream_response(
 # Routes
 # ---------------------------------------------------------------------------
 
+def _provider_confirmation(req: ChatRequest, browser_session_id: Optional[str]):
+    if not browser_session_id or req.source != "human":
+        return None
+    payload = req.model_dump_json(exclude={"provider_approval"})
+    return browser_session_id, hashlib.sha256(payload.encode()).hexdigest(), req.provider_approval
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest, request: Request = None):
     publication_audit = None
@@ -1737,6 +1790,8 @@ async def chat(req: ChatRequest, request: Request = None):
         flow_run_id=flow_run_id,
         flow_route=flow_route,
         task_workspace=req.task_workspace, task_id=req.task_id,
+        provider_confirmation=_provider_confirmation(
+            req, getattr(request.state, "browser_session_id", None) if request else None),
     )
     if isinstance(prepared, JSONResponse):
         return prepared
@@ -1762,6 +1817,7 @@ async def chat(req: ChatRequest, request: Request = None):
             prepared["effective_message"], prepared["topic"], prepared["agent"], prepared["backend"], prepared["model"], prepared["cwd"],
             prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
             effort=prepared.get("effort"), codex_binding=prepared.get("codex_binding"),
+            approved_runtime=prepared.get("approved_runtime"),
             resume_session_id=prepared["resume_session_id"],
             adhoc=prepared["adhoc"],
             lookback=prepared["lookback"],
@@ -2690,6 +2746,10 @@ async def put_topic_memory_route(topic: str, req: TopicMemoryRequest):
     topic = _normalize_topic_response(topic)
     if isinstance(topic, JSONResponse):
         return topic
+    try:
+        provider_policy.rule_from_memory(req.content)
+    except provider_policy.InvalidPolicy as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(write_topic_memory(topic, req.content))
 
 
@@ -2706,11 +2766,14 @@ async def put_topic_memory_code_roots_route(topic: str, req: TopicMemoryCodeRoot
     topic = _normalize_topic_response(topic)
     if isinstance(topic, JSONResponse):
         return topic
-    return JSONResponse(write_topic_memory_squid_code_roots(
-        topic,
-        code_roots=req.code_roots,
-        code_roots_skipped=req.code_roots_skipped,
-    ))
+    try:
+        return JSONResponse(write_topic_memory_squid_code_roots(
+            topic,
+            code_roots=req.code_roots,
+            code_roots_skipped=req.code_roots_skipped,
+        ))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 @app.put("/topics/{topic}/hidden")
@@ -5346,6 +5409,7 @@ async def _run_realtime_chat(prepared: dict) -> None:
         prepared["backend"], prepared["model"], prepared["cwd"],
         prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
         effort=prepared.get("effort"), codex_binding=prepared.get("codex_binding"),
+        approved_runtime=prepared.get("approved_runtime"),
         resume_session_id=prepared["resume_session_id"], adhoc=prepared["adhoc"],
         lookback=prepared["lookback"], code_roots=prepared["code_roots"],
         display_prompt=prepared["display_prompt"], source_cwd=prepared["source_cwd"],
@@ -5360,7 +5424,7 @@ async def _run_realtime_chat(prepared: dict) -> None:
         pass
 
 
-async def _realtime_chat_start(payload: dict) -> dict:
+async def _realtime_chat_start(payload: dict, browser_session_id: Optional[str] = None) -> dict:
     try:
         req = ChatRequest(**payload)
         if req.publication is not None or req.publication_expires_at is not None:
@@ -5383,6 +5447,7 @@ async def _realtime_chat_start(payload: dict) -> dict:
         include_topic_memory=req.include_topic_memory, source=req.source,
         flow_run_id=flow_run_id, flow_route=flow_route,
         task_workspace=req.task_workspace, task_id=req.task_id,
+        provider_confirmation=_provider_confirmation(req, browser_session_id),
     )
     if isinstance(prepared, JSONResponse):
         body = json.loads(prepared.body)
@@ -5584,7 +5649,7 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
             # returned unchanged and the client sees no further output.
             attach = _attach_auth_listener(result["session_id"], websocket.state.browser_session_id)
     elif message_type == "chat.start":
-        result = await _realtime_chat_start(payload)
+        result = await _realtime_chat_start(payload, websocket.state.browser_session_id)
         result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
     elif message_type == "auth.start":
         result, attach = await _realtime_auth_start(payload, websocket)

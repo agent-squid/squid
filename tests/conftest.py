@@ -41,3 +41,8 @@ def _isolated_instance_credentials(tmp_path, monkeypatch):
 
     credentials = instance_auth.InstanceCredentials(tmp_path / "instance-auth.sqlite3")
     monkeypatch.setattr(instance_auth, "instance_credentials", lambda: credentials)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_topic_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.memory.TOPICS_CONTEXT_DIR", tmp_path / "topics")

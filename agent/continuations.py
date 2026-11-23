@@ -10,6 +10,7 @@ import secrets
 import time
 from uuid import uuid4
 
+from .topic_provider_policy import BLOCK_REASONS
 from . import stats_db as db
 from . import continuation_owners as owners
 from .watch_async import call, settle
@@ -806,7 +807,8 @@ async def dispatch(row, dispatcher):
     prepared = await _prepare_chat_turn(message=prompt, topic=row['topic'], agent=row['agent'],
                                        adhoc=island, source='continuation', **task_kwargs)
     if isinstance(prepared, JSONResponse):
-        await asyncio.to_thread(fail, row['id'], 'preparation_blocked')
+        reason = json.loads(prepared.body).get('error')
+        await asyncio.to_thread(fail, row['id'], reason if reason in BLOCK_REASONS else 'preparation_blocked')
         return
     binding = prepared.get('codex_binding')
     if not await asyncio.to_thread(_codex_context_matches, binding, parent, origin, history):

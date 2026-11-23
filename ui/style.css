@@ -4775,13 +4775,15 @@ body {
   user-select: none;
 }
 #topic-chip.visible { display: block; }
-#topic-chip.reply-blink { animation: topic-chip-reply-blink 0.55s ease-in-out; }
-@keyframes topic-chip-reply-blink {
+#topic-chip.route-blink,
+#search-bar-scope.route-blink { animation: route-field-blink 0.55s ease-in-out; }
+@keyframes route-field-blink {
   0%, 100% { box-shadow: none; }
   25%, 75% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent); }
 }
 @media (prefers-reduced-motion: reduce) {
-  #topic-chip.reply-blink { animation: none; }
+  #topic-chip.route-blink,
+  #search-bar-scope.route-blink { animation: none; }
 }
 #topic-chip.route-chain,
 #topic-chip.origin-broadcast {
