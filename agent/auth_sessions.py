@@ -174,6 +174,7 @@ class AuthSession:
         self.idle_task: Optional[asyncio.Task] = None
         self.api_task: Optional[asyncio.Task] = None
         self._closed = asyncio.Event()
+        self.browser_session_id: Optional[str] = None
         self.credential_lock = None
         self.credential_provider = None
         self.credential_account = None

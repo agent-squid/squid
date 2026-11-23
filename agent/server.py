@@ -49,7 +49,7 @@ from typing import Any, AsyncGenerator, Callable, Literal, Optional, Union
 import yaml
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -58,7 +58,7 @@ from .auth_sessions import AUTH_SESSION_MODES
 from .config import (
     CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH,
     OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, NATIVE_SHELL_TIMEOUT, WORKTREE_ISOLATION_ENABLED,
-    REALTIME_TRANSPORT, UPDATES_INSTALL_ON_RESTART, ALLOW_REMOTE_KEYCHAIN_UNLOCK,
+    REALTIME_TRANSPORT, UPDATES_INSTALL_ON_RESTART,
     REALTIME_OUTBOUND_QUEUE_LIMIT, REALTIME_MAX_FRAME_BYTES, REALTIME_HEARTBEAT_SECONDS,
     _USER_CONFIG, _cfg,
     config_revision, config_text, realtime_transport, shore_identity_dir, write_config_text,
@@ -525,14 +525,79 @@ async def _cancel_background_task(task: "asyncio.Task | None") -> None:
         await task
 
 
+from . import instance_auth
+
+
 app = FastAPI(title="Squid", version=SQUID_VERSION, lifespan=_lifespan)
+app.include_router(instance_auth.router)
+
+
+# These specific endpoints verify existing turn or host-control credentials
+# inside their handlers. All other routes default to the browser session gate.
+_SCOPED_ENDPOINTS = {
+    "GET": re.compile(
+        r"/(?:capabilities|routes(?:/[^/]+)?|continuations(?:/[^/]+)?"
+        r"|tools|watch-tools|watches(?:/[^/]+(?:/runs)?)?"
+        r"|watch-control/[^/]+/(?:tools|watch-tools|watches(?:/[^/]+(?:/runs)?)?)"
+        r"|task-publications/[^/]+)"
+    ),
+    "POST": re.compile(
+        r"/(?:routes(?:/validate|/[^/]+/cancel)?|agent-history/[^/]+"
+        r"|continuations(?:/result|/[^/]+/cancel)?"
+        r"|watches(?:/validate|/[^/]+/[^/]+)?"
+        r"|watch-control/[^/]+/watches(?:/validate|/[^/]+/[^/]+)?"
+        r"|task-workspaces/[^/]+/publication-(?:grant|revoke)"
+        r"|task-publications/[^/]+/reconcile)"
+    ),
+}
+_HOST_ENDPOINTS = {
+    ("GET", "/shore/pairing/status"),
+    ("GET", "/shore/pairing/requests"),
+    ("POST", "/shore/pairing/begin"),
+    ("POST", "/shore/pairing/requests/approve"),
+    ("POST", "/shore/pairing/requests/reject"),
+    ("GET", "/instance/active-process-count"),
+    ("POST", "/instance/restart"),
+    ("POST", "/instance/shutdown"),
+}
+_PUBLIC_ENDPOINTS = {
+    ("GET", "/instance/pair"),
+    ("GET", "/favicon.png"),
+    ("POST", "/instance/exchange"),
+    ("GET", "/sw.js"),
+}
 
 
 @app.middleware("http")
-async def shore_feature_gate(request: Request, call_next):
-    if request.url.path.startswith("/shore/") and not shore_enabled():
+async def require_instance_access(request: Request, call_next):
+    method = "GET" if request.method == "HEAD" else request.method
+    path = request.url.path
+    if path.startswith("/shore/") and not shore_enabled():
         return JSONResponse({"detail": "Not Found"}, status_code=404)
-    return await call_next(request)
+    endpoint = (method, path)
+    scoped = _SCOPED_ENDPOINTS.get(request.method)
+    if endpoint in _PUBLIC_ENDPOINTS or (scoped and scoped.fullmatch(path)):
+        return await call_next(request)
+    if endpoint in _HOST_ENDPOINTS and await asyncio.to_thread(instance_auth.host_authorized, request):
+        return await call_next(request)
+    if path in {"/instance/active-process-count", "/instance/restart", "/instance/shutdown"}:
+        return JSONResponse({"error": "host_authorization_required"}, status_code=401)
+
+    session_id = await asyncio.to_thread(instance_auth.browser_session, request)
+    if not session_id:
+        headers = {"Cache-Control": "no-store"}
+        if endpoint == ("GET", "/health"):
+            return JSONResponse({"status": "ok", "boot_time": BOOT_TIME}, headers=headers)
+        if method == "GET" and (path in {"/", "/index.html"}
+                                or request.headers.get("sec-fetch-mode") == "navigate"):
+            return RedirectResponse("/instance/pair", status_code=303, headers=headers)
+        return JSONResponse({"error": "pairing_required"}, status_code=401, headers=headers)
+    if method not in {"GET", "OPTIONS"} and request.headers.get("origin") != instance_auth.browser_origin(request):
+        return JSONResponse({"error": "origin_not_allowed"}, status_code=403)
+    request.state.browser_session_id = session_id
+    response = await call_next(request)
+    response.headers.setdefault("Cache-Control", "private, no-store")
+    return response
 
 
 @app.get("/config/features")
@@ -862,31 +927,8 @@ def _request_is_loopback(headers, direct_host: Optional[str]) -> bool:
         return False
 
 
-def _keychain_unlock_allowed(headers, direct_host: Optional[str]) -> bool:
-    """Loopback gate for the macOS keychain-unlock auth-session mode (see
-    docs/plans/cursor-keychain-unlock-remediation.md)."""
-    if ALLOW_REMOTE_KEYCHAIN_UNLOCK:
-        return True
-    return _request_is_loopback(headers, direct_host)
-
-
-def _auth_session_validation_error(
-    harness: str,
-    mode: str,
-    model: Optional[str],
-    headers,
-    direct_host: Optional[str],
-) -> Optional[str]:
-    """Semantic validation shared by the HTTP (POST /auth/session) and
-    WebSocket (auth.start) auth-session spawn paths.
-
-    Returns an error string on failure, or None when the request is valid.
-    The mode/harness allowlist and the keychain-unlock loopback gate live here
-    in one place so the two entry points cannot drift (ADR-0035). The caller
-    maps the string to its own wire shape: HTTP surfaces it as `error`, WS as
-    `invalid_frame`/`detail` — except "unlock_requires_local", which both
-    surfaces as the `unlock_requires_local` code.
-    """
+def _auth_session_validation_error(harness: str, mode: str, model: Optional[str]) -> Optional[str]:
+    """Semantic validation shared by HTTP and WebSocket auth-session starts."""
     if mode == "login":
         if harness not in SUPPORTED_HARNESSES:
             return f"Unknown harness {harness!r}"
@@ -894,8 +936,8 @@ def _auth_session_validation_error(
         if harness not in SUPPORTED_HARNESSES and harness != "ollama":
             return f"Unknown install target {harness!r}"
     elif mode == "unlock":
-        if not _keychain_unlock_allowed(headers, direct_host):
-            return "unlock_requires_local"
+        if harness != "keychain":
+            return "Keychain unlock requires the keychain target"
     elif mode in ("pull", "remove"):
         from .providers import PROVIDERS
         if harness not in PROVIDERS or harness != "ollama":
@@ -1747,6 +1789,16 @@ async def chat(req: ChatRequest, request: Request = None):
     )
 
 
+@app.post("/instance/restart")
+async def host_restart():
+    return await run_cmd(CmdRequest(command="restart", topic="default", upgrade=False))
+
+
+@app.post("/instance/shutdown")
+async def host_shutdown():
+    return await run_cmd(CmdRequest(command="shutdown", topic="default"))
+
+
 @app.post("/cmd")
 async def run_cmd(req: CmdRequest):
     topic = _normalize_topic_response(req.topic)
@@ -1881,6 +1933,11 @@ async def run_cmd(req: CmdRequest):
     return JSONResponse({"ok": False, "error": "unknown command"}, status_code=400)
 
 
+@app.get("/instance/active-process-count")
+async def host_active_process_count():
+    return JSONResponse({"count": len(list_active_procs())}, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/processes")
 async def processes():
     return JSONResponse(list_active_procs())
@@ -1908,14 +1965,7 @@ class AuthSessionResizeRequest(BaseModel):
 async def auth_session_create(req: AuthSessionRequest, request: Request):
     from .auth_sessions import create_session, AuthSessionError, NoLoginCommand
 
-    direct_host = request.client.host if request.client else None
-    error = _auth_session_validation_error(req.harness, req.mode, req.model, request.headers, direct_host)
-    if error == "unlock_requires_local":
-        return JSONResponse({
-            "error": error,
-            "detail": "Keychain unlock is only available from a loopback client "
-                      "unless auth.allow_remote_keychain_unlock is enabled.",
-        }, status_code=400)
+    error = _auth_session_validation_error(req.harness, req.mode, req.model)
     if error:
         return JSONResponse({"error": error}, status_code=400)
     try:
@@ -1925,6 +1975,8 @@ async def auth_session_create(req: AuthSessionRequest, request: Request):
         return JSONResponse({"error": str(exc)}, status_code=400)
     except AuthSessionError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    if req.mode == "unlock":
+        session.browser_session_id = request.state.browser_session_id
     return JSONResponse({
         "id": session.id,
         "harness": session.harness_id,
@@ -1932,11 +1984,18 @@ async def auth_session_create(req: AuthSessionRequest, request: Request):
     })
 
 
-@app.get("/auth/session/{session_id}")
-async def auth_session_status(session_id: str):
+def _browser_auth_session(session_id: str, browser_session_id: str):
     from .auth_sessions import get_session
 
     session = get_session(session_id)
+    if session and session.browser_session_id in (None, browser_session_id):
+        return session
+    return None
+
+
+@app.get("/auth/session/{session_id}")
+async def auth_session_status(session_id: str, request: Request):
+    session = _browser_auth_session(session_id, request.state.browser_session_id)
     if not session:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"state": session.state, "returncode": session.returncode},
@@ -1944,10 +2003,10 @@ async def auth_session_status(session_id: str):
 
 
 @app.get("/auth/session/{session_id}/events")
-async def auth_session_events(session_id: str):
-    from .auth_sessions import get_session, stream_events
+async def auth_session_events(session_id: str, request: Request):
+    from .auth_sessions import stream_events
 
-    session = get_session(session_id)
+    session = _browser_auth_session(session_id, request.state.browser_session_id)
     if not session:
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -1964,10 +2023,10 @@ async def auth_session_events(session_id: str):
 
 
 @app.post("/auth/session/{session_id}/input")
-async def auth_session_input(session_id: str, req: AuthSessionInputRequest):
-    from .auth_sessions import get_session, write_input, AuthSessionError
+async def auth_session_input(session_id: str, req: AuthSessionInputRequest, request: Request):
+    from .auth_sessions import write_input, AuthSessionError
 
-    session = get_session(session_id)
+    session = _browser_auth_session(session_id, request.state.browser_session_id)
     if not session:
         return JSONResponse({"error": "not found"}, status_code=404)
     try:
@@ -1978,10 +2037,10 @@ async def auth_session_input(session_id: str, req: AuthSessionInputRequest):
 
 
 @app.post("/auth/session/{session_id}/resize")
-async def auth_session_resize(session_id: str, req: AuthSessionResizeRequest):
-    from .auth_sessions import get_session, resize
+async def auth_session_resize(session_id: str, req: AuthSessionResizeRequest, request: Request):
+    from .auth_sessions import resize
 
-    session = get_session(session_id)
+    session = _browser_auth_session(session_id, request.state.browser_session_id)
     if not session:
         return JSONResponse({"error": "not found"}, status_code=404)
     resize(session, req.cols, req.rows)
@@ -1989,10 +2048,11 @@ async def auth_session_resize(session_id: str, req: AuthSessionResizeRequest):
 
 
 @app.post("/auth/session/{session_id}/cancel")
-async def auth_session_cancel(session_id: str):
+async def auth_session_cancel(session_id: str, request: Request):
     from .auth_sessions import cancel_session
 
-    ok = await cancel_session(session_id)
+    session = _browser_auth_session(session_id, request.state.browser_session_id)
+    ok = bool(session) and await cancel_session(session_id)
     return JSONResponse({"ok": ok})
 
 
@@ -3651,7 +3711,7 @@ async def credential_capabilities(request: Request):
     macos = sys.platform == "darwin"
     return JSONResponse({
         "host_browser_detection": macos and _request_is_loopback(request.headers, direct_host),
-        "keychain_unlock": macos and _keychain_unlock_allowed(request.headers, direct_host),
+        "keychain_unlock": macos,
     }, headers={"Cache-Control": "no-store"})
 
 
@@ -4467,25 +4527,49 @@ async def get_journal(topic: str, week: str, agent: Optional[str] = None):
 
 
 @app.get("/remote")
-async def get_remote_url():
-    """Return the Tailscale HTTPS URL for remote access QR generation."""
-    import subprocess
+def get_remote_url():
+    return JSONResponse(_tailscale_remote_access())
+
+
+def _tailscale_remote_access():
     try:
         result = subprocess.run(
             ["tailscale", "status", "--json"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
-            return JSONResponse({"url": None, "reason": "not_running"})
+            return {"url": None, "reason": "not_running"}
         data = json.loads(result.stdout)
         dns = data.get("Self", {}).get("DNSName", "").rstrip(".")
         if dns:
-            return JSONResponse({"url": f"https://{dns}/"})
-        return JSONResponse({"url": None, "reason": "no_dns"})
+            return {"url": f"https://{dns}/"}
+        return {"url": None, "reason": "no_dns"}
     except FileNotFoundError:
-        return JSONResponse({"url": None, "reason": "not_installed"})
+        return {"url": None, "reason": "not_installed"}
     except Exception:
-        return JSONResponse({"url": None, "reason": "error"})
+        return {"url": None, "reason": "error"}
+
+
+@app.post("/remote")
+def create_remote_pairing(request: Request):
+    headers = {"Cache-Control": "no-store"}
+    origin = instance_auth.browser_origin(request)
+    if origin is None or request.headers.get("origin") != origin:
+        return JSONResponse({"error": "origin_not_allowed"}, status_code=403, headers=headers)
+    token = request.cookies.get(instance_auth.SESSION_COOKIE)
+    credentials = instance_auth.instance_credentials()
+    if not token or not credentials.session_id(token):
+        return JSONResponse({"error": "pairing_required"}, status_code=401, headers=headers)
+    remote = _tailscale_remote_access()
+    if not remote["url"]:
+        return JSONResponse({"error": remote["reason"]}, status_code=503, headers=headers)
+    code = credentials.issue(session_token=token)
+    if not code:
+        return JSONResponse({"error": "pairing_required"}, status_code=401, headers=headers)
+    return JSONResponse({
+        "pair_url": f"{remote['url']}instance/pair#code={code}",
+        "expires_in": instance_auth.PAIRING_LIFETIME,
+    }, headers=headers)
 
 
 _LOCALFILE_ROOTS: list[Path] = _localfile_roots_from(_cfg)
@@ -5318,16 +5402,16 @@ def _detach_auth_listener(session_id: Optional[str], q: Optional[asyncio.Queue])
             pass
 
 
-def _attach_auth_listener(session_id: str) -> Optional[tuple[str, asyncio.Queue]]:
+def _attach_auth_listener(session_id: str, browser_session_id: str) -> Optional[tuple[str, asyncio.Queue]]:
     """Re-attach to a still-live session for an idempotent auth.start replay.
 
     Returns (session_id, queue) to wire the pump, or None when the session is
     already gone (post-exit retention lapsed) — the caller then returns the
     stored result unchanged.
     """
-    from .auth_sessions import attach_listener, get_session
+    from .auth_sessions import attach_listener
 
-    session = get_session(session_id)
+    session = _browser_auth_session(session_id, browser_session_id)
     if not session:
         return None
     return (session_id, attach_listener(session))
@@ -5361,14 +5445,7 @@ async def _realtime_auth_start(payload: dict, websocket: WebSocket) -> tuple[dic
     if mode not in AUTH_SESSION_MODES:
         return {"ok": False, "error": "invalid_frame", "detail": f"Unknown auth-session mode {mode!r}"}, None
 
-    direct_host = websocket.client.host if websocket.client else None
-    error = _auth_session_validation_error(harness, mode, model, websocket.headers, direct_host)
-    if error == "unlock_requires_local":
-        return {
-            "ok": False, "error": "unlock_requires_local",
-            "detail": "Keychain unlock is only available from a loopback client "
-                      "unless auth.allow_remote_keychain_unlock is enabled.",
-        }, None
+    error = _auth_session_validation_error(harness, mode, model)
     if error:
         return {"ok": False, "error": "invalid_frame", "detail": error}, None
 
@@ -5380,6 +5457,9 @@ async def _realtime_auth_start(payload: dict, websocket: WebSocket) -> tuple[dic
     except AuthSessionError as exc:
         return {"ok": False, "error": "auth_session_error", "detail": str(exc)}, None
 
+    if mode == "unlock":
+        session.browser_session_id = websocket.state.browser_session_id
+
     result = {
         "ok": True,
         "session_id": session.id,
@@ -5389,8 +5469,8 @@ async def _realtime_auth_start(payload: dict, websocket: WebSocket) -> tuple[dic
     return result, (session.id, attach_listener(session))
 
 
-async def _handle_auth_input(frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int) -> None:
-    from .auth_sessions import AuthSessionError, get_session, write_input
+async def _handle_auth_input(frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int, *, browser_session_id: str) -> None:
+    from .auth_sessions import AuthSessionError, write_input
 
     request_id = frame.get("request_id")
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
@@ -5399,7 +5479,7 @@ async def _handle_auth_input(frame: dict, outbound: _RealtimeOutbound, principal
     if not isinstance(request_id, str) or not request_id or not isinstance(session_id, str) or not isinstance(data, str):
         await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
         return
-    session = get_session(session_id)
+    session = _browser_auth_session(session_id, browser_session_id)
     if not session:
         await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": "unknown_session"}}, principal, last_acked_cursor)
         return
@@ -5411,8 +5491,8 @@ async def _handle_auth_input(frame: dict, outbound: _RealtimeOutbound, principal
     await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": True}}, principal, last_acked_cursor)
 
 
-async def _handle_auth_resize(frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int) -> None:
-    from .auth_sessions import get_session, resize
+async def _handle_auth_resize(frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int, *, browser_session_id: str) -> None:
+    from .auth_sessions import resize
 
     request_id = frame.get("request_id")
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
@@ -5424,7 +5504,7 @@ async def _handle_auth_resize(frame: dict, outbound: _RealtimeOutbound, principa
             or not (20 <= cols <= 500) or not (5 <= rows <= 200)):
         await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
         return
-    session = get_session(session_id)
+    session = _browser_auth_session(session_id, browser_session_id)
     if not session:
         await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": "unknown_session"}}, principal, last_acked_cursor)
         return
@@ -5432,7 +5512,7 @@ async def _handle_auth_resize(frame: dict, outbound: _RealtimeOutbound, principa
     await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": True}}, principal, last_acked_cursor)
 
 
-async def _handle_auth_cancel(frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int) -> None:
+async def _handle_auth_cancel(frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int, *, browser_session_id: str) -> None:
     """Fire-and-forget, like _handle_auth_input/_handle_auth_resize — not
     routed through _handle_realtime_mutation's idempotent-mutation path.
 
@@ -5453,7 +5533,8 @@ async def _handle_auth_cancel(frame: dict, outbound: _RealtimeOutbound, principa
     if not isinstance(request_id, str) or not request_id or not isinstance(session_id, str) or not session_id:
         await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
         return
-    cancelled = await cancel_session(session_id)
+    session = _browser_auth_session(session_id, browser_session_id)
+    cancelled = bool(session) and await cancel_session(session_id)
     await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id,
                                 "payload": {"ok": True, "cancelled": cancelled, "session_id": session_id}}, principal, last_acked_cursor)
 
@@ -5467,6 +5548,8 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
     }:
         await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
         return None
+    if message_type == "auth.start" and payload.get("mode") == "unlock":
+        principal = f"unlock:{websocket.state.browser_session_id}:{principal}"
     fingerprint = _realtime_request_fingerprint(message_type, payload)
     previous = await asyncio.to_thread(get_realtime_request, principal, request_id)
     attach: Optional[tuple[str, asyncio.Queue]] = None
@@ -5479,7 +5562,7 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
             # Reconnect replay: re-wire output to this socket for the still-live
             # session. If it already exited and was reaped, the stored result is
             # returned unchanged and the client sees no further output.
-            attach = _attach_auth_listener(result["session_id"])
+            attach = _attach_auth_listener(result["session_id"], websocket.state.browser_session_id)
     elif message_type == "chat.start":
         result = await _realtime_chat_start(payload)
         result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
@@ -5519,11 +5602,11 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
 
 @app.websocket("/ws/v1")
 async def realtime_v1(websocket: WebSocket):
-    origin = websocket.headers.get("origin")
-    host = websocket.headers.get("host")
-    if origin and host and urllib.parse.urlparse(origin).netloc != host:
-        await websocket.close(code=1008, reason="origin not allowed")
+    browser_session_id = await asyncio.to_thread(instance_auth.browser_session, websocket)
+    if not browser_session_id or websocket.headers.get("origin") != instance_auth.browser_origin(websocket):
+        await websocket.close(code=1008, reason="paired same-origin session required")
         return
+    websocket.state.browser_session_id = browser_session_id
     await websocket.accept()
     cursor = await asyncio.to_thread(get_realtime_cursor)
     await websocket.send_json({
@@ -5570,6 +5653,9 @@ async def realtime_v1(websocket: WebSocket):
             done, pending = await asyncio.wait(
                 wait_set, return_when=asyncio.FIRST_COMPLETED,
             )
+            if not await asyncio.to_thread(instance_auth.browser_session, websocket):
+                await _realtime_terminate(websocket, sender_task, 1008, reason="session expired")
+                return
             if sender_task in done:
                 # The sender died (a send raised, e.g. WebSocketDisconnect on a
                 # half-closed peer). Surface its exception so cleanup runs.
@@ -5724,11 +5810,11 @@ async def realtime_v1(websocket: WebSocket):
                     if not principal:
                         await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "client_identity_required"}}, principal, last_acked_cursor)
                     elif message_type == "auth.input":
-                        await _handle_auth_input(frame, outbound, principal, last_acked_cursor)
+                        await _handle_auth_input(frame, outbound, principal, last_acked_cursor, browser_session_id=browser_session_id)
                     elif message_type == "auth.resize":
-                        await _handle_auth_resize(frame, outbound, principal, last_acked_cursor)
+                        await _handle_auth_resize(frame, outbound, principal, last_acked_cursor, browser_session_id=browser_session_id)
                     else:
-                        await _handle_auth_cancel(frame, outbound, principal, last_acked_cursor)
+                        await _handle_auth_cancel(frame, outbound, principal, last_acked_cursor, browser_session_id=browser_session_id)
                 elif message_type == "ping":
                     await _realtime_send(outbound, {"v": 1, "type": "pong", "payload": {}}, principal, last_acked_cursor)
                 elif message_type == "ack":
@@ -5971,23 +6057,24 @@ def _health_json(host: str, port: int) -> Optional[dict]:
         return None
 
 
+def _request_host_lifecycle(host: str, port: int, command: str) -> bool:
+    try:
+        if not ipaddress.IPv4Address(host).is_loopback:
+            return False
+        token = instance_auth.host_token(create=True)
+        request = urllib.request.Request(f"http://{host}:{port}/instance/{command}", method="POST")
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            return 200 <= response.status < 300 and bool(payload.get("ok"))
+    except Exception:
+        return False
+
+
 def _request_http_restart(host: str, port: int) -> Optional[int]:
     before = _health_json(host, port)
-    if not before:
-        return None
-    body = json.dumps({"command": "restart", "topic": "default", "upgrade": False}).encode("utf-8")
-    request = urllib.request.Request(
-        f"http://{host}:{port}/cmd",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=3) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-            if not (200 <= response.status < 300 and payload.get("ok")):
-                return None
-    except Exception:
+    if not before or not _request_host_lifecycle(host, port, "restart"):
         return None
 
     print("restarting agentsquid via running server", end="", flush=True)
@@ -6012,21 +6099,7 @@ def _request_http_restart(host: str, port: int) -> Optional[int]:
 
 
 def _request_http_shutdown(host: str, port: int) -> Optional[int]:
-    if not _health_ok(host, port):
-        return None
-    body = json.dumps({"command": "shutdown", "topic": "default"}).encode("utf-8")
-    request = urllib.request.Request(
-        f"http://{host}:{port}/cmd",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=3) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-            if not (200 <= response.status < 300 and payload.get("ok")):
-                return None
-    except Exception:
+    if not _health_ok(host, port) or not _request_host_lifecycle(host, port, "shutdown"):
         return None
 
     print("stopping agentsquid via running server", end="", flush=True)
@@ -6046,18 +6119,25 @@ def _request_http_shutdown(host: str, port: int) -> Optional[int]:
 def _print_lifecycle_usage() -> None:
     shore_commands = "|login|pair" if shore_enabled() else ""
     print(
-        f"usage: agentsquid [--fg|--reload|start|stop|restart|status{shore_commands}]\n\n"
+        f"usage: agentsquid [--fg|--reload|start|stop|restart|status|pair-browser{shore_commands}]\n\n"
         "commands:\n"
         "  start     run agentsquid in the background\n"
         "  stop      stop the background agentsquid process\n"
         "  restart   stop then start the background process\n"
         "  status    show whether agentsquid is running\n"
+        "  pair-browser  print a single-use local browser pairing link\n"
         + ("  login     register this machine as your Shore host\n"
            "  pair      pair a browser (--requests to approve pairing requests)\n"
            if shore_enabled() else "")
         + "\n"
         + "bare agentsquid runs in the foreground; Ctrl+C stops it."
     )
+
+
+def _print_browser_pairing_help() -> None:
+    print("If your browser asks to pair, run agentsquid pair-browser on the host "
+          "and open the printed link within 5 minutes.", flush=True)
+    print("Use /remote in the paired browser to add a Tailscale device.", flush=True)
 
 
 def _print_tailscale_access(port: int) -> None:
@@ -6125,6 +6205,7 @@ def _lifecycle_start(host: str, port: int) -> int:
             print("")
             print(f"agentsquid is up -> http://{host}:{port}")
             _print_tailscale_access(port)
+            _print_browser_pairing_help()
             return 0
         if proc.poll() is not None:
             pid_file.unlink(missing_ok=True)
@@ -6223,6 +6304,9 @@ def main():
     args = [arg for arg in sys.argv[1:] if arg != "--fg"]
     # Also support direct `python -m agent.server` invocations; the installed
     # console entry point dispatches clients lazily through agent.cli.
+    if args and args[0] == "pair-browser":
+        from .instance_auth import pair_browser_cli
+        return pair_browser_cli(args[1:])
     if args and args[0] in {"watch", "tools"}:
         from .watch_cli import main as watch_main
         sys.exit(watch_main(args))
@@ -6300,6 +6384,7 @@ def main():
     # equivalent, so it has to speak for itself here instead.
     print(f"squid is up → http://{host}:{port}  (running in the foreground — Ctrl+C to stop)", flush=True)
     _print_tailscale_access(port)
+    _print_browser_pairing_help()
     uvicorn.run(
         "agent.server:app",
         host=host,

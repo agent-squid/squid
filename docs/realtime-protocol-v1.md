@@ -128,24 +128,12 @@ unchanged; SSE remains the migration fallback. Messages:
   provider and resolves its credential store. Omitting it retains host login.
   See [ADR-0058](decisions/0058-persistent-credential-profiles.md) and
   [ADR-0059](decisions/0059-dedicated-claude-subscription-providers.md).
-  `unlock` (see `docs/decisions/0035-cli-auth-sessions-via-scoped-pty.md`'s
-  keychain-unlock amendment) runs the fixed, allowlisted `security
-  unlock-keychain` command — macOS only, and gated to a loopback client
-  address by default. A non-loopback caller is rejected with
-  `{ok:false, error:"unlock_requires_local", detail}` instead of spawning,
-  unless the server's `auth.allow_remote_keychain_unlock` config is enabled.
-  The raw TCP peer alone is not proof of localness: `tailscale serve`
-  reverse-proxies over loopback, so a tailnet client also arrives with a
-  loopback peer address. The gate is fail-closed instead of trying to parse a
-  trusted client address out of `X-Forwarded-For` (client-supplied, and
-  therefore spoofable — a remote caller can send `X-Forwarded-For:
-  127.0.0.1` itself): the mere *presence* of any forwarding marker —
-  `X-Forwarded-For`, `X-Real-IP`, RFC 7239 `Forwarded`, or
-  `Tailscale-User-Login` — denies the request outright, regardless of value,
-  since a direct local connection never sets any of them. Only a connection
-  with none of these headers and a genuinely loopback raw peer address is
-  allowed. The equivalent HTTP path (`POST /auth/session`) applies the same
-  gate and returns `{"error": "unlock_requires_local"}` with HTTP 400.
+  On macOS, a paired browser can explicitly request `mode: "unlock"` with
+  `harness: "keychain"` over HTTP or WebSocket. Squid runs the fixed
+  `security unlock-keychain` command. The initiating browser session owns
+  the prompt, input, and output replay. Older Keychain unlock settings in
+  `squid.yaml` are ignored. See [ADR-0016](decisions/0016-security-model.md).
+
 - `auth.input` — fire-and-forget, NOT persisted. Payload `{session_id, data}`;
   `data` is the raw UTF-8 input string (as the HTTP route accepts it). Result
   `{ok:true}` or `{ok:false, error:"unknown_session"}`.

@@ -65,7 +65,10 @@ test.describe('Connect modal (Shore/AgentSquid.AI + Tailscale)', () => {
 
   test('both configured: tabs appear, each command opens with the matching tab active, switching works', async ({ page }) => {
     await mockApp(page);
-    await page.route('**/remote', r => r.fulfill({ json: { url: 'https://example.ts.net/' } }));
+    await page.route('**/remote', r => r.fulfill({ json: r.request().method() === 'POST'
+      ? { pair_url: 'https://example.ts.net/instance/pair#code=test', expires_in: 300 }
+      : { url: 'https://example.ts.net/' },
+    }));
     await page.route('**/shore/devices', r => r.fulfill({ json: { devices: [] } }));
     await page.route('**/shore/pairing/begin', r => r.fulfill({ json: SHORE_OFFER }));
     await page.route('**/shore/pairing/status**', r => r.fulfill({ json: { status: 'pending' } }));
@@ -82,6 +85,7 @@ test.describe('Connect modal (Shore/AgentSquid.AI + Tailscale)', () => {
     await expect(page.locator('#connect-tailscale-panel')).toBeVisible();
     await expect(page.locator('#connect-agentsquid-panel')).toBeHidden();
     await expect(page.locator('#connect-agentsquid-details')).toBeHidden();
+    await page.getByRole('button', { name: 'Generate pairing QR' }).click();
     await expect(page.locator('#connect-tailscale-panel .connect-qr img')).toBeVisible();
     await expect(page.locator('.connect-link-url').first()).toHaveText('https://example.ts.net/');
 
@@ -147,13 +151,17 @@ test.describe('Connect modal (Shore/AgentSquid.AI + Tailscale)', () => {
   test('over Tailscale, Shore endpoints are loopback-only: AgentSquid tab shows host-only note, Tailscale tab stays clean', async ({ page }) => {
     await mockApp(page);
     let beginCalls = 0;
-    await page.route('**/remote', r => r.fulfill({ json: { url: 'https://example.ts.net/' } }));
+    await page.route('**/remote', r => r.fulfill({ json: r.request().method() === 'POST'
+      ? { pair_url: 'https://example.ts.net/instance/pair#code=test', expires_in: 300 }
+      : { url: 'https://example.ts.net/' },
+    }));
     await page.route('**/shore/devices', r => r.fulfill({ status: 403, json: { error: 'loopback_required' } }));
     await page.route('**/shore/pairing/begin', r => { beginCalls += 1; r.fulfill({ status: 403, json: { error: 'loopback_required' } }); });
     await page.goto('/');
 
     await typeCommand(page, '/remote');
     await expect(page.locator('.connect-tab.active')).toHaveText('Tailscale');
+    await page.getByRole('button', { name: 'Generate pairing QR' }).click();
     await expect(page.locator('#connect-tailscale-panel .connect-qr img')).toBeVisible();
     await expect(page.locator('#connect-tailscale-panel')).not.toContainText('AgentSquid.AI');
     await expect(page.locator('#connect-shore-host-only')).toBeHidden();

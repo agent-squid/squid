@@ -16,6 +16,7 @@ const contentTypes = {
 test('offline cold launch runs Squid and reconnects without losing the draft', async ({ page }) => {
   let hostUnavailable = false;
   let mismatchedShell = false;
+  let sessionExpired = false;
   let recoveryChecks = 0;
 
   // Fail requests at the origin so the page and the service worker see the
@@ -25,6 +26,15 @@ test('offline cold launch runs Squid and reconnects without losing the draft', a
     // Keep worker script revalidation separate from the page and API outage.
     if (hostUnavailable && pathname !== '/sw.js') {
       response.writeHead(503, { 'Cache-Control': 'no-store' }).end();
+      return;
+    }
+    if (sessionExpired && pathname === '/config/features') {
+      response.writeHead(401, { 'Cache-Control': 'no-store' }).end();
+      return;
+    }
+    if (pathname === '/instance/pair') {
+      response.writeHead(200, { 'Content-Type': 'text/html' });
+      response.end('<h1>Pair Squid browser</h1>');
       return;
     }
     if (pathname === '/' && mismatchedShell) {
@@ -108,6 +118,12 @@ test('offline cold launch runs Squid and reconnects without losing the draft', a
     await expect(status).toContainText('Squid reachable');
     await expect(banner).toBeHidden();
     await expect(input).toHaveValue('offline draft');
+
+    sessionExpired = true;
+    // An installed app can be resumed with its old dashboard still open.
+    await page.evaluate(() => window.dispatchEvent(new Event('pageshow')));
+    await expect(page).toHaveURL(origin + '/instance/pair');
+    await expect(page.getByRole('heading', { name: 'Pair Squid browser' })).toBeVisible();
   } finally {
     const closed = new Promise(done => server.close(done));
     server.closeAllConnections();

@@ -33,3 +33,11 @@ def _no_real_shore_host_connection(monkeypatch):
 def _isolated_watch_control_file(tmp_path, monkeypatch):
     monkeypatch.setattr('agent.watch_auth.control_token_file',
                         lambda: tmp_path / 'watch-control.token')
+
+
+@pytest.fixture(autouse=True)
+def _isolated_instance_credentials(tmp_path, monkeypatch):
+    from agent import instance_auth
+
+    credentials = instance_auth.InstanceCredentials(tmp_path / "instance-auth.sqlite3")
+    monkeypatch.setattr(instance_auth, "instance_credentials", lambda: credentials)

@@ -12,9 +12,9 @@ def control_token_file():
     return Path.home() / '.squid' / 'watch-control.token'
 
 
-def file_token(*, create=False):
+def file_token(*, create=False, path=None):
     """Read an owner-only regular file; only host startup provisions it."""
-    path = control_token_file()
+    path = control_token_file() if path is None else path
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:

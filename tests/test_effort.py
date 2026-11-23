@@ -1,5 +1,5 @@
 import pytest
-from fastapi.testclient import TestClient
+from tests.browser_client import PairedBrowserClient
 from agent import effort, harnesses, server, stats_db
 
 
@@ -26,7 +26,7 @@ def test_reject_invalid_config(config):
 def test_agent_effort_round_trip_and_validation(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "effort.db")
     stats_db.init_db()
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     body = {"name": "effort-test", "harness": "codex", "provider": "openai", "effort": "high"}
     assert client.post("/config/agents", json=body).status_code == 200
     assert stats_db.get_agent("effort-test")["effort"] == "high"

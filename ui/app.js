@@ -1,8 +1,18 @@
 let shoreEnabled = false;
-const featureFlags = fetch('/config/features', { cache: 'no-store' })
-  .then(res => res.ok ? res.json() : {})
-  .then(flags => { shoreEnabled = flags.shore === true; })
-  .catch(() => {});
+let instanceAccessCheck = null;
+function checkInstanceAccess() {
+  if (!instanceAccessCheck) {
+    instanceAccessCheck = fetch('/config/features', {
+      cache: 'no-store', signal: AbortSignal.timeout(2000),
+    }).then(response => {
+      if (response.status === 401) location.replace('/instance/pair');
+      return response.ok ? response.json() : {};
+    }).catch(() => ({})).finally(() => { instanceAccessCheck = null; });
+  }
+  return instanceAccessCheck;
+}
+const featureFlags = checkInstanceAccess()
+  .then(flags => { shoreEnabled = flags.shore === true; });
 
 
 const messages     = document.getElementById('messages');
@@ -987,12 +997,12 @@ async function openConnectModal(preferredTab) {
     unavailablePanel = neither;
   }
 
-  const copyRow = url => {
+  const copyRow = (url, displayUrl = url) => {
     const row = document.createElement('div');
     row.className = 'connect-link-row';
     const urlEl = document.createElement('div');
     urlEl.className = 'connect-link-url';
-    urlEl.textContent = url.length > 48 ? `${url.slice(0, 48)}…` : url;
+    urlEl.textContent = displayUrl.length > 48 ? `${displayUrl.slice(0, 48)}…` : displayUrl;
     const copyBtn = document.createElement('button');
     copyBtn.type = 'button';
     copyBtn.className = 'btn-ghost connect-copy-btn';
@@ -1023,14 +1033,46 @@ async function openConnectModal(preferredTab) {
   const tailscalePanel = document.createElement('div');
   tailscalePanel.id = 'connect-tailscale-panel';
   if (tailscaleUrl) {
-    const qrDiv = document.createElement('div');
-    qrDiv.className = 'connect-qr';
-    tailscalePanel.appendChild(qrDiv);
-    tailscalePanel.appendChild(copyRow(tailscaleUrl));
+    const offer = document.createElement('div');
+    const status = document.createElement('div');
+    status.setAttribute('role', 'status');
+    const generate = document.createElement('button');
+    generate.type = 'button';
+    generate.className = 'btn-ghost';
+    generate.textContent = 'Generate pairing QR';
+    let expiresAt = null;
+    generate.addEventListener('click', async () => {
+      generate.disabled = true;
+      try {
+        const res = await fetch('/remote', { method: 'POST' });
+        if (res.status === 401) {
+          status.textContent = 'Pair this browser first. Run agentsquid pair-browser on the host and open the link it prints.';
+          return;
+        }
+        if (!res.ok) throw new Error('pairing_failed');
+        const { pair_url, expires_in } = await res.json();
+        const qrDiv = document.createElement('div');
+        qrDiv.className = 'connect-qr';
+        offer.replaceChildren(qrDiv, copyRow(pair_url, tailscaleUrl));
+        new QRCode(qrDiv, { text: pair_url, width: 220, height: 220,
+                            colorDark: '#0f0f13', colorLight: '#f5f0e8',
+                            correctLevel: QRCode.CorrectLevel.L });
+        const expiry = Date.now() + expires_in * 1000;
+        expiresAt = expiry;
+        status.textContent = 'Scan once within five minutes.';
+        setTimeout(() => {
+          if (expiresAt !== expiry || !offer.isConnected) return;
+          offer.replaceChildren();
+          status.textContent = 'Pairing link expired.';
+        }, expires_in * 1000);
+      } catch {
+        status.textContent = 'Could not generate a pairing link. Try again.';
+      } finally {
+        generate.disabled = false;
+      }
+    });
+    tailscalePanel.append(offer, status, generate);
     box.appendChild(tailscalePanel);
-    // Render QR after insertion so the div has dimensions.
-    new QRCode(qrDiv, { text: tailscaleUrl, width: 220, height: 220,
-                         colorDark: '#0f0f13', colorLight: '#f5f0e8' });
   }
 
   const agentsquidPanel = document.createElement('div');
@@ -5620,10 +5662,8 @@ agentsAuthPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
 authPanelUnlockBtn.addEventListener('click', () => {
   // Consented, not automatic: the user must click this and then type their
   // own macOS keychain password at the prompt. On success, re-run the
-  // original cursor login that surfaced the locked-keychain error; on
-  // failure (or a non-loopback client refused by the server's
-  // unlock_requires_local gate), the failure/refusal is left on screen by
-  // openAuthPanel's existing error handling — no extra handling needed here.
+  // original Cursor login that surfaced the locked-keychain error.
+  // openAuthPanel displays any unlock failure.
   const originalHarness = _authSession?.harness;
   const originalRetry = _authSession?.onSuccessRetry;
   if (!originalHarness) return;
@@ -21303,6 +21343,7 @@ document.querySelectorAll('.creds-bookmarklet').forEach(a => {
 // state only if the user was already reading at the bottom.
 let _messagesAtBottomBeforeHide = true;
 function recoverForegroundState() {
+  if (!document.hidden) void checkInstanceAccess();
   void checkForSquidUpdate(_squidVersion);
   updateActiveQuotaGauge().then(() => {
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
@@ -21412,6 +21453,7 @@ function connectionMessage(state, text) {
   connectionBanner.dataset.state = state;
   connectionStatus.textContent = text + (connectionLastSync && currentView === 'chat' ? ` · last synced ${new Date(connectionLastSync).toLocaleTimeString()}` : '');
   if (state === 'lost') {
+    if (!document.hidden) void checkInstanceAccess();
     connectionHadLoss = true;
     clearTimeout(connectionSnackbarTimer);
     connectionSnackbar.hidden = true;

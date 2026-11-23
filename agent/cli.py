@@ -3,6 +3,9 @@ import sys
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'pair-browser':
+        from .instance_auth import pair_browser_cli
+        return pair_browser_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == 'search':
         from .history_cli import main as search_main
         raise SystemExit(search_main(sys.argv[2:]))

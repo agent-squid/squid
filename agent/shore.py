@@ -481,11 +481,20 @@ def pair(argv: list[str], base_url: str, *, poll_seconds: float = 2.0) -> int:
                         help="review pairing requests started from a browser instead of showing a QR code")
     args = parser.parse_args(argv)
     try:
-        with httpx.Client(base_url=base_url, timeout=15.0) as client:
+        from ipaddress import IPv4Address
+
+        from .instance_auth import host_token
+
+        url = httpx.URL(base_url)
+        if not IPv4Address(url.host).is_loopback:
+            raise ValueError("Shore pairing must use the local Squid address")
+        token = host_token(create=True)
+        with httpx.Client(base_url=base_url, timeout=15.0, trust_env=False,
+                          headers={"Authorization": f"Bearer {token}"}) as client:
             return _approve_pairing_requests(client) if args.requests else _pair_with_qr(client, poll_seconds)
     except KeyboardInterrupt:
         print(file=sys.stderr)
         return 130
-    except (KeyError, TypeError, ValueError, RuntimeError, httpx.HTTPError) as exc:
+    except (KeyError, TypeError, ValueError, RuntimeError, OSError, httpx.HTTPError) as exc:
         print(f"ERROR: Shore pairing failed: {exc}", file=sys.stderr)
         return 1

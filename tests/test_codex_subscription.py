@@ -7,7 +7,7 @@ import threading
 
 import pytest
 import yaml
-from fastapi.testclient import TestClient
+from tests.browser_client import PairedBrowserClient
 
 from agent import auth_sessions, codex_subscription as subscription
 from agent import providers, runners, server, stats_db
@@ -176,7 +176,7 @@ def test_recorded_store_survives_provider_removal_and_rejects_quota(isolated):
     msg_id = stats_db.insert_assistant_message("test", "personal", user_msg)
     stats_db.record_codex_provider_home(msg_id, str(home))
     providers.PROVIDERS.pop("cope")
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     response = client.get("/session-log", params={"agent": "personal", "session_id": "example-id"})
     assert response.json()["path"] == str(log)
     snapshots = {"before": 1, "after": 2}
@@ -208,7 +208,7 @@ providers:
     providers.reload_providers()
     stats_db.upsert_agent("personal", "codex", "cope", None, None)
     stats_db.set_agent_home_mode("personal", "blank_home")
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     updated = content.replace("  cope:\n    auth: {type: subscription}",
                               "  cope:\n    auth: {type: subscription, dedicated_login: true}")
     url = "/config/yaml"
@@ -537,7 +537,7 @@ def test_claude_partial_log_uses_recorded_provider_after_agent_removal(isolated)
     assistant = stats_db.insert_assistant_message("test", "personal", user)
     stats_db.record_codex_provider_home(assistant, str(home), "account", "claudecode")
     stats_db.attach_assistant_session(assistant, "claude-fixture")
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     response = client.get("/session-log", params={"agent": "personal", "session_id": "claude-fixture"})
     assert response.json()["path"] == str(log)
     assert client.post(f"/chat/{assistant}/quota-delta", json={"before": 1, "after": 2}).status_code == 409
@@ -675,7 +675,7 @@ def test_claude_unverified_metadata_leaves_login_available(isolated, monkeypatch
         raise subscription.ClaudeIdentityUnavailable("Missing account metadata")
 
     monkeypatch.setattr(subscription, "_claude_account", unidentified)
-    info = TestClient(server.app).get("/health").json()["providers"]["clape"]
+    info = PairedBrowserClient(server.app).get("/health").json()["providers"]["clape"]
     assert info["subscription_needs_verification"] is True
     assert not info.get("codex_home_unavailable")
 
@@ -691,7 +691,7 @@ def test_health_keeps_provider_snapshot_during_reload(isolated, monkeypatch):
         return subscription.CLAUDE_UNVERIFIED
 
     monkeypatch.setattr(subscription, "account_identity", account_during_reload)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["providers"]["clape"]["subscription_fresh_only"]

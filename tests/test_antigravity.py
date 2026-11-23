@@ -368,14 +368,14 @@ def test_capture_write_failure_does_not_fail_run(tmp_path, monkeypatch):
 
 
 def test_agy_session_log_endpoint_and_file_read(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
+    from tests.browser_client import PairedBrowserClient
     from agent import server
     from agent.agy_logs import Capture
     monkeypatch.setenv('SQUID_LOG_DIR', str(tmp_path))
     stats_db.upsert_agent('agy-log-review', 'antigravity', 'antigravity', None, None)
     capture = Capture('agy-log-review', 'session-review', 'submitted prompt', 1)
     capture.record(json.dumps({'event': 'init', 'conversation_id': 'session-review'}))
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     response = client.get('/session-log', params={'agent': 'agy-log-review', 'session_id': 'session-review'})
     assert response.status_code == 200
     body = response.json()

@@ -19,7 +19,7 @@ import sqlite3
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
-from fastapi.testclient import TestClient
+from tests.browser_client import PairedBrowserClient
 
 from agent import server, stats_db
 from agent.shore_crypto import ReplayStore, ShoreProtocolError, canonical
@@ -96,7 +96,7 @@ def test_transport_parity_subscribe_snapshot_events_and_ack(tmp_path, monkeypatc
 
     _channel, _connection, shore_send, shore_push = _shore_setup(tmp_path)
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         subscribed_direct = _direct_hello_and_subscribe(ws)
         snapshot_direct = ws.receive_json()
         assert snapshot_direct["type"] == "snapshot"
@@ -135,7 +135,7 @@ def test_transport_parity_replay_gap_rollover_chooses_snapshot_mode_on_both(tmp_
 
     _channel, _connection, shore_send, _shore_push = _shore_setup(tmp_path)
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         _direct_hello_and_subscribe(ws, cursor=1)
         catchup_direct = ws.receive_json()
 
@@ -181,7 +181,7 @@ def test_shore_capability_denial_is_stricter_than_direct_path_by_design(tmp_path
     assert dispatched == []
     assert stats_db.get_message(msg_id)["status"] != "cancelled"
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         _direct_hello_and_subscribe(ws)
         ws.receive_json()  # snapshot
         ws.send_json({

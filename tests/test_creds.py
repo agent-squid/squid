@@ -46,7 +46,7 @@ def test_codex_browser_import_replaces_account_with_token(tmp_path, monkeypatch)
 
 def test_claude_meter_requires_confirmation_of_matching_account(tmp_path, monkeypatch):
     from curl_cffi import requests
-    from fastapi.testclient import TestClient
+    from tests.browser_client import PairedBrowserClient
 
     from agent import server
 
@@ -89,7 +89,7 @@ def test_claude_meter_requires_confirmation_of_matching_account(tmp_path, monkey
     monkeypatch.setattr(requests, "AsyncSession", ClaudeSession)
     monkeypatch.setattr(server, "_claude_meter_preview", None)
     creds.save("work-org", "work-session", "work@example.com")
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     body = {"claude_org_id": "work-org", "claude_session_key": "personal-session"}
 
     legacy = client.post("/config/creds", json=body)
@@ -152,11 +152,11 @@ def test_claude_browser_profiles_keep_chrome_channels_distinct(tmp_path, monkeyp
 
 
 def test_claude_meter_endpoints_require_same_origin():
-    from fastapi.testclient import TestClient
+    from tests.browser_client import PairedBrowserClient
 
     from agent import server
 
-    client = TestClient(server.app, base_url="http://localhost", client=("127.0.0.1", 40000))
+    client = PairedBrowserClient(server.app, base_url="http://localhost", client=("127.0.0.1", 40000))
     headers = {"Origin": "https://other.example"}
     assert client.get("/config/creds/profiles", headers=headers).status_code == 403
     assert client.get("/quota/provider/anthropic_pers/account", headers=headers).status_code == 403
@@ -170,7 +170,7 @@ def test_claude_meter_endpoints_require_same_origin():
     for path, body in requests.items():
         response = client.post(path, headers=headers, json=body)
         assert response.status_code == 403
-        assert response.json()["error"] == "Cross-origin Claude meter requests are not allowed."
+        assert response.json()["error"] == "origin_not_allowed"
 
 
 

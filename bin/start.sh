@@ -55,17 +55,67 @@ LOG_FILE="$SQUID_HOME/logs/server.log"
 # (e.g. import errors) — truncated on every start, never accumulates.
 BOOT_LOG="$SQUID_HOME/logs/boot.log"
 
+print_pairing_help() {
+  echo "If your browser asks to pair, run this on the Squid host:"
+  printf '  (cd %q && %q -m agent.server pair-browser)\n' "$ROOT" "$VENV/bin/python"
+  echo "Open the printed link within 5 minutes. Use /remote in the paired browser to add a Tailscale device."
+}
+
+active_process_count() (
+  cd "$ROOT"
+  "$VENV/bin/python" - "$PORT" <<'PYTHON'
+import sys
+
+import httpx
+
+from agent.instance_auth import host_token
+
+try:
+    port = int(sys.argv[1])
+    token = host_token(create=True)
+    with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=3, trust_env=False) as client:
+        result = client.get("/instance/active-process-count",
+                            headers={"Authorization": f"Bearer {token}"})
+        if result.status_code == 404:
+            # The previous server version exposes only this endpoint.
+            legacy = client.get("/processes")
+            legacy.raise_for_status()
+            processes = legacy.json()
+            if not isinstance(processes, list):
+                raise ValueError("unexpected process list")
+            count = len(processes)
+        else:
+            result.raise_for_status()
+            count = result.json()["count"]
+        if type(count) is not int or count < 0:
+            raise ValueError("invalid process count")
+        print(count)
+except (OSError, ValueError, TypeError, KeyError, httpx.HTTPError):
+    sys.exit(1)
+PYTHON
+)
+
 FORCE=0
 for arg in "$@"; do [[ "$arg" == "--force" || "$arg" == "--restart" ]] && FORCE=1; done
 
 if [[ "$FORCE" == "1" ]]; then
-  # Warn if there are active prompts running
-  ACTIVE_COUNT=$(curl -sf "http://127.0.0.1:${PORT}/processes" 2>/dev/null \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d))" 2>/dev/null || echo "0")
-  if [[ "$ACTIVE_COUNT" -gt 0 ]]; then
-    echo "⚠ warning: $ACTIVE_COUNT prompt(s) still running."
-    read -r -p "Restart anyway and kill them? [y/N] " CONFIRM
-    [[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo "aborted."; exit 1; }
+  # An unavailable count can never be treated as zero for a running instance.
+  if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null ||
+     lsof -ti tcp:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+    CONFIRM_RESTART=0
+    if ACTIVE_COUNT=$(active_process_count); then
+      if [[ "$ACTIVE_COUNT" -gt 0 ]]; then
+        echo "⚠ warning: $ACTIVE_COUNT prompt(s) still running."
+        CONFIRM_RESTART=1
+      fi
+    else
+      echo "⚠ warning: Could not determine whether prompts are running."
+      CONFIRM_RESTART=1
+    fi
+    if [[ "$CONFIRM_RESTART" == "1" ]]; then
+      read -r -p "Restart and interrupt any active prompts? [y/N] " CONFIRM || CONFIRM=
+      [[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo "aborted."; exit 1; }
+    fi
   fi
   # Kill by PID file
   if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
@@ -74,7 +124,7 @@ if [[ "$FORCE" == "1" ]]; then
     sleep 1
   fi
   # Also kill anything still holding the port (handles stale PID file)
-  OLD_PID=$(lsof -ti tcp:"${PORT}" 2>/dev/null || true)
+  OLD_PID=$(lsof -ti tcp:"${PORT}" -sTCP:LISTEN 2>/dev/null || true)
   if [[ -n "$OLD_PID" ]]; then
     echo "killing process on port ${PORT} (PID $OLD_PID)..."
     kill $OLD_PID 2>/dev/null || true
@@ -82,6 +132,7 @@ if [[ "$FORCE" == "1" ]]; then
   fi
 elif [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   echo "squid is already running (PID $(cat "$PID_FILE")). Use --restart to restart."
+  print_pairing_help
   exit 0
 fi
 
@@ -99,6 +150,7 @@ for i in {1..20}; do
   if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
     echo ""
     echo "squid is up → http://127.0.0.1:${PORT}  (log: $LOG_FILE)"
+    print_pairing_help
     exit 0
   fi
   echo -n "."

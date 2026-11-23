@@ -181,36 +181,39 @@ agentsquid         # run in the foreground for debugging
 ```text
 agentsquid is up -> http://127.0.0.1:8000
   https://<machine-name>.<tailnet>.ts.net/
-  http://<tailscale-ip>:8000/
 ```
 
-Two different URLs work, for two different reasons:
+For remote browsing, use the full HTTPS hostname on the default port
+(443). Enable [MagicDNS](https://tailscale.com/kb/1081/magicdns) on your
+tailnet so the hostname resolves. The Tailscale certificate covers the
+full hostname. Squid may also print a raw Tailscale HTTP URL from its
+legacy TCP forward. Browser pairing and dashboard access require HTTPS
+or a localhost URL through an SSH tunnel.
 
-- **`https://<machine-name>.<tailnet>.ts.net/`** — the default HTTPS port
-  (443), so no port in the URL. This needs [MagicDNS](https://tailscale.com/kb/1081/magicdns)
-  enabled on your tailnet to resolve; squid checks this at startup and warns
-  in the printed URL if MagicDNS looks disabled. The full domain is required
-  here — the short hostname alone (`https://<machine-name>/`) won't work
-  because Tailscale's TLS cert is scoped to `*.ts.net` and browsers enforce
-  an exact match.
-- **`http://<tailscale-ip>:<port>/`** — reachable by IP even without
-  MagicDNS. Under the hood this is a `tailscale serve --tcp=<port>` raw TCP
-  forward, not `--http`: `tailscale serve --http` routes by Host header even
-  for plain HTTP, so hitting the IP directly (`Host: <ip>:<port>`) matches no
-  rule and gets Tailscale's own 404 before squid ever sees the request.
-  `--tcp` forwards at the TCP layer with no Host matching, so it works by IP.
-  `https://<tailscale-ip>:<port>/` still won't work — Tailscale's cert only
-  covers the `*.ts.net` domain, not the IP, so TLS validation fails
-  regardless of which rule serves it. The traffic is still
-  WireGuard-encrypted at the tailnet layer either way — this isn't sending
-  anything in the clear over the internet.
+### Pair a browser
 
-Type `/remote` in the chat to get a QR code with the HTTPS domain URL —
-point your phone camera at it to open squid in one tap:
+1. On the Squid host, run `agentsquid pair-browser` as the same OS user who
+   runs Squid. Open the printed link in your browser within five minutes.
+   Each link works once. The resulting browser session lasts up to 30 days.
+2. To pair a phone or tablet, connect it to your tailnet. In the paired
+   browser, type `/remote`, select **Tailscale**, and click **Generate pairing
+   QR**. Scan the QR and open the resulting HTTPS link on the new device.
+   You can also use **Copy link**. Treat the link as a credential until it
+   is used or expires.
 
-```text
-https://<machine-name>.<tailnet>.ts.net/
+If all browser sessions expire while you are away, SSH in as the Squid OS
+user and forward the Squid port. For example, if Squid listens on port 7010:
+
+```sh
+ssh -L 127.0.0.1:7010:127.0.0.1:7010 user@host
+# In the SSH session:
+agentsquid pair-browser
 ```
+
+Keep SSH connected while opening the printed localhost link on your
+computer. The new session belongs to that localhost URL. Use `/remote`
+from that session to pair a browser at the Tailscale HTTPS URL. Substitute
+your configured Squid port in both positions if it differs.
 
 ### Reaching other local services over the tailnet too
 

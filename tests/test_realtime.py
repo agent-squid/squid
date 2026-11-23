@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from tests.browser_client import PairedBrowserClient
 from starlette.websockets import WebSocketDisconnect
 
 from agent import auth_sessions, server, stats_db
@@ -176,7 +176,7 @@ def test_process_and_queue_publication_failure_does_not_escape(monkeypatch, capl
 def test_server_startup_publishes_authoritative_process_and_queue_state(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
 
-    with TestClient(server.app):
+    with PairedBrowserClient(server.app):
         pass
 
     events = stats_db.get_realtime_events(0, [{"lifecycle": "global"}])
@@ -204,7 +204,7 @@ def test_websocket_subscribe_snapshot_live_event_and_idempotent_cancel(tmp_path,
     msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
     monkeypatch.setattr(server, "kill_proc_by_msg_id", lambda _msg_id: 0)
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         hello = ws.receive_json()
         assert hello["type"] == "hello"
         ws.send_json({
@@ -249,7 +249,7 @@ def test_websocket_dispatches_worktree_auto_resolve_command(tmp_path, monkeypatc
 
     monkeypatch.setattr(server, "_realtime_worktree_auto_resolve", fake_auto_resolve)
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({
             "v": 1, "type": "subscribe",
@@ -272,7 +272,7 @@ def test_websocket_dispatches_worktree_auto_resolve_command(tmp_path, monkeypatc
 
 def test_websocket_rejects_protocol_version_skew(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         hello = ws.receive_json()
         assert hello["payload"]["supported_versions"] == [1]
         ws.send_json({"v": 99, "type": "ping", "payload": {}})
@@ -284,7 +284,7 @@ def test_websocket_rejects_protocol_version_skew(tmp_path, monkeypatch):
 
 def test_websocket_rejects_unauthorized_scope(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({
             "v": 1, "type": "subscribe",
@@ -319,7 +319,7 @@ def test_event_racing_snapshot_is_delivered_immediately(tmp_path, monkeypatch):
         return snapshot
 
     monkeypatch.setattr(server, "_realtime_snapshot", snapshot_then_publish)
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({
             "v": 1, "type": "subscribe",
@@ -445,7 +445,7 @@ def test_pruned_cursor_rolls_over_to_snapshot(tmp_path, monkeypatch):
     with sqlite3.connect(tmp_path / "squid.db") as conn:
         conn.execute("DELETE FROM realtime_events WHERE event_id < 4")
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({
             "v": 1, "type": "subscribe",
@@ -466,7 +466,7 @@ def test_internal_realtime_log_gap_rolls_over_to_snapshot(tmp_path, monkeypatch)
     with sqlite3.connect(tmp_path / "squid.db") as conn:
         conn.execute("DELETE FROM realtime_events WHERE event_id=3")
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({
             "v": 1, "type": "subscribe",
@@ -487,7 +487,7 @@ def test_replay_rolls_over_when_serialized_events_exceed_byte_limit(tmp_path, mo
         "message.changed", "squid", "codex", {"content": "x" * 100},
     )
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({
             "v": 1, "type": "subscribe",
@@ -529,7 +529,7 @@ def test_future_realtime_cursor_rolls_over():
 
 def test_future_cursor_snapshot_explicitly_resets_client_cursor(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({
             "v": 1, "type": "subscribe",
@@ -562,7 +562,7 @@ def test_unrelated_events_do_not_force_scoped_replay_rollover(tmp_path, monkeypa
         "message.changed", "squid", "codex", {"id": "expected"},
     )
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({
             "v": 1, "type": "subscribe",
@@ -593,7 +593,7 @@ def test_realtime_replay_is_bounded_by_its_atomic_watermark(tmp_path, monkeypatc
 
 def test_mutation_requires_client_identity(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({
             "v": 1, "type": "chat.cancel", "request_id": "cancel-no-client",
@@ -643,7 +643,7 @@ def test_auth_start_streams_live_output_and_done(tmp_path, monkeypatch):
         session.mark_exited(0)
     monkeypatch.setattr(auth_sessions, "_finalize", fake_finalize)
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         _subscribe_auth(ws)
         ws.send_json({
             "v": 1, "type": "auth.start", "request_id": "auth-start-1",
@@ -684,7 +684,7 @@ def test_auth_done_reports_failure_when_session_already_reaped(tmp_path, monkeyp
         auth_sessions._sessions.pop(session.id, None)
     monkeypatch.setattr(auth_sessions, "_finalize", reap_then_finalize)
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         _subscribe_auth(ws)
         ws.send_json({
             "v": 1, "type": "auth.start", "request_id": "auth-start-1",
@@ -713,7 +713,7 @@ def test_auth_start_resend_replays_ring_without_second_session(tmp_path, monkeyp
     monkeypatch.setattr(auth_sessions, "_deregister_proc", lambda *a, **k: None)
     monkeypatch.setattr(auth_sessions, "_signal_process_group", lambda *a, **k: None)
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         _subscribe_auth(ws)
         payload = {"harness": "claudecode", "mode": "login", "cols": 80, "rows": 24}
         ws.send_json({"v": 1, "type": "auth.start", "request_id": "auth-start-1", "payload": payload})
@@ -755,7 +755,7 @@ def test_auth_input_resize_cancel_fire_and_forget(tmp_path, monkeypatch):
     monkeypatch.setattr(auth_sessions, "resize", lambda session, cols, rows: resizes.append((session.id, cols, rows)))
     monkeypatch.setattr(auth_sessions, "cancel_session", _fake_cancel(cancels))
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         _subscribe_auth(ws)
         ws.send_json({
             "v": 1, "type": "auth.start", "request_id": "auth-start-1",
@@ -1019,138 +1019,52 @@ def test_resize_touches_idle_timer():
         os.close(master_fd)
 
 
-def test_keychain_unlock_allowed_gate(monkeypatch):
-    # Direct unit coverage of the gate itself (see the fail-closed rationale
-    # in its docstring): a raw loopback peer with no forwarding markers is
-    # the only thing that passes. Presence of a forwarding header must deny
-    # regardless of its value, since X-Forwarded-For is attacker-controlled
-    # input a remote client can set to anything, including "127.0.0.1".
-    monkeypatch.setattr(server, "ALLOW_REMOTE_KEYCHAIN_UNLOCK", False)
-    allowed = server._keychain_unlock_allowed
-
-    assert allowed({}, "127.0.0.1") is True
-    assert allowed({}, "::1") is True
-    assert allowed({}, "testclient") is False  # not a loopback address at all
-    assert allowed({}, None) is False
-    # The spoof this gate exists to stop: a remote client simply sets XFF to
-    # a loopback-looking value itself.
-    assert allowed({"x-forwarded-for": "127.0.0.1"}, "127.0.0.1") is False
-    assert allowed({"x-forwarded-for": "100.101.102.103"}, "127.0.0.1") is False
-    assert allowed({"tailscale-user-login": "someone@example.com"}, "127.0.0.1") is False
-    # Fail-closed must hold for every common forwarding marker, not just XFF —
-    # a proxy that sets only X-Real-IP or RFC 7239 Forwarded is still remote.
-    assert allowed({"x-real-ip": "127.0.0.1"}, "127.0.0.1") is False
-    assert allowed({"forwarded": "for=127.0.0.1"}, "127.0.0.1") is False
-
-    monkeypatch.setattr(server, "ALLOW_REMOTE_KEYCHAIN_UNLOCK", True)
-    assert allowed({"x-forwarded-for": "100.101.102.103"}, "127.0.0.1") is True
-
-
-def test_auth_start_unlock_loopback_gate(tmp_path, monkeypatch):
+def test_remote_keychain_unlock_is_available_and_bound_to_its_browser(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     monkeypatch.setattr(auth_sessions.sys, "platform", "darwin")
-    monkeypatch.setattr(server, "ALLOW_REMOTE_KEYCHAIN_UNLOCK", False)
-    # A real PTY pair, not a pipe — write_input() writes to the master fd
-    # (simulating typing the keychain password at the prompt), which a
-    # one-directional pipe can't support.
     master_fd, slave_fd = os.openpty()
-    spawn_calls = {"n": 0}
 
-    def counting_spawn(argv, env, cols, rows):
-        spawn_calls["n"] += 1
+    def spawn(argv, env, cols, rows):
         assert argv == ["security", "unlock-keychain"]
         return 99999, master_fd
-    monkeypatch.setattr(auth_sessions, "_spawn_pty", counting_spawn)
+
+    monkeypatch.setattr(auth_sessions, "_spawn_pty", spawn)
     monkeypatch.setattr(auth_sessions, "_register_proc", lambda *a, **k: None)
     monkeypatch.setattr(auth_sessions, "_deregister_proc", lambda *a, **k: None)
     monkeypatch.setattr(auth_sessions, "_signal_process_group", lambda *a, **k: None)
-
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
-        _subscribe_auth(ws)
-        # TestClient's own peer address ("testclient") isn't a loopback IP and
-        # no X-Forwarded-For is set, so the default-deny path is exercised
-        # without needing to fabricate a real remote address.
-        ws.send_json({
-            "v": 1, "type": "auth.start", "request_id": "unlock-remote",
-            "payload": {"harness": "keychain", "mode": "unlock", "cols": 80, "rows": 24},
-        })
-        refused = _receive_command_result(ws)
-        assert refused == {
-            "ok": False, "error": "unlock_requires_local",
-            "detail": "Keychain unlock is only available from a loopback client "
-                      "unless auth.allow_remote_keychain_unlock is enabled.",
-        }
-        assert spawn_calls["n"] == 0
-
-    with TestClient(server.app).websocket_connect(
-        "/ws/v1", headers={"x-forwarded-for": "127.0.0.1"},
-    ) as ws:
-        _subscribe_auth(ws)
-        # The spoof this gate exists to stop: a remote (tailnet) client can
-        # set X-Forwarded-For to a loopback-looking value itself. The raw TCP
-        # peer being loopback proves nothing either — tailscale serve
-        # reverse-proxies to this server over loopback, so every tailnet
-        # request also arrives with a 127.0.0.1 peer. The mere presence of
-        # the header must deny, regardless of its value.
-        ws.send_json({
-            "v": 1, "type": "auth.start", "request_id": "unlock-spoofed",
-            "payload": {"harness": "keychain", "mode": "unlock", "cols": 80, "rows": 24},
-        })
-        refused_spoof = _receive_command_result(ws)
-        assert refused_spoof["ok"] is False
-        assert refused_spoof["error"] == "unlock_requires_local"
-        assert spawn_calls["n"] == 0
-
-    # The only case that's actually allowed: a direct connection (no
-    # forwarding headers at all) whose raw TCP peer is genuinely loopback —
-    # simulated here via TestClient's own `client` address, since a proxy
-    # never sits in front of a truly direct connection to add headers.
-    with TestClient(server.app, client=("127.0.0.1", 54321)).websocket_connect("/ws/v1") as ws:
-        _subscribe_auth(ws)
-        ws.send_json({
-            "v": 1, "type": "auth.start", "request_id": "unlock-local",
-            "payload": {"harness": "keychain", "mode": "unlock", "cols": 80, "rows": 24},
-        })
-        allowed = _receive_command_result(ws)
-        assert allowed["ok"] is True
-        assert allowed["command"] == "security unlock-keychain"
-        assert spawn_calls["n"] == 1
-
-        # Same fire-and-forget guarantee as other auth input: the keychain
-        # password never gets persisted as part of a realtime_request row.
-        principal = f"local:{CLIENT_ID}"
-        ws.send_json({
-            "v": 1, "type": "auth.input", "request_id": "unlock-input-1",
-            "payload": {"session_id": allowed["session_id"], "data": "hunter2\n"},
-        })
-        assert _receive_command_result(ws) == {"ok": True}
-        assert stats_db.get_realtime_request(principal, "unlock-input-1") is None
-
-    os.close(slave_fd)
-
-
-def test_auth_start_unlock_allowed_remotely_when_opted_in(tmp_path, monkeypatch):
-    _fresh_db(tmp_path, monkeypatch)
-    monkeypatch.setattr(auth_sessions.sys, "platform", "darwin")
-    monkeypatch.setattr(server, "ALLOW_REMOTE_KEYCHAIN_UNLOCK", True)
-    read_fd, write_fd = os.pipe()
-    monkeypatch.setattr(auth_sessions, "_spawn_pty", lambda argv, env, cols, rows: (99999, read_fd))
-    monkeypatch.setattr(auth_sessions, "_register_proc", lambda *a, **k: None)
-    monkeypatch.setattr(auth_sessions, "_deregister_proc", lambda *a, **k: None)
-    monkeypatch.setattr(auth_sessions, "_signal_process_group", lambda *a, **k: None)
-
-    with TestClient(server.app).websocket_connect(
-        "/ws/v1", headers={"x-forwarded-for": "100.101.102.103"},
-    ) as ws:
-        _subscribe_auth(ws)
-        ws.send_json({
-            "v": 1, "type": "auth.start", "request_id": "unlock-opt-in",
-            "payload": {"harness": "keychain", "mode": "unlock", "cols": 80, "rows": 24},
-        })
-        result = _receive_command_result(ws)
-        assert result["ok"] is True
-
-    os.close(write_fd)
+    origin = "https://squid.example"
+    owner = PairedBrowserClient(server.app, base_url=origin, headers={"x-forwarded-for": "100.64.0.2"})
+    other = PairedBrowserClient(server.app, base_url=origin)
+    try:
+        with owner.websocket_connect("/ws/v1") as ws:
+            _subscribe_auth(ws)
+            ws.send_json({
+                "v": 1, "type": "auth.start", "request_id": "unlock",
+                "payload": {"harness": "keychain", "mode": "unlock", "cols": 80, "rows": 24},
+            })
+            result = _receive_command_result(ws)
+            assert result["ok"] is True
+            assert result["command"] == "security unlock-keychain"
+            path = f"/auth/session/{result['session_id']}"
+            assert owner.get(path).status_code == 200
+            assert other.get(path).status_code == 404
+            assert other.get(f"{path}/events").status_code == 404
+            assert other.post(f"{path}/input", json={"data": "test\n"}).status_code == 404
+            assert other.post(f"{path}/resize", json={"cols": 80, "rows": 24}).status_code == 404
+            assert other.post(f"{path}/cancel").json() == {"ok": False}
+            frame = {
+                "v": 1, "type": "auth.input", "request_id": "unlock-input",
+                "payload": {"session_id": result["session_id"], "data": "test\n"},
+            }
+            with other.websocket_connect("/ws/v1") as other_ws:
+                _subscribe_auth(other_ws)
+                other_ws.send_json(frame)
+                assert _receive_command_result(other_ws)["error"] == "unknown_session"
+            ws.send_json(frame)
+            assert _receive_command_result(ws) == {"ok": True}
+            assert stats_db.get_realtime_request(f"local:{CLIENT_ID}", "unlock-input") is None
+    finally:
+        os.close(slave_fd)
 
 
 def test_outbound_queue_coalesces_process_changed():
@@ -1190,7 +1104,7 @@ def test_slow_consumer_closes_with_resumable_error(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server, "_ws_sender", stalled_sender)
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         assert ws.receive_json()["type"] == "hello"
         # Each inbound ping enqueues one non-coalescible pong; the stalled
         # sender never drains, so the 5th overflows the bounded queue.
@@ -1207,7 +1121,7 @@ def test_slow_consumer_closes_with_resumable_error(tmp_path, monkeypatch):
 def test_frame_too_large_closes_connection(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     monkeypatch.setattr(server, "_REALTIME_MAX_FRAME_BYTES", 64)
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         assert ws.receive_json()["type"] == "hello"
         ws.send_text("x" * 65)
         error = ws.receive_json()
@@ -1220,7 +1134,7 @@ def test_frame_too_large_closes_connection(tmp_path, monkeypatch):
 
 def test_malformed_frames_get_invalid_frame(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         assert ws.receive_json()["type"] == "hello"
         ws.send_text("not json")
         error = ws.receive_json()
@@ -1241,7 +1155,7 @@ def test_server_initiated_heartbeat_and_dead_peer_close(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_REALTIME_HEARTBEAT_MISS_LIMIT", 2)
 
     # A peer that never sends is closed after the miss limit.
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         assert ws.receive_json()["type"] == "hello"
         assert ws.receive_json()["type"] == "ping"
         with pytest.raises(WebSocketDisconnect) as exc:
@@ -1250,7 +1164,7 @@ def test_server_initiated_heartbeat_and_dead_peer_close(tmp_path, monkeypatch):
         assert exc.value.code == 1001
 
     # A peer that answers pings stays open and keeps receiving pings.
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         assert ws.receive_json()["type"] == "hello"
         for _ in range(2):
             assert ws.receive_json()["type"] == "ping"
@@ -1260,7 +1174,7 @@ def test_server_initiated_heartbeat_and_dead_peer_close(tmp_path, monkeypatch):
 def test_ack_cursor_is_recorded_and_clamped(tmp_path, monkeypatch, caplog):
     _fresh_db(tmp_path, monkeypatch)
     with caplog.at_level(logging.DEBUG, logger="agent.server"):
-        with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
             assert ws.receive_json()["type"] == "hello"
             ws.send_json({"v": 1, "type": "ack", "payload": {"event_id": 0}})
             ws.send_json({"v": 1, "type": "ack", "payload": {"event_id": 999999}})
@@ -1283,7 +1197,7 @@ def test_subscribe_replay_under_outbound_pressure_preserves_order(tmp_path, monk
         for index in range(30)
     ]
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         assert ws.receive_json()["type"] == "hello"
         ws.send_json({
             "v": 1, "type": "subscribe",
@@ -1311,7 +1225,7 @@ def test_reconnect_replays_from_last_applied_cursor(tmp_path, monkeypatch):
 
     # Disconnect before chat metadata: snapshot at cursor 0, then drop the
     # socket before the turn's meta/text are published.
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json(subscribe)
         assert ws.receive_json()["type"] == "subscribed"
@@ -1322,7 +1236,7 @@ def test_reconnect_replays_from_last_applied_cursor(tmp_path, monkeypatch):
     stats_db.insert_run_event(msg_id, 0, "meta", None)
     stats_db.insert_run_event(msg_id, 1, "text", "partial")
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         subscribe["payload"]["cursor"] = first_cursor
         ws.send_json(subscribe)
@@ -1336,7 +1250,7 @@ def test_reconnect_replays_from_last_applied_cursor(tmp_path, monkeypatch):
     # Disconnect after chat metadata: reconnect from the last applied cursor;
     # the already-applied meta/text are not re-delivered, only the new done.
     stats_db.insert_run_event(msg_id, 2, "done", None)
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         subscribe["payload"]["cursor"] = last_cursor
         ws.send_json(subscribe)
@@ -1352,7 +1266,7 @@ def test_multiple_simultaneous_clients_receive_live_events(tmp_path, monkeypatch
     msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
     second_id = "testclient0000000000000002"
 
-    with TestClient(server.app) as client, \
+    with PairedBrowserClient(server.app) as client, \
          client.websocket_connect("/ws/v1") as first, \
          client.websocket_connect("/ws/v1") as second:
         for client_id, ws in ((CLIENT_ID, first), (second_id, second)):
@@ -1376,7 +1290,7 @@ def test_safety_poll_recovers_a_lost_notification(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     monkeypatch.setattr(server, "_REALTIME_SAFETY_POLL_SECONDS", 0.1)
 
-    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+    with PairedBrowserClient(server.app).websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({
             "v": 1, "type": "subscribe",
@@ -1419,7 +1333,7 @@ def test_auth_status_recovers_completion_without_event_stream(monkeypatch, state
     session.state = state
     session.returncode = returncode
     monkeypatch.setattr(auth_sessions, "_sessions", {session.id: session})
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     response = client.get(f"/auth/session/{session.id}")
     assert response.status_code == 200
     assert response.json() == {"state": state, "returncode": returncode}
@@ -1432,7 +1346,7 @@ def test_history_check_requires_identity_and_returns_exact_existing_ids(tmp_path
     _fresh_db(tmp_path, monkeypatch)
     user_id = stats_db.insert_user_message('squid', 'codex', 'hello')
     msg_id = stats_db.insert_assistant_message('squid', 'codex', user_id)
-    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+    with PairedBrowserClient(server.app).websocket_connect('/ws/v1') as ws:
         ws.receive_json()
         query = {'v': 1, 'type': 'history.check', 'request_id': 'history-test',
                  'payload': {'ids': [msg_id, 999999]}}
@@ -1495,7 +1409,7 @@ def test_oversized_tool_patches_are_deferred_in_realtime_history(tmp_path, monke
         {"name": "GitDiff", "diff": "", "diff_deferred": True, "files": [{"path": "app.py", "status": "M"}]},
     ]
     stats_db.update_assistant_message(msg_id, "Reply is intact", None, "done", context=json.dumps(tools))
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     with client.websocket_connect("/ws/v1") as ws:
         ws.receive_json()
         ws.send_json({"v": 1, "type": "subscribe", "payload": {
@@ -1547,7 +1461,7 @@ def test_history_check_respects_existing_row_filter_membership(tmp_path, monkeyp
     msg_id = stats_db.insert_assistant_message('squid', 'codex', user_id)
     stats_db.update_assistant_message(msg_id, 'original', None)
     stats_db.set_message_annotation(msg_id, annotation)
-    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+    with PairedBrowserClient(server.app).websocket_connect('/ws/v1') as ws:
         ws.receive_json()
         ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
             'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
@@ -1567,7 +1481,7 @@ def test_history_check_respects_existing_row_filter_membership(tmp_path, monkeyp
 
 def test_ws_health_query_requires_identity_and_reports_boot_version(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
-    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+    with PairedBrowserClient(server.app).websocket_connect('/ws/v1') as ws:
         ws.receive_json()
         query = {'v': 1, 'type': 'health.check', 'request_id': 'health-check', 'payload': {}}
         ws.send_json(query)
@@ -1593,7 +1507,7 @@ def test_ws_history_queries_require_identity_and_match_http(tmp_path, monkeypatc
     payload = {'topic': 'squid', 'limit': 5}
     if kind == 'history.around':
         payload['msg_id'] = msg_id
-    with TestClient(server.app) as client:
+    with PairedBrowserClient(server.app) as client:
         expected = client.get('/history' + ('/around' if kind.endswith('around') else ''), params=payload).json()
         with client.websocket_connect('/ws/v1') as ws:
             ws.receive_json()
@@ -1630,7 +1544,7 @@ def test_history_query_frame_sizes_complete_unicode_envelope(monkeypatch):
 @pytest.mark.parametrize("kind", ["history.page", "history.check"])
 def test_ws_history_rejects_unbounded_request_ids(tmp_path, monkeypatch, kind):
     _fresh_db(tmp_path, monkeypatch)
-    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+    with PairedBrowserClient(server.app).websocket_connect('/ws/v1') as ws:
         ws.receive_json()
         for request_id in (None, '', 123, 'x' * 129, 'x' * 131072, '\ud800'):
             ws.send_text(json.dumps({'v': 1, 'type': kind, 'request_id': request_id, 'payload': {}}))
@@ -1653,7 +1567,7 @@ def test_slow_history_queries_preserve_socket_liveness_and_admission(tmp_path, m
     monkeypatch.setattr(server, '_REALTIME_HISTORY_QUERY_LIMIT', 1)
     monkeypatch.setattr(server, '_REALTIME_HISTORY_QUERY_TIMEOUT', .1)
     try:
-        with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+        with PairedBrowserClient(server.app).websocket_connect('/ws/v1') as ws:
             ws.receive_json()
             ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
                 'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
@@ -1683,7 +1597,7 @@ def test_slow_history_queries_preserve_socket_liveness_and_admission(tmp_path, m
 def test_history_query_failure_does_not_close_socket(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     monkeypatch.setattr(server, '_realtime_history_query', AsyncMock(side_effect=RuntimeError('db unavailable')))
-    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+    with PairedBrowserClient(server.app).websocket_connect('/ws/v1') as ws:
         ws.receive_json()
         ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
             'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
@@ -1751,7 +1665,7 @@ def test_query_completion_keeps_inflight_receive(tmp_path, monkeypatch):
         return done, pending
     monkeypatch.setattr(server.asyncio, 'wait', wait_at_boundary)
     monkeypatch.setattr(server, '_realtime_history_query', AsyncMock(return_value={'ok': True, 'items': []}))
-    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+    with PairedBrowserClient(server.app).websocket_connect('/ws/v1') as ws:
         ws.receive_json()
         ws.send_json({'v': 1, 'type': 'subscribe', 'payload': {
             'client_id': CLIENT_ID, 'scopes': [{'lifecycle': 'global'}]}})
@@ -1793,7 +1707,7 @@ def test_query_completion_keeps_inflight_auth_output(tmp_path, monkeypatch):
     monkeypatch.setattr(server.asyncio, 'wait', wait_at_boundary)
     monkeypatch.setattr(server, '_handle_realtime_mutation', attach)
     monkeypatch.setattr(server, '_realtime_history_query', AsyncMock(return_value={'ok': True, 'items': []}))
-    with TestClient(server.app).websocket_connect('/ws/v1') as ws:
+    with PairedBrowserClient(server.app).websocket_connect('/ws/v1') as ws:
         _subscribe_auth(ws)
         ws.send_json({'v': 1, 'type': 'auth.start', 'request_id': 'attach', 'payload': {}})
         ws.send_json({'v': 1, 'type': 'history.page', 'request_id': 'boundary', 'payload': {}})

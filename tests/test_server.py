@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from tests.browser_client import PairedBrowserClient
 from fastapi.responses import JSONResponse
 
 from agent import creds
@@ -98,7 +98,7 @@ def test_validate_config_content_rejects_invalid_realtime_config(tmp_path, realt
 
 def test_realtime_config_endpoint_uses_effective_mode(monkeypatch):
     monkeypatch.setattr(server, "REALTIME_TRANSPORT", "sse")
-    response = TestClient(server.app).get("/config/realtime")
+    response = PairedBrowserClient(server.app).get("/config/realtime")
     assert response.json() == {"transport": "sse"}
     assert response.headers["cache-control"] == "no-store"
 
@@ -148,7 +148,7 @@ def test_annotations_api_marks_and_unmarks_bad_response(tmp_path, monkeypatch):
     msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
     stats_db.update_assistant_message(msg_id, "bad output", None)
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     res = client.post("/annotations", json={
         "msg_id": msg_id,
         "kind": "bad_response",
@@ -194,7 +194,7 @@ def test_revert_diff_reports_failure_when_patch_does_not_apply(tmp_path, monkeyp
         "diff": diff,
     }]))
 
-    res = TestClient(server.app).post(f"/chat/{msg_id}/revert", json={"repo": str(repo)})
+    res = PairedBrowserClient(server.app).post(f"/chat/{msg_id}/revert", json={"repo": str(repo)})
 
     assert res.status_code == 409
     body = res.json()
@@ -236,7 +236,7 @@ def test_revert_diff_restores_target_repo_file(tmp_path, monkeypatch):
         "diff": diff,
     }]))
 
-    res = TestClient(server.app).post(f"/chat/{msg_id}/revert", json={"repo": str(repo)})
+    res = PairedBrowserClient(server.app).post(f"/chat/{msg_id}/revert", json={"repo": str(repo)})
 
     assert res.status_code == 200
     data = res.json()
@@ -276,7 +276,7 @@ def test_patch_view_and_revert_ignore_git_display_config(tmp_path, monkeypatch, 
         assert event["diff"].startswith("diff --git a/app.txt b/app.txt\n")
     stats_db.update_assistant_message(msg_id, "done", None, "done", context=json.dumps([event]))
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     preview = client.get(f"/chat/{msg_id}/diff-file", params={"repo": str(repo), "path": "app.txt"})
     assert preview.status_code == 200
     patch = preview.json()["diff"]
@@ -320,7 +320,7 @@ def test_revert_preserves_non_utf8_file_bytes(tmp_path, monkeypatch, capture):
         event.pop("head")
     stats_db.update_assistant_message(msg_id, "done", "session-1", "done", context=json.dumps([event]))
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     preview = client.get(f"/chat/{msg_id}/diff-file", params={"repo": str(repo), "path": "app.txt"})
     assert preview.status_code == 200
     assert "caf\ufffd" in preview.json()["diff"]
@@ -365,7 +365,7 @@ def test_large_gitdiff_history_and_paged_file_view_preserve_historical_patch(tmp
     } if legacy else tracker.build_event())
     stats_db.update_assistant_message(msg_id, "done", "session-1", "done", context=json.dumps([event]))
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     history = client.get(f"/history/by-ids?ids={msg_id}")
     assert history.status_code == 200
     tool, = json.loads(history.json()["items"][0]["context"])
@@ -426,7 +426,7 @@ def test_discard_worktree_blocker_marks_conflict_row_discarded(tmp_path, monkeyp
     stats_db.mark_worktree_status("squid", "42", str(repo), "conflict")
 
     with patch("agent.runners.get_active_msg_ids", return_value=set()):
-        res = TestClient(server.app).post("/chat/42/worktree/discard", json={
+        res = PairedBrowserClient(server.app).post("/chat/42/worktree/discard", json={
             "topic": "squid",
             "repo": str(repo),
         })
@@ -454,7 +454,7 @@ def test_discard_worktree_blocker_handles_missing_registry_row(tmp_path, monkeyp
     wt = worktree_mod.ensure_worktree(repo, "squid", "43")
 
     with patch("agent.runners.get_active_msg_ids", return_value=set()):
-        res = TestClient(server.app).post("/chat/43/worktree/discard", json={
+        res = PairedBrowserClient(server.app).post("/chat/43/worktree/discard", json={
             "topic": "squid",
             "repo": str(repo),
         })
@@ -472,7 +472,7 @@ def test_discard_worktree_blocker_is_idempotent_when_already_gone(tmp_path, monk
     subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     with patch("agent.runners.get_active_msg_ids", return_value=set()):
-        res = TestClient(server.app).post("/chat/44/worktree/discard", json={
+        res = PairedBrowserClient(server.app).post("/chat/44/worktree/discard", json={
             "topic": "squid",
             "repo": str(repo),
         })
@@ -508,7 +508,7 @@ def test_retry_worktree_resolution_promotes_manual_resolution(tmp_path, monkeypa
     (integration / "app.py").write_text("resolved\n")
 
     with patch("agent.runners.get_active_msg_ids", return_value=set()):
-        res = TestClient(server.app).post("/chat/51/worktree/retry", json={
+        res = PairedBrowserClient(server.app).post("/chat/51/worktree/retry", json={
             "topic": "squid",
             "repo": str(repo),
         })
@@ -538,7 +538,7 @@ def test_retry_worktree_resolution_promotes_stale_pending_worktree(tmp_path, mon
     (wt / "app.py").write_text("stale pending\n")
 
     with patch("agent.runners.get_active_msg_ids", return_value=set()):
-        res = TestClient(server.app).post("/chat/52/worktree/retry", json={
+        res = PairedBrowserClient(server.app).post("/chat/52/worktree/retry", json={
             "topic": "squid",
             "repo": str(repo),
         })
@@ -575,7 +575,7 @@ def test_retry_worktree_resolution_handles_missing_registry_row(tmp_path, monkey
     (integration / "app.py").write_text("resolved without registry\n")
 
     with patch("agent.runners.get_active_msg_ids", return_value=set()):
-        res = TestClient(server.app).post("/chat/61/worktree/retry", json={
+        res = PairedBrowserClient(server.app).post("/chat/61/worktree/retry", json={
             "topic": "squid",
             "repo": str(repo),
         })
@@ -594,7 +594,7 @@ def test_retry_worktree_resolution_is_idempotent_when_already_gone(tmp_path, mon
     subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     with patch("agent.runners.get_active_msg_ids", return_value=set()):
-        res = TestClient(server.app).post("/chat/62/worktree/retry", json={
+        res = PairedBrowserClient(server.app).post("/chat/62/worktree/retry", json={
             "topic": "squid",
             "repo": str(repo),
         })
@@ -700,7 +700,7 @@ def test_history_marks_missing_worktree_conflict_as_synced(tmp_path, monkeypatch
     }]
     stats_db.update_assistant_message(msg_id, "done", "session-1", "done", context=json.dumps(tools))
 
-    res = TestClient(server.app).get(f"/history/by-ids?ids={msg_id}")
+    res = PairedBrowserClient(server.app).get(f"/history/by-ids?ids={msg_id}")
 
     assert res.status_code == 200
     item = res.json()["items"][0]
@@ -744,7 +744,7 @@ def test_history_backfills_unresolved_worktree_paths(tmp_path, monkeypatch):
     }]
     stats_db.update_assistant_message(msg_id, "done", "session-1", "done", context=json.dumps(tools))
 
-    res = TestClient(server.app).get(f"/history/by-ids?ids={msg_id}")
+    res = PairedBrowserClient(server.app).get(f"/history/by-ids?ids={msg_id}")
 
     assert res.status_code == 200
     item = res.json()["items"][0]
@@ -927,7 +927,7 @@ def test_status_recovers_final_content_from_text_events(tmp_path, monkeypatch):
     msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
     stats_db.update_assistant_message(msg_id, "half baked", "session-1", "pending")
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     pending = client.get(f"/chat/{msg_id}/status")
     assert pending.status_code == 200
@@ -953,7 +953,7 @@ def test_status_recovers_status_raw_from_run_events(tmp_path, monkeypatch):
     stats_db.insert_run_event(msg_id, 2, "status", "Done")
     stats_db.insert_run_event(msg_id, 3, "done", None)
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     done = client.get(f"/chat/{msg_id}/status")
 
     assert done.status_code == 200
@@ -973,7 +973,7 @@ def test_status_hydrates_pending_response_from_run_events(tmp_path, monkeypatch)
     stats_db.insert_run_event(msg_id, 2, "text", "partial answer")
     stats_db.insert_run_event(msg_id, 3, "stats", json.dumps({"session_id": "session-1"}))
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     pending = client.get(f"/chat/{msg_id}/status")
 
     assert pending.status_code == 200
@@ -994,7 +994,7 @@ def test_status_keeps_pending_partial_content_without_text_events(tmp_path, monk
     stats_db.insert_run_event(msg_id, 0, "status", "Working...")
     stats_db.insert_run_event(msg_id, 1, "done", None)
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     done = client.get(f"/chat/{msg_id}/status")
 
     assert done.status_code == 200
@@ -1011,7 +1011,7 @@ def test_event_replay_ignores_stale_error_when_message_is_done(tmp_path, monkeyp
     stats_db.insert_run_event(msg_id, 0, "text", "final text")
     stats_db.insert_run_event(msg_id, 1, "error", "late transport error")
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     with client.stream("GET", f"/chat/{msg_id}/events") as res:
         body = "".join(res.iter_text())
 
@@ -1193,7 +1193,7 @@ def test_compact_is_no_longer_squid_owned():
 
 
 def test_chat_rejects_server_side_hidden_route_chain():
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     res = client.post("/chat", json={
         "route": "#squid@codex>@revucla",
         "message": "review this",
@@ -1231,7 +1231,7 @@ def test_backend_native_chat_commands_bypass_context_augmentation_for_any_agent(
             await out_q.put(None)
             return out_q, 1, FinishedWorker()
 
-        client = TestClient(server.app)
+        client = PairedBrowserClient(server.app)
 
         with patch("agent.server.get_agent", return_value={
                 "backend": backend_id, "model": None, "cwd": "/tmp/project",
@@ -1273,7 +1273,7 @@ def test_chat_response_exposes_message_id_header():
         await out_q.put(None)
         return out_q, 1, FinishedWorker()
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     with patch("agent.server.get_agent", return_value={
             "backend": "codex", "model": None, "cwd": "/tmp/project",
@@ -1347,7 +1347,7 @@ def test_chat_allocates_short_flow_run_id_for_routed_turn():
         await out_q.put(None)
         return out_q, 1, FinishedWorker()
 
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     with patch("agent.server.allocate_id", return_value="1") as allocate_id, \
          patch("agent.server.get_agent", return_value={
@@ -1438,7 +1438,7 @@ def test_flow_activation_conflict_does_not_cancel_existing_run():
 
 
 def test_clear_command_kills_only_session_lane():
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     with patch("agent.server.get_active_agent_for_topic", return_value="codex"), \
          patch("agent.server.get_agent", return_value={"name": "codex"}), \
@@ -1453,7 +1453,7 @@ def test_clear_command_kills_only_session_lane():
 
 
 def test_topic_session_includes_session_turn_count():
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     with patch("agent.server.get_agent", return_value={"name": "codex"}), \
          patch("agent.server.get_topic_session", return_value={"session_id": "sid-1", "cwd": "/tmp"}), \
@@ -1478,7 +1478,7 @@ def test_topic_session_includes_session_turn_count():
 
 
 def test_clear_command_rejects_unknown_agent():
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     with patch("agent.server.get_agent", return_value=None), \
          patch("agent.server.kill_procs_by_topic") as kill_procs, \
@@ -1499,7 +1499,7 @@ def test_health_returns_harnesses_and_providers_without_backend_aliases(monkeypa
         providers_mod.PROVIDERS, "anthropic",
         providers_mod._validate_provider("anthropic", providers_mod._DEFAULT_PROVIDERS["anthropic"]),
     )
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     response = client.get("/health")
 
     assert response.status_code == 200
@@ -1635,7 +1635,7 @@ def test_lifecycle_restart_prefers_running_server_restart():
     start.assert_not_called()
 
 
-def test_request_http_restart_posts_cmd_and_waits_for_new_health():
+def test_request_http_restart_uses_host_credential_and_waits_for_new_health():
     class Response:
         def __init__(self, payload):
             self.status = 200
@@ -1661,19 +1661,17 @@ def test_request_http_restart_posts_cmd_and_waits_for_new_health():
         return Response({"boot_time": "new"})
 
     with patch("agent.server.urllib.request.urlopen", side_effect=fake_urlopen), \
-         patch("agent.server.time.sleep"):
+         patch("agent.server.time.sleep"), \
+         patch("agent.instance_auth.host_token", return_value="test-host-token"), \
+         patch("agent.server.urllib.request.build_opener", return_value=SimpleNamespace(open=fake_urlopen)):
         assert server._request_http_restart("127.0.0.1", 8000) == 0
 
     restart_request = calls[1]
-    assert restart_request.full_url == "http://127.0.0.1:8000/cmd"
-    assert json.loads(restart_request.data.decode("utf-8")) == {
-        "command": "restart",
-        "topic": "default",
-        "upgrade": False,
-    }
+    assert restart_request.full_url == "http://127.0.0.1:8000/instance/restart"
+    assert restart_request.get_header("Authorization") == "Bearer test-host-token"
 
 
-def test_request_http_shutdown_posts_cmd_and_waits_for_health_down():
+def test_request_http_shutdown_uses_host_credential_and_waits_for_health_down():
     class Response:
         def __init__(self, payload):
             self.status = 200
@@ -1702,15 +1700,14 @@ def test_request_http_shutdown_posts_cmd_and_waits_for_health_down():
         return Response({"ok": True})
 
     with patch("agent.server.urllib.request.urlopen", side_effect=fake_urlopen), \
-         patch("agent.server.time.sleep"):
+         patch("agent.server.time.sleep"), \
+         patch("agent.instance_auth.host_token", return_value="test-host-token"), \
+         patch("agent.server.urllib.request.build_opener", return_value=SimpleNamespace(open=fake_urlopen)):
         assert server._request_http_shutdown("127.0.0.1", 8000) == 0
 
     shutdown_request = calls[1]
-    assert shutdown_request.full_url == "http://127.0.0.1:8000/cmd"
-    assert json.loads(shutdown_request.data.decode("utf-8")) == {
-        "command": "shutdown",
-        "topic": "default",
-    }
+    assert shutdown_request.full_url == "http://127.0.0.1:8000/instance/shutdown"
+    assert shutdown_request.get_header("Authorization") == "Bearer test-host-token"
 
 
 def test_main_dispatches_start_command():
@@ -1767,7 +1764,7 @@ def test_ollama_public_models_deduplicate_implicit_latest(monkeypatch):
 
 
 def test_provider_static_quota_is_normalized_with_no_harness_involved():
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     response = client.get("/quota/provider/opencode")
 
     assert response.status_code == 200
@@ -1887,7 +1884,7 @@ def test_codex_gauge_auth_detects_cli_auth(monkeypatch):
 
 
 def test_provider_quota_404s_for_unknown_provider():
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     response = client.get("/quota/provider/does-not-exist")
 
     assert response.status_code == 404
@@ -2106,7 +2103,7 @@ def test_max_budget_endpoints_are_gauge_scoped(monkeypatch):
     saved = {}
     monkeypatch.setattr(creds, "save_max_budget", lambda gauge, amount: saved.update({gauge: amount}))
     monkeypatch.setattr(creds, "clear_max_budget", lambda gauge: saved.pop(gauge, None))
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     assert client.post("/config/kimi/max-budget", json={"amount": 25}).status_code == 200
     assert saved == {"kimi": 25}
@@ -2117,7 +2114,7 @@ def test_max_budget_endpoints_are_gauge_scoped(monkeypatch):
 
 
 def test_agent_rejects_unconfigured_harness():
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     response = client.post("/config/agents", json={
         "name": "invalid-harness-test",
         "harness": "not-configured",
@@ -2165,7 +2162,7 @@ def test_yaml_config_can_be_read_validated_and_atomically_updated(tmp_path):
     state_dir.mkdir()
     config_path = state_dir / "squid.yaml"
     config_path.write_text(_config_yaml(tmp_path))
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
     original_cfg = dict(server._cfg)
     original_roots = list(server._LOCALFILE_ROOTS)
 
@@ -2226,12 +2223,12 @@ def test_yaml_provider_update_refreshes_pi_models_config(tmp_path, monkeypatch):
     try:
         with patch("agent.config._USER_CONFIG", config_path), \
              patch.object(server, "_USER_CONFIG", config_path):
-            loaded = TestClient(server.app).get("/config/yaml").json()
+            loaded = PairedBrowserClient(server.app).get("/config/yaml").json()
             updated = loaded["content"].replace(
                 "https://inference.baseten.co\"",
                 "https://inference.baseten.co/v1\"",
             )
-            saved = TestClient(server.app).put("/config/yaml", json={
+            saved = PairedBrowserClient(server.app).put("/config/yaml", json={
                 "content": updated,
                 "revision": loaded["revision"],
             })
@@ -2294,7 +2291,7 @@ def test_startup_pi_models_sync_skips_non_pi_agents(tmp_path, monkeypatch):
 
 
 def test_api_routes_are_registered_before_static_ui():
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     bookmarks = client.get("/bookmarks")
     roots = client.get("/config/localfile-roots")
@@ -2313,7 +2310,7 @@ def test_localfile_serves_paths_outside_configured_roots(tmp_path):
     requested = project / "notes.md"
     requested.write_text("visible now")
     original_roots = list(server._LOCALFILE_ROOTS)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     try:
         server._LOCALFILE_ROOTS[:] = [existing_root.resolve()]
@@ -2333,7 +2330,7 @@ def test_localfile_serves_unknown_extension_text_inline(tmp_path):
     binary_file = root / "binary.customthing"
     binary_file.write_bytes(b"\x00\x01\x02\x03")
     original_roots = list(server._LOCALFILE_ROOTS)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     try:
         server._LOCALFILE_ROOTS[:] = [root.resolve()]
@@ -2355,7 +2352,7 @@ def test_localfile_upload_suffixes_duplicate_names(tmp_path):
     (root / "report.txt").write_text("existing")
     (root / "report 1.txt").write_text("existing 1")
     original_roots = list(server._LOCALFILE_ROOTS)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     try:
         server._LOCALFILE_ROOTS[:] = [root.resolve()]
@@ -2378,7 +2375,7 @@ def test_localfile_check_paths_reports_missing_files(tmp_path):
     missing = root / "missing.txt"
     existing.write_text("notes")
     original_roots = list(server._LOCALFILE_ROOTS)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     try:
         server._LOCALFILE_ROOTS[:] = [root.resolve()]
@@ -2399,7 +2396,7 @@ def test_localfile_rename_can_move_across_directories(tmp_path):
     note = root / "notes.txt"
     note.write_text("move me")
     original_roots = list(server._LOCALFILE_ROOTS)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     try:
         server._LOCALFILE_ROOTS[:] = [root.resolve()]
@@ -2442,7 +2439,7 @@ def test_localfile_markdown_preview_strips_frontmatter_and_preserves_escapes(tmp
         "| A \\| B |\n"
     )
     original_roots = list(server._LOCALFILE_ROOTS)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     try:
         server._LOCALFILE_ROOTS[:] = [root.resolve()]
@@ -2467,7 +2464,7 @@ def test_localfile_same_origin_fetch_metadata_allows_proxy_origin_mismatch(tmp_p
     md_file = root / "notes.md"
     md_file.write_text("# Heading\n")
     original_roots = list(server._LOCALFILE_ROOTS)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     try:
         server._LOCALFILE_ROOTS[:] = [root.resolve()]
@@ -2503,7 +2500,7 @@ def test_localfile_allows_forwarded_origin_match(tmp_path):
     md_file = root / "notes.md"
     md_file.write_text("# Heading\n")
     original_roots = list(server._LOCALFILE_ROOTS)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     try:
         server._LOCALFILE_ROOTS[:] = [root.resolve()]
@@ -2528,7 +2525,7 @@ def test_localfile_markdown_preview_allows_same_site_document_navigation(tmp_pat
     md_file = root / "notes.md"
     md_file.write_text("# Heading\n")
     original_roots = list(server._LOCALFILE_ROOTS)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     try:
         server._LOCALFILE_ROOTS[:] = [root.resolve()]
@@ -2583,7 +2580,7 @@ def test_localfile_markdown_preview_allows_document_accept_without_fetch_metadat
     html_file.write_text("<!doctype html><title>Community</title><h1>Community</h1>\n")
     txt_file.write_text("plain text\n")
     original_roots = list(server._LOCALFILE_ROOTS)
-    client = TestClient(server.app)
+    client = PairedBrowserClient(server.app)
 
     try:
         server._LOCALFILE_ROOTS[:] = [root.resolve()]
@@ -2751,7 +2748,7 @@ def test_session_log_endpoint_returns_entries_not_path_for_opencode(tmp_path, mo
     _make_opencode_db(db_dir / "opencode.db", "ses_target")
     stats_db.upsert_agent("oc-viewer-test", "opencode", "opencode", "opencode/some-model", None)
 
-    res = TestClient(server.app).get(
+    res = PairedBrowserClient(server.app).get(
         "/session-log",
         params={"agent": "oc-viewer-test", "session_id": "ses_target", "cwd": "/some/cwd"},
     )
@@ -2783,7 +2780,7 @@ def test_session_log_endpoint_includes_squid_turn_boundaries(tmp_path, monkeypat
     m2 = stats_db.insert_assistant_message("squid", "oc-turns-test", u2)
     stats_db.update_assistant_message(m2, "reply two", "ses_target", "done")
 
-    res = TestClient(server.app).get(
+    res = PairedBrowserClient(server.app).get(
         "/session-log",
         params={"agent": "oc-turns-test", "session_id": "ses_target", "cwd": "/some/cwd"},
     )
@@ -2798,12 +2795,12 @@ def shore_enabled_for_test(monkeypatch):
 
 
 def _loopback_client():
-    return TestClient(server.app, client=("127.0.0.1", 12345))
+    return PairedBrowserClient(server.app, client=("127.0.0.1", 12345))
 
 
 def test_shore_endpoints_require_loopback(monkeypatch, shore_enabled_for_test):
     monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=None))
-    client = TestClient(server.app)  # default TestClient host is not loopback
+    client = PairedBrowserClient(server.app)  # default TestClient host is not loopback
     assert client.get("/shore/devices").status_code == 403
     assert client.post("/shore/pairing/begin").status_code == 403
     assert client.get("/shore/pairing/status", params={"ceremony_id": "x"}).status_code == 403
@@ -2977,21 +2974,19 @@ async def test_lifespan_releases_idle_database_connection(tmp_path, monkeypatch,
         opened[0].execute("SELECT 1")
 
 
-@pytest.mark.parametrize("remote_unlock", [False, True])
 @pytest.mark.parametrize("platform,host,headers,expected", [
     ("darwin", "127.0.0.1", {}, True),
     ("darwin", "100.64.0.2", {}, False),
     ("linux", "127.0.0.1", {}, False),
     ("darwin", "127.0.0.1", {"x-forwarded-for": "100.64.0.2"}, False),
 ])
-def test_credential_capabilities_use_server_connection(monkeypatch, platform, host, headers, expected, remote_unlock):
+def test_credential_capabilities_use_server_connection(monkeypatch, platform, host, headers, expected):
     monkeypatch.setattr(server.sys, "platform", platform)
-    monkeypatch.setattr(server, "ALLOW_REMOTE_KEYCHAIN_UNLOCK", remote_unlock)
     request = SimpleNamespace(client=SimpleNamespace(host=host), headers=headers)
     response = asyncio.run(server.credential_capabilities(request))
     assert json.loads(response.body) == {
         "host_browser_detection": expected,
-        "keychain_unlock": platform == "darwin" and (expected or remote_unlock),
+        "keychain_unlock": platform == "darwin",
     }
 
 

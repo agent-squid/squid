@@ -302,7 +302,7 @@ async def test_launch_records_only_delivered_watch_hint(setup, prompt, resume, m
     _, service, _, _, _ = setup
     watch_launch.configure(service, 'http://127.0.0.1:1234')
     from agent import continuations
-    monkeypatch.setattr(continuations, 'mint', lambda *args: None)
+    monkeypatch.setattr(continuations, 'mint', lambda *args, history_only=False: None)
     snapshots = []
 
     async def record(snapshot):
@@ -532,7 +532,7 @@ async def test_launch_tool_snapshot_matches_watch_scope_and_revokes_on_record_fa
     _, service, _, _, _ = setup
     monkeypatch.setattr(watch_launch, '_service', service)
     monkeypatch.setattr(watch_launch, '_api_url', 'http://127.0.0.1:1234')
-    monkeypatch.setattr(continuations, 'mint', lambda *args: None)
+    monkeypatch.setattr(continuations, 'mint', lambda *args, history_only=False: None)
     snapshots = []
     tokens = []
     original_mint = WatchControl.mint

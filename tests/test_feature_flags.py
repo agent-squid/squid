@@ -13,11 +13,11 @@ def test_shore_requires_explicit_opt_in(monkeypatch, capsys):
     monkeypatch.setitem(config._cfg, "shore", {})
     assert not shore_enabled()
     server._print_lifecycle_usage()
-    assert "pair" not in capsys.readouterr().out
+    assert "register this machine as your Shore host" not in capsys.readouterr().out
     monkeypatch.setitem(config._cfg, "shore", {"enabled": True})
     assert shore_enabled()
     server._print_lifecycle_usage()
-    assert "pair" in capsys.readouterr().out
+    assert "register this machine as your Shore host" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
@@ -38,13 +38,10 @@ def test_shore_schema_visibility_matches_startup_flag(enabled):
     env.pop("SQUID_SHORE_ENABLED", None)
     result = subprocess.run(
         [sys.executable, "-c", """
-from fastapi.testclient import TestClient
 from agent import config
 config._cfg["shore"] = {"enabled": %r}
 from agent.server import app
-client = TestClient(app)
-assert client.get('/docs').status_code == 200
-schema = client.get('/openapi.json').json()
+schema = app.openapi()
 paths = [path for path in schema['paths'] if path.startswith('/shore/')]
 assert bool(paths) == %r
 assert ('ShoreApprovePairingRequest' in schema.get('components', {}).get('schemas', {})) == %r

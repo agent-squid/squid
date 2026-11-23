@@ -1,10 +1,10 @@
-const CACHE_NAME = 'squid-pwa-v20261122-115';
+const CACHE_NAME = 'squid-pwa-v20261122-121';
 const APP_SHELL = [
   '/',
   '/index.html',
-  '/style.css?v=20261122-115',
-  '/app.js?v=20261122-115',
-  '/flow-lang.js?v=20261122-115',
+  '/style.css?v=20261122-121',
+  '/app.js?v=20261122-121',
+  '/flow-lang.js?v=20261122-121',
   '/vendor/highlight.min.js',
   '/vendor/atom-one-dark.min.css',
   '/vendor/marked.min.js',
@@ -19,7 +19,10 @@ const APP_SHELL = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL))
+      .then(async cache => {
+        const status = await fetch('/config/features', { cache: 'no-store' });
+        if (status.status !== 401) await cache.addAll(APP_SHELL);
+      })
       .then(() => self.skipWaiting()),
   );
 });
@@ -39,21 +42,27 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
 
   if (request.method !== 'GET' || url.origin !== self.location.origin) return;
-  // Serve the installed HTML and assets as one version, online or offline.
-  // Fetching newer HTML here can reference assets not yet installed locally.
-  // Registration checks install updates atomically and reload after activation.
+  // Keep the installed HTML and its assets on one version. Check for an
+  // expired session when online, and keep the installed shell usable offline.
   if (request.mode === 'navigate' && ['/', '/index.html'].includes(url.pathname)) {
     event.respondWith((async () => {
       const cache = await caches.open(CACHE_NAME);
       const shell = await cache.match('/');
-      if (shell) return shell;
       try {
+        if (shell) {
+          const status = await fetch('/config/features', {
+            cache: 'no-store', signal: AbortSignal.timeout(1500),
+          });
+          if (status.status === 401) return Response.redirect(new URL('/instance/pair', url), 303);
+          return shell;
+        }
         const response = await fetch(request, { signal: AbortSignal.timeout(5000) });
-        if (response.status >= 500) throw new Error('Host unavailable');
+        if (response.ok && !response.redirected) {
+          event.waitUntil(cache.addAll(APP_SHELL).catch(() => {}));
+        }
         return response;
       } catch {
-        const cache = await caches.open(CACHE_NAME);
-        return await cache.match('/') || Response.error();
+        return shell || Response.error();
       }
     })());
     return;
