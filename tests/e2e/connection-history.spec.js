@@ -530,6 +530,95 @@ test('failed autocomplete startup retries after health recovery without replacin
   expect(requests).toBe(loadedRequests);
 });
 
+test('shared recall refreshes live and preserves hides through an offline reload', async ({ page }) => {
+  await setup(page);
+  let socket;
+  await page.routeWebSocket('**/ws/v1', ws => {
+    socket = ws;
+    ws.onMessage(raw => {
+      const frame = JSON.parse(raw);
+      if (frame.type === 'subscribe') ws.send(JSON.stringify({ v: 1, type: 'subscribed', payload: {} }));
+      if (frame.type === 'health.check') void respondHealth(page, ws, frame);
+    });
+    ws.send(JSON.stringify({ v: 1, type: 'hello', payload: { heartbeat_seconds: 30 } }));
+  });
+  let entries = [];
+  const history = [];
+  let offline = false;
+  await page.route('**/prompts/recent?**', route => offline ? route.abort('internetdisconnected') : route.fulfill({ json: {
+    items: entries.map(item => item.text), entries, history,
+  } }));
+  await page.route('**/prompts/history', route => {
+    if (offline) return route.abort('internetdisconnected');
+    history.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/history?**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => promptHistoryLoaded)).toBe(true);
+  await page.evaluate(() => {
+    recordPrompt('local pending prompt');
+    input.value = '#route_only';
+    form.requestSubmit();
+  });
+  await expect.poll(() => history.map(item => item.value)).toContain('#route_only');
+
+  entries = [{ id: 5, text: '#other remote prompt', created_at: new Date(Date.now() + 10_000).toISOString() }];
+  socket.send(JSON.stringify({ v: 1, type: 'message.changed', event_id: 1, msg_id: 5, payload: { role: 'user' } }));
+  await expect.poll(() => page.evaluate(() => promptHistory)).toEqual(['#other remote prompt', 'local pending prompt']);
+  await expect.poll(() => page.evaluate(() => routeHistoryAutocompleteItems().map(item => item.routeTarget.topic)))
+    .toContain('route_only');
+
+  const key = await page.evaluate(() => {
+    saveStashedPrompt('#other remote prompt');
+    return promptHistoryDedupKey('#other remote prompt');
+  });
+  history.push({ kind: 'prompt', key, value: '', hidden: true, updated_at: Date.now() });
+  socket.send(JSON.stringify({ v: 1, type: 'composer.history.changed', event_id: 2, payload: {} }));
+  await expect.poll(() => page.evaluate(() => promptHistory)).toEqual(['local pending prompt']);
+
+  offline = true;
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => promptHistoryLoading)).toBe(false);
+  expect(await page.evaluate(() => promptHistoryLoaded)).toBe(false);
+  expect(await page.evaluate(() => promptHistory)).toEqual(['local pending prompt']);
+
+  await page.evaluate(() => recordPrompt('#other remote prompt', { shareStash: true }));
+  expect(await page.evaluate(() => promptHistory)).toContain('#other remote prompt');
+
+  offline = false;
+  await page.evaluate(() => loadPromptHistory());
+  await expect.poll(() => history.some(item => item.key === key && !item.hidden)).toBe(true);
+
+  // The host hides a different prompt without the submitting client seeing that update.
+  const prompt = 'submit before receiving the hide';
+  const staleKey = await page.evaluate(text => promptHistoryDedupKey(text), prompt);
+  history.push({ kind: 'prompt', key: staleKey, value: '', hidden: true, updated_at: Date.now() - 1 });
+  await page.evaluate(text => {
+    clearTopicChip();
+    input.value = text;
+    form.requestSubmit();
+  }, prompt);
+  await expect.poll(() => history.findLast(item => item.key === staleKey)?.hidden).toBe(false);
+  await expect.poll(() => page.evaluate(() => promptHistory)).toContain(prompt);
+});
+
+test('history storage quota does not prevent sending a prompt', async ({ page }) => {
+  await setup(page);
+  await page.goto('/');
+  await page.evaluate(() => {
+    const store = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key === COMPOSER_HISTORY_OUTBOX_KEY) throw new DOMException('Storage is full', 'QuotaExceededError');
+      return store.call(this, key, value);
+    };
+    sendMessage = text => { window.sentPrompt = text; };
+    input.value = 'send despite full history storage';
+    form.requestSubmit();
+  });
+  await expect.poll(() => page.evaluate(() => window.sentPrompt)).toBe('send despite full history storage');
+});
+
 // Exercise actual correlated WS replies, including SSE turn-streaming mode.
 test('SSE lifecycle recovery updates and deletes exact rows without rebuilding unchanged history', async ({ page }) => {
   await setup(page);

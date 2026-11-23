@@ -1340,6 +1340,54 @@ def test_recent_prompts_returns_limit_unique_routed_prompts(tmp_path, monkeypatc
     assert stats_db.get_recent_prompts(limit=6)[-1] == "#squid@haiku! push the changes"
 
 
+def test_composer_history_ignores_retried_writes_older_than_a_hide(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "stats.db")
+    stats_db.init_db()
+
+    stats_db.update_composer_history("route", "#squid", "#squid", False, 1)
+    stats_db.update_composer_history("route", "#squid", "", True, 2)
+    cursor = stats_db.get_realtime_cursor()
+    stats_db.update_composer_history("route", "#squid", "#squid", False, 1)
+
+    assert stats_db.get_composer_history() == [
+        {"kind": "route", "key": "#squid", "value": "", "hidden": 1, "updated_at": 2},
+    ]
+    assert stats_db.get_realtime_cursor() == cursor
+    stats_db.update_composer_history("route", "#squid", "#squid", False, 3)
+    assert stats_db.get_composer_history()[0]["hidden"] == 0
+    assert stats_db.get_realtime_cursor() > cursor
+
+
+def test_composer_prompt_reuse_preserves_stashed_value(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "stats.db")
+    stats_db.init_db()
+
+    stats_db.update_composer_history("prompt", "stash", "stashed prompt", False, 1)
+    stats_db.update_composer_history("prompt", "stash", "", False, 2)
+    stats_db.update_composer_history("prompt", "hidden", "", True, 1)
+    stats_db.update_composer_history("prompt", "hidden", "", False, 2)
+
+    history = {row["key"]: row for row in stats_db.get_composer_history()}
+    assert history["stash"]["value"] == "stashed prompt"
+    assert history["hidden"]["hidden"] == 0
+
+
+def test_composer_submission_overrides_clock_skew_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "stats.db")
+    stats_db.init_db()
+    future = 4_000_000_000_000
+
+    stats_db.update_composer_history("prompt", "key", "", True, future)
+    stats_db.update_composer_history("prompt", "key", "", False, 1, "browser-submission")
+    restored = stats_db.get_composer_history()[0]
+    assert restored["hidden"] == 0
+    assert restored["updated_at"] > future
+
+    stats_db.update_composer_history("prompt", "key", "", True, restored["updated_at"] + 1)
+    stats_db.update_composer_history("prompt", "key", "", False, 1, "browser-submission")
+    assert stats_db.get_composer_history()[0]["hidden"] == 1
+
+
 def test_recent_prompts_reply_lookup_is_indexed(tmp_path, monkeypatch):
     db_path = tmp_path / "stats.db"
     monkeypatch.setattr(stats_db, "_DB_PATH", db_path)

@@ -131,6 +131,8 @@ _TABLES = [
         completed_at TEXT,
         created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
+    """CREATE INDEX IF NOT EXISTS idx_chat_messages_user_id
+       ON chat_messages(id) WHERE role = 'user'""",
     """CREATE INDEX IF NOT EXISTS idx_chat_messages_reply_role_id
        ON chat_messages(reply_to, role, id)""",
     """CREATE TABLE IF NOT EXISTS id_counters (
@@ -154,6 +156,18 @@ _TABLES = [
         payload    TEXT,
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         UNIQUE(msg_id, seq)
+    )""",
+    """CREATE TABLE IF NOT EXISTS composer_history (
+        kind TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        hidden INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (kind, key)
+    )""",
+    """CREATE TABLE IF NOT EXISTS composer_history_submissions (
+        submission_id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )""",
     """CREATE TABLE IF NOT EXISTS realtime_events (
         event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3030,67 +3044,107 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
     return {"items": items}
 
 
-def get_recent_prompts(limit: int = 50) -> list:
-    with _connection() as conn:
-        rows = conn.execute(
-            """WITH routed_prompts AS (
-                   SELECT u.id,
-                          TRIM(u.content) AS content,
-                          u.topic,
-                          u.agent,
-                          u.flow_route,
-                          COALESCE((
-                              SELECT a.adhoc
-                              FROM chat_messages a
-                              WHERE a.reply_to = u.id AND a.role = 'assistant'
-                              ORDER BY a.id ASC
-                              LIMIT 1
-                          ), u.adhoc, 0) AS adhoc,
-                          u.lookback
-                   FROM chat_messages u
-                   WHERE u.role = 'user'
-                     AND COALESCE(u.source, 'human') = 'human'
-                     AND u.content IS NOT NULL
-                     AND TRIM(u.content) != ''
-               ), latest_unique AS (
-                   SELECT MAX(id) AS id
-                   FROM routed_prompts
-                   GROUP BY content, COALESCE(flow_route, ''), topic, agent, adhoc
-               )
-               SELECT p.content, p.topic, p.agent, p.adhoc, p.lookback, p.flow_route
-               FROM routed_prompts p
-               JOIN latest_unique latest ON latest.id = p.id
-               ORDER BY p.id DESC
-               LIMIT ?""",
-            [limit],
-        ).fetchall()
+def get_recent_prompts(limit: int = 50) -> list[str]:
+    return [entry["text"] for entry in get_recent_prompt_entries(limit)]
 
+
+def get_recent_prompt_entries(limit: int = 50) -> list[dict]:
     results = []
-    seen: set = set()
-    for r in rows:
-        row = dict(r)
-        content = (row['content'] or '').strip()
-        if not content:
-            continue
-        topic = row.get('topic') or ''
-        agent = row.get('agent') or ''
-        adhoc = bool(row.get('adhoc'))
-        flow_route = (row.get('flow_route') or '').strip()
-        prefix = ''
-        if flow_route:
-            prefix = flow_route + ' '
-        elif topic and (topic != 'default' or agent):
-            prefix = f'#{topic}'
-            if agent:
-                prefix += f'@{agent}'
-            if adhoc:
-                prefix += '!'
-            prefix += ' '
-        full = prefix + content
-        if full not in seen:
-            seen.add(full)
-            results.append(full)
+    seen = set()
+    before = None
+    batch_size = max(100, limit)
+    with _connection() as conn:
+        while len(results) < limit:
+            boundary = "AND u.id < ?" if before is not None else ""
+            params = [before, batch_size] if before is not None else [batch_size]
+            rows = conn.execute(
+                f"""SELECT u.id, u.created_at, u.content, u.topic, u.agent, u.flow_route,
+                           COALESCE((
+                               SELECT a.adhoc FROM chat_messages a
+                               WHERE a.reply_to = u.id AND a.role = 'assistant'
+                               ORDER BY a.id ASC LIMIT 1
+                           ), u.adhoc, 0) AS adhoc
+                    FROM chat_messages u
+                    WHERE u.role = 'user' AND COALESCE(u.source, 'human') = 'human'
+                      AND u.content IS NOT NULL AND TRIM(u.content) != ''
+                      {boundary}
+                    ORDER BY u.id DESC LIMIT ?""",
+                params,
+            ).fetchall()
+            for row in rows:
+                content = row["content"].strip()
+                if not content:
+                    continue
+                route = (row["flow_route"] or "").strip()
+                if not route and row["topic"] and (row["topic"] != "default" or row["agent"]):
+                    route = f'#{row["topic"]}'
+                    if row["agent"]:
+                        route += f'@{row["agent"]}'
+                    if row["adhoc"]:
+                        route += "!"
+                entry = f"{route} {content}" if route else content
+                if entry in seen:
+                    continue
+                seen.add(entry)
+                results.append({"id": row["id"], "created_at": row["created_at"], "text": entry})
+                if len(results) == limit:
+                    break
+            if len(rows) < batch_size:
+                break
+            before = rows[-1]["id"]
     return results
+
+
+def get_composer_history() -> list[dict]:
+    with _connection() as conn:
+        return [dict(row) for row in conn.execute(
+            """SELECT kind, key, value, hidden, updated_at FROM composer_history
+               ORDER BY updated_at DESC, kind, key"""
+        )]
+
+
+def update_composer_history(
+    kind: str, key: str, value: str, hidden: bool, updated_at: int, submission_id: Optional[str] = None,
+) -> None:
+    with _connection() as conn:
+        if kind == "prompt" and not hidden and submission_id:
+            receipt = conn.execute(
+                "INSERT OR IGNORE INTO composer_history_submissions (submission_id) VALUES (?)",
+                (submission_id,),
+            )
+            if not receipt.rowcount:
+                return
+            previous = conn.execute(
+                "SELECT updated_at FROM composer_history WHERE kind = ? AND key = ?", (kind, key),
+            ).fetchone()
+            updated_at = max(int(datetime.now(timezone.utc).timestamp() * 1000),
+                             previous["updated_at"] + 1 if previous else 0)
+        changed = conn.execute(
+            """INSERT INTO composer_history (kind, key, value, hidden, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT (kind, key) DO UPDATE SET
+                   value = CASE
+                       WHEN excluded.hidden = 0 AND excluded.value = '' AND composer_history.hidden = 0
+                       THEN composer_history.value ELSE excluded.value
+                   END,
+                   hidden = excluded.hidden, updated_at = excluded.updated_at
+               WHERE excluded.updated_at > composer_history.updated_at""",
+            (kind, key, value, hidden, updated_at),
+        )
+        if not changed.rowcount:
+            return
+        if not hidden:
+            conn.execute(
+                """DELETE FROM composer_history WHERE kind = ? AND hidden = 0 AND key IN (
+                       SELECT key FROM composer_history WHERE kind = ? AND hidden = 0
+                         AND (value = '') = (
+                             SELECT value = '' FROM composer_history WHERE kind = ? AND key = ?
+                         )
+                       ORDER BY updated_at DESC, key LIMIT -1 OFFSET 200
+                   )""",
+                (kind, kind, kind, key),
+            )
+        _insert_realtime_event(conn, "composer.history.changed", None, None, None, None, {})
 
 
 # ── session stats ─────────────────────────────────────────────────────────────
@@ -5059,6 +5113,10 @@ def prune_realtime_data(event_days: int = 7, max_events: int = 100_000, request_
             )
         conn.execute(
             "DELETE FROM realtime_requests WHERE datetime(created_at) < datetime('now', ?)",
+            (f"-{max(1, request_days)} days",),
+        )
+        conn.execute(
+            "DELETE FROM composer_history_submissions WHERE created_at < datetime('now', ?)",
             (f"-{max(1, request_days)} days",),
         )
         remaining = int(conn.execute("SELECT COUNT(*) FROM realtime_events").fetchone()[0])

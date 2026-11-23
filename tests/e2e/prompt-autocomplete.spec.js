@@ -176,6 +176,29 @@ test('flow-backed prompt history displays the submitted origin route', async ({ 
   await expect(item.locator('.ac-route-switch-icon')).toHaveCount(1);
 });
 
+test('route and prompt history use the same typography and row height', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => promptHistoryLoaded)).toBe(true);
+  for (const width of [390, 1280]) {
+    await page.setViewportSize({ width, height: 800 });
+    const [prompt, route, routeWithoutPrompt] = await page.evaluate(() => {
+      const entry = '#other@codex push the changes';
+      const [promptItem] = promptHistoryAutocompleteItems([entry]);
+      const routes = routeHistoryAutocompleteItems('#unused@codex');
+      const routeItem = routes.find(item => item.routeTarget.topic === 'other');
+      _acRender([promptItem, routeItem, routes[0]]);
+      return Array.from(acEl.querySelectorAll('.ac-item')).reverse().map(item => ({
+        height: item.getBoundingClientRect().height,
+        labelSize: getComputedStyle(item.querySelector('.ac-label')).fontSize,
+        chipSize: getComputedStyle(item.querySelector('.ac-route-btn')).fontSize,
+      }));
+    });
+    expect(route).toEqual(prompt);
+    expect(routeWithoutPrompt).toEqual(prompt);
+  }
+});
+
 test('left and right browse recent routes from an empty composer', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({

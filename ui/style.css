@@ -5600,6 +5600,9 @@ button {
 .ac-row { display: flex; align-items: center; gap: 0; overflow: hidden; }
 .ac-label { font-family: ui-monospace, monospace; font-weight: 600; flex-shrink: 0; }
 .ac-prompt-row {
+  font-size: var(--text-lg);
+  line-height: 1.4;
+  min-height: 1.4em;
   padding-right: 1.45rem;
   position: relative;
 }
@@ -5608,7 +5611,7 @@ button {
   min-width: 0;
   font-family: inherit;
   font-weight: inherit;
-  font-size: var(--text-lg);
+  font-size: inherit;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

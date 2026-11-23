@@ -545,6 +545,8 @@ Supports `flow_route` for Squid Flow scoped search.
 
 **Response**: `{ "items": [...recent user prompts...], "agents": {...public agent configs by name...} }`
 
+- [ ] **Deferred while Shore is on hold.** Verify composer history in two Shore clients paired to the same Squid host. Select a route without sending, submit a prompt, and hide a history entry in one client. Confirm each change appears in the other client's recall. If a check fails, verify that Shore forwards `GET /prompts/recent` and `POST /prompts/history`.
+
 ---
 
 ### GET /chat/previews?ids={csv}

@@ -1996,8 +1996,7 @@ chipStashBtn.addEventListener('click', async e => {
   }
   const route = await resolveEffectiveComposerRoute();
   const entry = route.route ? `${route.route} ${message}` : formatPromptHistoryEntry(route.topic, route.agent, route.adhoc, route.lookback || 0, message);
-  recordPrompt(entry);
-  saveStashedPrompt(entry);
+  recordPrompt(entry, { shareStash: true });
   input.value = '';
   localStorage.removeItem('squid_draft');
   resizeComposer();
@@ -2624,6 +2623,15 @@ let promptDraftChip = null; // stashed chip state while navigating history
 let commandEditRestore = null; // prompt replaced by clicking an editable search/filter badge
 let _draftSaveTimer = null;
 const STASHED_PROMPTS_KEY = 'squid_stashed_prompts';
+const STASHED_PROMPT_TIMES_KEY = 'squid_stashed_prompt_times';
+const COMPOSER_HISTORY_OUTBOX_KEY = 'squid_composer_history_outbox';
+const COMPOSER_HISTORY_SNAPSHOT_KEY = 'squid_composer_history_snapshot';
+let serverPromptEntries = [];
+let serverComposerHistory = [];
+let composerHistoryRefreshTimer = null;
+let composerHistoryRefreshPending = false;
+let lastComposerHistoryWrite = 0;
+let recentRoutes = [];
 const HIDDEN_PROMPTS_KEY  = 'squid_hidden_prompts';
 const HIDDEN_ROUTES_KEY = 'squid_hidden_routes';
 const hiddenRouteKeys = new Set(JSON.parse(localStorage.getItem(HIDDEN_ROUTES_KEY) || '[]'));
@@ -3407,17 +3415,18 @@ function clearSearch() {
   initHistoryScroll();
 }
 
-function recordPrompt(text) {
+function recordPrompt(text, { shareStash = false, submitted = false } = {}) {
   const t = text.trim();
   if (!t) return;
   const key = promptHistoryDedupKey(t);
-  if (hiddenPromptKeys.delete(key)) {
-    localStorage.setItem(HIDDEN_PROMPTS_KEY, JSON.stringify([...hiddenPromptKeys]));
+  const wasHidden = hiddenPromptKeys.delete(key);
+  if (wasHidden) {
+    forgetLocalHistoryHide(HIDDEN_PROMPTS_KEY, key);
   }
-  const routeKey = normalizePromptHistoryRoute(splitPromptHistoryEntry(t).route).toLowerCase();
-  if (hiddenRouteKeys.delete(routeKey)) {
-    localStorage.setItem(HIDDEN_ROUTES_KEY, JSON.stringify([...hiddenRouteKeys]));
+  if (shareStash || submitted || wasHidden) {
+    queueComposerHistory('prompt', key, shareStash ? t : '', false, { submitted });
   }
+  recordHistoryRoute(splitPromptHistoryEntry(t).route);
   promptHistory = [t, ...promptHistory.filter(x => promptHistoryDedupKey(x) !== key)].slice(0, 200);
   saveStashedPrompt(t);
   promptHistoryPos = -1;
@@ -3439,13 +3448,21 @@ function saveStashedPrompt(text) {
   if (!t) return;
   const key = promptHistoryDedupKey(t);
   const items = [t, ...getStashedPrompts().filter(x => promptHistoryDedupKey(x) !== key)].slice(0, 200);
+  const times = readHistoryStorage(STASHED_PROMPT_TIMES_KEY, {});
+  times[key] = Date.now();
   localStorage.setItem(STASHED_PROMPTS_KEY, JSON.stringify(items));
+  localStorage.setItem(STASHED_PROMPT_TIMES_KEY, JSON.stringify(Object.fromEntries(
+    items.map(item => {
+      const itemKey = promptHistoryDedupKey(item);
+      return [itemKey, times[itemKey] || 0];
+    }),
+  )));
 }
 
 function hidePrompt(text) {
   const key = promptHistoryDedupKey(text.trim());
   hiddenPromptKeys.add(key);
-  localStorage.setItem(HIDDEN_PROMPTS_KEY, JSON.stringify([...hiddenPromptKeys]));
+  queueComposerHistory('prompt', key, '', true);
   promptHistory = promptHistory.filter(e => promptHistoryDedupKey(e) !== key);
   const stashed = getStashedPrompts().filter(e => promptHistoryDedupKey(e) !== key);
   localStorage.setItem(STASHED_PROMPTS_KEY, JSON.stringify(stashed));
@@ -3697,7 +3714,9 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
     items.push({
       routeHtml: _acRouteHtml(routeKey),
       routeSwitchIcon: false,
-      label: '',
+      label: prompt ? `<span class="ac-history-prompt">${_acLastPrompt(prompt)}</span>` : '',
+      labelClass: 'ac-prompt-label',
+      rowClass: 'ac-prompt-row',
       insert: '',
       trail: false,
       routeTarget,
@@ -3712,16 +3731,19 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
       previewApply: true,
       currentRoute: current,
       deleteRouteKey: current ? null : dedupeKey,
-      sub: prompt ? _acLastPrompt(prompt) : '',
     });
   };
 
   addRoute(normalizedCurrent, '', true);
+  for (const { value } of recentRoutes) {
+    if (items.length >= 9) break;
+    addRoute(value, lastPromptForFlowRoute(value));
+  }
   for (const entry of promptHistory) {
+    if (items.length >= 9) break;
     const { route, prompt } = splitPromptHistoryEntry(entry);
     if (hiddenPromptKeys.has(promptHistoryDedupKey(entry))) continue;
     addRoute(route, prompt, false);
-    if (items.length >= 9) break;
   }
   return items;
 }
@@ -3734,9 +3756,11 @@ function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
     return normalizePromptHistoryRoute(route).toLowerCase();
   }).filter(Boolean));
 
+  const routes = recentRoutes.map(({ value }) => ({ route: value, prompt: lastPromptForFlowRoute(value) }));
   for (const entry of promptHistory) {
-    if (hiddenPromptKeys.has(promptHistoryDedupKey(entry))) continue;
-    const { route, prompt } = splitPromptHistoryEntry(entry);
+    if (!hiddenPromptKeys.has(promptHistoryDedupKey(entry))) routes.push(splitPromptHistoryEntry(entry));
+  }
+  for (const { route, prompt } of routes) {
     const normalizedRouteKey = normalizePromptHistoryRoute(route);
     const historyKey = normalizedRouteKey.toLowerCase();
     if (hiddenRouteKeys.has(historyKey)) continue;
@@ -3752,7 +3776,9 @@ function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
     items.push({
       routeHtml: _acRouteHtml(routeKey),
       routeSwitchIcon: false,
-      label: '',
+      label: prompt ? `<span class="ac-history-prompt">${_acLastPrompt(prompt)}</span>` : '',
+      labelClass: 'ac-prompt-label',
+      rowClass: 'ac-prompt-row',
       // Plain route text, not '' — these items sit alongside live-typed
       // insert-only suggestions in the same arrow-navigable list, so
       // previewing one must behave the same way theirs does (fill the
@@ -3762,7 +3788,6 @@ function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
       trail: false,
       routeTarget,
       deleteRouteKey: historyKey,
-      sub: prompt ? _acLastPrompt(prompt) : '',
     });
   }
   return items;
@@ -3803,31 +3828,149 @@ function openRouteHistoryAutocomplete(direction) {
   return true;
 }
 
+function readHistoryStorage(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
+  catch { return fallback; }
+}
+
+function forgetLocalHistoryHide(storageKey, key) {
+  const keys = readHistoryStorage(storageKey, []);
+  localStorage.setItem(storageKey, JSON.stringify(keys.filter(item => item !== key)));
+}
+
+function queueComposerHistory(kind, key, value, hidden, { submitted = false } = {}) {
+  const id = JSON.stringify([kind, key]);
+  const outbox = readHistoryStorage(COMPOSER_HISTORY_OUTBOX_KEY, {});
+  const known = serverComposerHistory.find(item => item.kind === kind && item.key === key);
+  const previous = Math.max(known?.updated_at || 0, outbox[id]?.updated_at || 0, lastComposerHistoryWrite);
+  const updated_at = lastComposerHistoryWrite = Math.max(Date.now(), previous + 1);
+  const pending = outbox[id];
+  const queuedValue = !hidden && !value && pending && !pending.hidden ? pending.value : value;
+  outbox[id] = { kind, key, value: queuedValue, hidden, updated_at };
+  if (submitted) {
+    outbox[id].submission_id = globalThis.crypto?.randomUUID?.()
+      || `${updated_at}-${Math.random().toString(36).slice(2)}`;
+  }
+  localStorage.setItem(COMPOSER_HISTORY_OUTBOX_KEY, JSON.stringify(outbox));
+  applyComposerHistory();
+  scheduleComposerHistoryRefresh();
+}
+
+function recordHistoryRoute(route) {
+  const value = normalizePromptHistoryRoute(route);
+  if (!value) return;
+  const key = value.toLowerCase();
+  if (hiddenRouteKeys.has(key)) forgetLocalHistoryHide(HIDDEN_ROUTES_KEY, key);
+  queueComposerHistory('route', key, value, false);
+}
+
+function applyComposerHistory() {
+  const states = new Map(serverComposerHistory.map(item => [JSON.stringify([item.kind, item.key]), item]));
+  for (const [id, item] of Object.entries(readHistoryStorage(COMPOSER_HISTORY_OUTBOX_KEY, {}))) {
+    if (item.submission_id || !states.has(id) || item.updated_at >= states.get(id).updated_at) states.set(id, item);
+  }
+  hiddenRouteKeys.clear();
+  for (const key of readHistoryStorage(HIDDEN_ROUTES_KEY, [])) hiddenRouteKeys.add(key);
+  hiddenPromptKeys = new Set(readHistoryStorage(HIDDEN_PROMPTS_KEY, []));
+  const times = readHistoryStorage(STASHED_PROMPT_TIMES_KEY, {});
+  const localPrompts = new Map(getStashedPrompts().map(text => [promptHistoryDedupKey(text), text]));
+  const entries = Array.from(localPrompts, ([key, text]) => ({ text, time: times[key] || 0 }))
+    .concat(serverPromptEntries);
+  const routes = [];
+  for (const item of states.values()) {
+    const hides = item.kind === 'route' ? hiddenRouteKeys : hiddenPromptKeys;
+    if (item.hidden) hides.add(item.key);
+    else {
+      hides.delete(item.key);
+      if (item.value && item.kind === 'route') routes.push(item);
+      if (item.value && item.kind === 'prompt') entries.push({ text: item.value, time: item.updated_at });
+    }
+  }
+  recentRoutes = routes.sort((a, b) => b.updated_at - a.updated_at).slice(0, 200);
+  entries.sort((a, b) => b.time - a.time);
+  promptHistory = mergePromptHistory(entries
+    .map(({ text }) => localPrompts.get(promptHistoryDedupKey(text)) || text)
+    .filter(text => !hiddenPromptKeys.has(promptHistoryDedupKey(text))));
+}
+
+function scheduleComposerHistoryRefresh() {
+  if (composerHistoryRefreshTimer !== null) return;
+  composerHistoryRefreshTimer = setTimeout(() => {
+    composerHistoryRefreshTimer = null;
+    if (promptHistoryLoading) composerHistoryRefreshPending = true;
+    else void loadPromptHistory();
+  }, 250);
+}
+
+function restoreComposerHistorySnapshot() {
+  const cached = readHistoryStorage(COMPOSER_HISTORY_SNAPSHOT_KEY, []);
+  if (Array.isArray(cached)) serverComposerHistory = cached;
+  applyComposerHistory();
+}
+
+function cacheComposerHistorySnapshot(history) {
+  try {
+    localStorage.setItem(COMPOSER_HISTORY_SNAPSHOT_KEY, JSON.stringify(history));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function initPromptHistory() {
   const draft = localStorage.getItem('squid_draft');
   if (draft) { input.value = draft; resizeComposer(); }
-  promptHistory = mergePromptHistory(getStashedPrompts(), promptHistory);
+  restoreComposerHistorySnapshot();
   await loadPromptHistory();
 }
 
-// Retried by reachability checks without restoring an older draft or discarding
-// prompts entered while the startup request was unavailable.
 async function loadPromptHistory() {
-  if (promptHistoryLoaded || promptHistoryLoading) return;
+  if (promptHistoryLoading) return;
   promptHistoryLoading = true;
   try {
-    const res = await fetch('/prompts/recent?limit=50', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+    const sent = [];
+    for (const [id, item] of Object.entries(readHistoryStorage(COMPOSER_HISTORY_OUTBOX_KEY, {}))) {
+      const result = await fetch('/prompts/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(item),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!result.ok) break;
+      sent.push([id, item.updated_at]);
+    }
+    const res = await fetch('/prompts/recent?limit=200', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!res.ok) return;
     const data = await res.json();
     if (!Array.isArray(data.items)) return;
     if (data.agents && typeof data.agents === 'object') {
       mergeAgentCache(Object.values(data.agents));
     }
-    promptHistory = mergePromptHistory(getStashedPrompts(), promptHistory, data.items);
+    serverPromptEntries = Array.isArray(data.entries)
+      ? data.entries.map(entry => ({ text: entry.text, time: Date.parse(entry.created_at) || 0 }))
+      : data.items.map(text => ({ text, time: 0 }));
+    if (Array.isArray(data.history)) {
+      serverComposerHistory = data.history;
+      if (cacheComposerHistorySnapshot(data.history) && sent.length) {
+        const outbox = readHistoryStorage(COMPOSER_HISTORY_OUTBOX_KEY, {});
+        for (const [id, timestamp] of sent) {
+          if (outbox[id]?.updated_at === timestamp) delete outbox[id];
+        }
+        localStorage.setItem(COMPOSER_HISTORY_OUTBOX_KEY, JSON.stringify(outbox));
+      }
+    }
+    applyComposerHistory();
+    const firstLoad = !promptHistoryLoaded;
     promptHistoryLoaded = true;
-    if (input.value.trim()) updateAutocomplete();
-  } catch { /* Keep local entries; the next reachability check retries. */ }
-  finally { promptHistoryLoading = false; }
+    if (firstLoad && input.value.trim() && acSel < 0) updateAutocomplete();
+  } catch { /* Keep local entries and queued writes until the next refresh. */ }
+  finally {
+    promptHistoryLoading = false;
+    if (composerHistoryRefreshPending) {
+      composerHistoryRefreshPending = false;
+      scheduleComposerHistoryRefresh();
+    }
+  }
 }
 
 async function loadSearchResults() {
@@ -4340,6 +4483,7 @@ form.addEventListener('submit', async (e) => {
   commandEditRestore = null;
   const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, message } = parseInput(text);
   if (!message) {
+    recordHistoryRoute(route || promptHistoryRoute(topic, agent, adhoc));
     input.value = '';
     resizeComposer();
     hideAutocomplete();
@@ -4377,8 +4521,13 @@ form.addEventListener('submit', async (e) => {
   // A sticky chip has no route text in `text` at all (the composer holds
   // only the free-text message then), so that case still has to
   // reconstruct from the chip's own (already-canonical) route.
-  recordPrompt(!stickyChip ? text : (route ? `${route} ${message}` : formatPromptHistoryEntry(topic, agent, adhoc, lookback, message)));
-  localStorage.removeItem('squid_draft');
+  const historyEntry = !stickyChip ? text : (route ? `${route} ${message}` : formatPromptHistoryEntry(topic, agent, adhoc, lookback, message));
+  try {
+    localStorage.removeItem('squid_draft');
+    recordPrompt(historyEntry, { submitted: true });
+  } catch (error) {
+    if (!(error instanceof DOMException) || !['QuotaExceededError', 'SecurityError'].includes(error.name)) throw error;
+  }
   if (broadcastAgents || (flowOrigins && flowOrigins.length > 1)) {
     sendOriginBroadcast(text);
   } else {
@@ -4589,6 +4738,7 @@ async function _maybePromoteSlug(val) {
       chainTargetTopic: chain.targetTopic,
       flowOrigins: chain.origins,
     });
+    recordHistoryRoute(currentPromptHistoryRoute());
     hideAutocomplete();
     resizeComposer();
     return;
@@ -4600,6 +4750,7 @@ async function _maybePromoteSlug(val) {
       route: chainText,
       broadcastAgents: broadcast.agents,
     });
+    recordHistoryRoute(currentPromptHistoryRoute());
     hideAutocomplete();
     resizeComposer();
     return;
@@ -4624,6 +4775,7 @@ async function _maybePromoteSlug(val) {
 
   input.value = '';
   setTopicChip(topic, agent, resolvedAdhoc, lookback);
+  recordHistoryRoute(currentPromptHistoryRoute());
   hideAutocomplete();
   resizeComposer();
 }
@@ -9116,6 +9268,7 @@ const realtimeV1 = (() => {
         }
       }
     }
+    scheduleComposerHistoryRefresh();
     markApplied(frame, { resetCursor });
   };
 
@@ -9125,6 +9278,8 @@ const realtimeV1 = (() => {
       applyRealtimeProcessState(frame.payload?.processes, null);
     } else if (frame.type === 'queue.changed') {
       applyRealtimeProcessState(null, frame.payload?.queue);
+    } else if (frame.type === 'composer.history.changed' || (frame.type === 'message.changed' && frame.payload?.role === 'user')) {
+      scheduleComposerHistoryRefresh();
     } else if (frame.type === 'message.changed' && frame.payload?.role === 'assistant') {
       onDiscover?.({ ...frame.payload, id: frame.msg_id, ...frame.scope });
       if (frame.payload.status && frame.payload.status !== 'pending' && frame.scope?.agent) {
@@ -9177,6 +9332,7 @@ const realtimeV1 = (() => {
       }
       else if (frame.type === 'subscribed') {
         subscribed = true;
+        scheduleComposerHistoryRefresh();
         void checkConnectionHealth();
         void reconcileRenderedHistory();
         for (const watch of watches.values()) watch.onAvailable?.();
@@ -15903,6 +16059,7 @@ function _acRender(items, title = 'Suggestions') {
         if (fullEntry) {
           hideAutocomplete();
           applyPromptHistoryEntry(fullEntry);
+          recordHistoryRoute(currentPromptHistoryRoute());
           input.focus();
         } else if (item) {
           _acSelect(idx);
@@ -15936,8 +16093,7 @@ function _acRender(items, title = 'Suggestions') {
       if (idx < 0 || idx >= acItems.length) return;
       const { deletePromptEntry, deleteRouteKey } = acItems[idx];
       if (deleteRouteKey) {
-        hiddenRouteKeys.add(deleteRouteKey);
-        localStorage.setItem(HIDDEN_ROUTES_KEY, JSON.stringify([...hiddenRouteKeys]));
+        queueComposerHistory('route', deleteRouteKey, '', true);
       } else if (deletePromptEntry) {
         hidePrompt(deletePromptEntry);
       }
@@ -15997,6 +16153,7 @@ function _acSelect(idx, { fromPointer = false } = {}) {
   }
   if (item.routeTarget) {
     applyRouteTarget(item.routeTarget);
+    recordHistoryRoute(currentPromptHistoryRoute());
     input.focus();
     return;
   }
@@ -16012,6 +16169,7 @@ function _acSelect(idx, { fromPointer = false } = {}) {
         chainTargetTopic: chain.targetTopic,
         flowOrigins: chain.origins,
       });
+      recordHistoryRoute(currentPromptHistoryRoute());
       input.value = '';
       resizeComposer();
       input.focus();
@@ -17853,6 +18011,9 @@ function setPinnedItems(items) {
 // badge/bubble selections convergent across desktop/mobile or duplicate tabs.
 window.addEventListener('storage', event => {
   if (event.key === 'pinnedItems') refreshPinnedContextUi();
+  if (event.key === COMPOSER_HISTORY_SNAPSHOT_KEY) restoreComposerHistorySnapshot();
+  if ([STASHED_PROMPTS_KEY, STASHED_PROMPT_TIMES_KEY, COMPOSER_HISTORY_OUTBOX_KEY,
+    HIDDEN_ROUTES_KEY, HIDDEN_PROMPTS_KEY].includes(event.key)) applyComposerHistory();
 });
 
 function getAttachedFiles() {
@@ -21343,7 +21504,10 @@ document.querySelectorAll('.creds-bookmarklet').forEach(a => {
 // state only if the user was already reading at the bottom.
 let _messagesAtBottomBeforeHide = true;
 function recoverForegroundState() {
-  if (!document.hidden) void checkInstanceAccess();
+  if (!document.hidden) {
+    void checkInstanceAccess();
+    scheduleComposerHistoryRefresh();
+  }
   void checkForSquidUpdate(_squidVersion);
   updateActiveQuotaGauge().then(() => {
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
@@ -21490,7 +21654,7 @@ async function checkConnectionHealth() {
       const result = await pending;
       if (connectionHealthPending !== request || document.hidden) return;
       if (!result.ok || result.status !== 'ok') throw new Error(result.error || 'Invalid health reply');
-      void loadPromptHistory();
+      if (!promptHistoryLoaded || Object.keys(readHistoryStorage(COMPOSER_HISTORY_OUTBOX_KEY, {})).length) void loadPromptHistory();
       if (currentView !== 'chat' || !resolveInitialHistoryReady) connectionMessage('reachable', 'Squid reachable');
     } catch {
       if (connectionHealthPending !== request || document.hidden) return;
@@ -21511,7 +21675,7 @@ async function syncConnectionHistory(forceLatest = false, showRefreshBanner = fa
     // Keep the current warning and layout stable while probing in background.
     const health = await realtimeV1?.health();
     if (!health?.ok || health.status !== 'ok') throw new Error('Host unavailable');
-    void loadPromptHistory();
+    if (!promptHistoryLoaded || Object.keys(readHistoryStorage(COMPOSER_HISTORY_OUTBOX_KEY, {})).length) void loadPromptHistory();
     if (currentView !== 'chat') {
       connectionLatest.hidden = true;
       connectionMessage('reachable', 'Squid reachable');

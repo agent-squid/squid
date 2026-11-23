@@ -102,7 +102,7 @@ from .stats_db import (
     clear_agent_sessions, get_agent_sessions, get_agent_home_mode, set_agent_home_mode,
     get_diff_revert_eligibility, record_git_diff_revert, get_message_gitdiff,
     search_messages, search_prompts,
-    get_recent_prompts,
+    get_recent_prompt_entries, get_composer_history, update_composer_history,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
     get_message_annotations, set_message_annotation, remove_message_annotation,
@@ -2466,14 +2466,34 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
     return JSONResponse(payload)
 
 
+class ComposerHistoryRequest(BaseModel):
+    kind: Literal["route", "prompt"]
+    key: str = Field(min_length=1)
+    value: str = ""
+    hidden: bool
+    updated_at: int = Field(ge=0, le=2**53 - 1)
+    submission_id: Optional[str] = Field(default=None, min_length=1, max_length=80)
+
+
 @app.get("/prompts/recent")
 async def prompts_recent(limit: int = 50):
-    limit = min(limit, 200)
-    items, agents = await asyncio.gather(
-        asyncio.to_thread(get_recent_prompts, limit=limit),
+    entries, agents, history = await asyncio.gather(
+        asyncio.to_thread(get_recent_prompt_entries, max(1, min(limit, 200))),
         asyncio.to_thread(_public_agent_map),
+        asyncio.to_thread(get_composer_history),
     )
-    return JSONResponse({"items": items, "agents": agents})
+    return JSONResponse({
+        "items": [entry["text"] for entry in entries],
+        "entries": entries, "agents": agents, "history": history,
+    })
+
+
+@app.post("/prompts/history")
+async def composer_history_update(req: ComposerHistoryRequest):
+    await asyncio.to_thread(
+        update_composer_history, req.kind, req.key, req.value, req.hidden, req.updated_at, req.submission_id,
+    )
+    return {"ok": True}
 
 
 @app.get("/chat/previews")
@@ -5220,7 +5240,7 @@ _REALTIME_V1_REPLAY_TYPES = {
     "chat.meta", "chat.queued", "chat.status", "chat.loading", "chat.processing",
     "chat.tool", "chat.text", "chat.stats", "chat.done", "chat.error",
     "process.changed", "queue.changed", "message.changed", "flow.step.created",
-    "worktree.changed", "diff.reverted",
+    "worktree.changed", "diff.reverted", "composer.history.changed",
 }
 
 
