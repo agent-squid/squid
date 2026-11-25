@@ -35,7 +35,8 @@ function setup({ matches = true, search = false, bubblePresent = true } = {}) {
     invalidateHistoryLoad() {}, setLiveGroupHidden() {}, _updateSearchBar() {}, loadSearchResults() {},
     jumpToMessage: async () => { calls.push('stored'); }, setTimeout() {},
   });
-  vm.runInContext(helper, context);
+  const pendingFilter = source.slice(source.indexOf('function shouldShowPendingTurn('), source.indexOf('async function readTurnStatus('));
+  vm.runInContext(pendingFilter + helper, context);
   return { context, calls, restore: () => restore() };
 }
 

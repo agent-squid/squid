@@ -49,7 +49,10 @@ test('Flow completion preserves the insertion helper scroll position', async () 
   const { context, messages } = setup(0);
   Object.assign(context, {
     messages: Object.assign(messages, { querySelector() { return null; } }),
-    fetch: async () => ({ ok: true, json: async () => ({ status: 'done' }) }),
+    async readTurnStatus(id) {
+      assert.equal(id, 1);
+      return { status: 'done' };
+    },
     shouldShowNewResponse: () => true,
     insertCompletedHistoryItem() { messages.scrollTop = 490; },
   });

@@ -2183,6 +2183,7 @@ body {
 .pin-item .pin-item-tag, .pin-item .pin-item-preview { cursor: pointer; }
 .pin-item-status { font-size: var(--text-md); flex-shrink: 0; white-space: nowrap; }
 .pin-status-inject   { color: #70b870; }
+.pin-status-skip     { color: var(--accent-dim); }
 .pin-status-session  { color: #484858; }
 .pin-status-done     { color: #484858; }
 .pin-item-remove {

@@ -1521,6 +1521,31 @@ def test_session_injected_context_recovers_legacy_memory_flag(tmp_path, monkeypa
     }
 
 
+def test_context_lookback_resolves_agent_and_excludes_without_backfill(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    def turn(topic, agent, text, *, adhoc=False):
+        prompt_id = stats_db.insert_user_message(topic, agent, text)
+        reply_id = stats_db.insert_assistant_message(topic, agent, prompt_id, adhoc=adhoc)
+        stats_db.update_assistant_message(reply_id, f"{text} reply", None, "done")
+        return reply_id
+
+    turn("work", "echo", "older")
+    included = turn("work", "echo", "included")
+    excluded = turn("work", "echo", "excluded")
+    turn("work", "codex", "different agent")
+    turn("work.sibling", "echo", "different topic")
+    turn("work", "echo", "adhoc", adhoc=True)
+
+    history, ids = stats_db.get_context_history("work", 2, agent="echo", excluded_ids=[excluded])
+    assert ids == [included]
+    assert history == [
+        {"role": "user", "content": "included"},
+        {"role": "assistant", "content": "included reply"},
+    ]
+
+
 def test_history_items_include_session_turn_count(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

@@ -147,6 +147,8 @@ scrollBtn.addEventListener('mouseleave', () => {
 
 marked.setOptions({ breaks: true });
 
+const VISUALIZATION_REFERENCE = /^[ \t]{0,3}visualize(\{[^\n]*\})[ \t]*(?:\n|$)/;
+
 function escapeMarkdownTildes(text) {
   const src = String(text || '');
   let inFence = false;
@@ -170,7 +172,7 @@ function escapeMarkdownTildes(text) {
       }
     }
 
-    if (protectLine) {
+    if (protectLine || VISUALIZATION_REFERENCE.test(line)) {
       out += line;
       continue;
     }
@@ -536,11 +538,13 @@ function populateModelPicker(pickerId, inputId, backend) {
 
   function localFileUrl(path, line, endLine) {
     const params = new URLSearchParams({ path });
-    const token = localStorage.getItem('squid_token');
-    if (token) params.set('token', token);
     const base = '/localfile?' + params.toString();
     if (!line) return base;
     return base + '#L' + line + (endLine && endLine !== line ? '-L' + endLine : '');
+  }
+
+  function htmlPreviewLink(url, label, title) {
+    return `<a href="${escapeHtml(url + '#preview')}" title="${escapeHtml(title || 'Preview')}">${label}</a>`;
   }
 
   function fileToLocal(url) {
@@ -555,12 +559,44 @@ function populateModelPicker(pickerId, inputId, backend) {
   }
   // marked v5+ passes a token object; override href while forwarding everything else.
   marked.use({
+    extensions: [{
+      name: 'visualizationReference',
+      level: 'block',
+      start(src) {
+        return src.search(/^[ \t]{0,3}visualize/m);
+      },
+      tokenizer(src) {
+        const match = VISUALIZATION_REFERENCE.exec(src);
+        if (!match) return;
+        try {
+          const { path, title } = JSON.parse(match[1]);
+          if (typeof path !== 'string' || !/^\/(?!\/)[^\x00-\x1f]+\.html$/i.test(path)
+              || _isSquidWorktreePath(path)) return;
+          return {
+            type: 'visualizationReference',
+            raw: match[0],
+            path,
+            title: typeof title === 'string' && title.trim() ? title.trim() : 'Visualization',
+          };
+        } catch {
+          // Leave malformed references visible as text.
+        }
+      },
+      renderer({ path, title }) {
+        return `<p>${htmlPreviewLink(localFileUrl(path), escapeHtml(title))}</p>\n`;
+      },
+    }],
     renderer: {
       table(token) {
         return `<div class="md-table-wrap markdown-table-scroll" tabindex="0" role="region" aria-label="Scrollable table">${marked.Renderer.prototype.table.call(this, token)}</div>`;
       },
       link({ href, title, tokens }) {
-        return marked.Renderer.prototype.link.call(this, { href: fileToLocal(href), title, tokens });
+        const url = fileToLocal(href);
+        if (url !== href && url.startsWith('/localfile?') && !url.includes('#')) {
+          const path = new URLSearchParams(url.slice('/localfile?'.length)).get('path');
+          if (_isHtmlPreviewPath(path)) return htmlPreviewLink(url, this.parser.parseInline(tokens), title);
+        }
+        return marked.Renderer.prototype.link.call(this, { href: url, title, tokens });
       },
       image({ href, title, text }) {
         return marked.Renderer.prototype.image.call(this, { href: fileToLocal(href), title, text });
@@ -1733,9 +1769,8 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
   updateRouteHistoryFilter(stickyChip, opts.followHistoryFilter !== false);
   updateComposerActionTitles();
   updateActiveQuotaGauge();
-  updatePinCount();
-  updateInContextMarkers();
-  _lastContextIndicatorKey = _contextIndicatorKeyFrom(topic, agent, adhoc, lookback);
+  clearAttachmentsForTreeSwitch(topic);
+  refreshContextIndicators({ force: true });
   evaluateAdvisory();
 }
 
@@ -4637,14 +4672,26 @@ function addShellFooter(afterEl, timestamp, metadataEl) {
   return el;
 }
 
-const _lookbackUnselected = new Set(); // cleared when the active !N candidate set changes; never persisted
-let _lastLookbackSelectionKey = '';
+const _lookbackSelections = new Map(); // Composer overrides are consumed on send.
+function _lookbackSelectionKey(topic, lookback, routeAgent) {
+  return JSON.stringify([topic, lookback, routeAgent || null]);
+}
+function _setLookbackSelected(topic, lookback, routeAgent, id, selected) {
+  const key = _lookbackSelectionKey(topic, lookback, routeAgent);
+  const previous = _lookbackSelections.get(key);
+  const cleared = previous?.cleared ?? false;
+  const ids = new Set(previous?.ids);
+  if (selected === cleared) ids.add(id);
+  else ids.delete(id);
+  _lookbackSelections.set(key, { cleared, ids });
+}
 let _lastContextIndicatorKey = '';
 
-function _allLookbackItems(adhoc, lookback) {
+function _allLookbackItems(topic, adhoc, lookback, agent = null) {
   if (!adhoc || lookback <= 0) return [];
   return [...document.querySelectorAll('#messages .history-item.assistant:not(.msg-thinking)')]
-    .filter(el => el.dataset.msgId)
+    .filter(el => el.dataset.msgId && (el.dataset.topic || 'default') === topic
+      && el.dataset.lookbackEligible !== 'false' && (!agent || el.dataset.agent === agent))
     .map(el => {
       const id = parseInt(el.dataset.msgId);
       return { id, el, topic: el.dataset.topic || 'default', agent: el.dataset.agent || null, session_id: el.dataset.sessionId || null, content: _messageBodyText(el) };
@@ -4662,18 +4709,10 @@ function _messageBodyText(bubbleEl) {
   return bodyEls[bodyEls.length - 1]?.innerText || '';
 }
 
-function _lookbackSelectionKey(adhoc, lookback, items) {
-  return `${adhoc ? 1 : 0}:${lookback}:${items.map(item => item.id).join(',')}`;
-}
-
-function _activeLookbackItems(adhoc, lookback) {
-  const allItems = _allLookbackItems(adhoc, lookback);
-  const selectionKey = _lookbackSelectionKey(adhoc, lookback, allItems);
-  if (selectionKey !== _lastLookbackSelectionKey) {
-    _lookbackUnselected.clear();
-    _lastLookbackSelectionKey = selectionKey;
-  }
-  return allItems.filter(item => !_lookbackUnselected.has(item.id));
+function _activeLookbackItems(topic, adhoc, lookback, agent = null, routeAgent = agent) {
+  const selection = _lookbackSelections.get(_lookbackSelectionKey(topic, lookback, routeAgent));
+  return _allLookbackItems(topic, adhoc, lookback, agent).filter(item =>
+    !selection || selection.ids.has(item.id) === selection.cleared);
 }
 
 function updateInContextMarkers() {
@@ -4696,7 +4735,7 @@ function updateInContextMarkers() {
   // Lookback selection is a single-target-only concept — broadcast heads
   // don't carry a numeric lookback.
   const activeItems = singleTarget?.adhoc && singleTarget.lookback > 0
-    ? _activeLookbackItems(singleTarget.adhoc, singleTarget.lookback) : [];
+    ? _activeLookbackItems(singleTarget.topic, singleTarget.adhoc, singleTarget.lookback, singleTarget.agent, singleTarget.routeAgent) : [];
   const activeIdSet = new Set(activeItems.map(i => i.id));
 
   document.querySelectorAll('#messages .history-item.assistant:not(.msg-thinking)').forEach(el => {
@@ -5948,9 +5987,25 @@ async function sendMessage(text, opts = {}) {
   const displayFlowRoute = opts.displayFlowRoute || flowRoute || route || opts.flowRoute || stickyChip?.route || chipDisplayFlowRoute || null;
   let flowRunId = flowRoute ? (opts.flowRunId || null) : null;
   let flowRunIdEmitted = false;
+  const lookbackKey = _lookbackSelectionKey(topic, lookback, agent);
+  const lookbackSelection = adhoc && lookback > 0 && !opts.retryContext
+    ? _lookbackSelections.get(lookbackKey) : null;
+  const lookbackExcludedIds = opts.retryContext?.lookbackExcludedIds
+    ?? (lookbackSelection?.cleared ? [] : [...(lookbackSelection?.ids || [])]);
+  const lookbackViaPins = opts.retryContext?.lookbackViaPins
+    ?? (!!opts.retryContext || !!lookbackSelection?.cleared);
+  const consumeLookbackSelection = () => {
+    if (lookbackSelection && _lookbackSelections.get(lookbackKey) === lookbackSelection) {
+      _lookbackSelections.delete(lookbackKey);
+    }
+  };
+  const shellLookbackIds = nativeShell && !opts.retryContext
+    ? _activeLookbackItems(topic, adhoc, lookback, agent).map(item => item.id) : [];
   if (updateComposerRoute) {
     setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, suppressTurnCount: suppressChipTurnCount });
   }
+  const submittedChip = stickyChip;
+  const { selectedPins, stagedFiles } = opts.cartSnapshot || contextCartSnapshot(topic);
   const sendTime = new Date().toISOString();
   const liveHiddenByScope = !shouldShowPendingTurn({ topic, agent, adhoc, flow_route: flowRoute });
 
@@ -6470,6 +6525,8 @@ async function sendMessage(text, opts = {}) {
       updateComposerRoute: false,
       retryContext: {
         pins: _contextIds,
+        lookbackViaPins,
+        lookbackExcludedIds,
         mem: _includeTopicMemory,
         attachedPaths: _attachedFiles.map(file => file.path),
       },
@@ -6608,6 +6665,22 @@ async function sendMessage(text, opts = {}) {
     }
     refreshAllRevertButtons();
     scrollToBottom();
+  }
+
+  let reportedContextIds;
+  function renderLiveContext(isAdhoc = adhoc, turnCount = liveSessionTurnCount) {
+    if (nativeShell) return;
+    const ids = reportedContextIds ?? _contextIds;
+    liveCtxSpan.dataset.pinnedIds = JSON.stringify(ids);
+    setCtxLabel(liveCtxSpan, isAdhoc, ids.length, _includeTopicMemory, turnCount);
+  }
+
+  function acceptChatStart(contextIds) {
+    consumeLookbackSelection();
+    if (Array.isArray(contextIds)) {
+      reportedContextIds = contextIds;
+      renderLiveContext();
+    }
   }
 
   function markSessionContextDelivered(sessionId) {
@@ -6754,7 +6827,8 @@ async function sendMessage(text, opts = {}) {
           if (completedSessionId && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = completedSessionId;
           liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
           if (completedSessionId) liveCtxSpan.dataset.sessionId = completedSessionId;
-          if (!nativeShell) setCtxLabel(liveCtxSpan, !!data.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
+          if (data.prompt_context != null) reportedContextIds = historyPromptContext(data).pins;
+          renderLiveContext(!!data.adhoc);
           if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, completedSessionId || null, liveSessionTurnCount);
           if (chainMarker && !adhoc) updateRouteChainMarkerTurnCount(chainMarker, 'origin', liveSessionTurnCount);
           markSessionContextDelivered(completedSessionId);
@@ -6845,7 +6919,7 @@ async function sendMessage(text, opts = {}) {
   }
 
   // Compute pinned IDs to inject — works for both session and adhoc turns
-  let _effectiveAgent = agent || stickyChip?.agent || null;
+  let _effectiveAgent = agent || (submittedChip?.topic === topic ? submittedChip.agent : null);
   if (!_effectiveAgent) {
     try {
       const topics = await _acTopics();
@@ -6860,20 +6934,21 @@ async function sendMessage(text, opts = {}) {
     _contextIds = opts.retryContext.pins;
     _attachedFiles = opts.retryContext.attachedPaths.map(path => ({ path }));
   } else {
-    const lookbackIds = _activeLookbackItems(adhoc, lookback).map(item => item.id);
     const pinnedIds = nativeShell
-      ? getPinnedItems().map(item => item.id)
-      : _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
+      ? selectedPins.map(item => item.id)
+      : _injectablePinnedIds(topic, _effectiveAgent, adhoc, selectedPins);
     const extraPinnedIds = Array.isArray(opts.extraPinnedIds) ? opts.extraPinnedIds : [];
-    _contextIds = [...new Set([...lookbackIds, ...pinnedIds, ...extraPinnedIds])];
-    await pruneMissingAttachedFiles();
-    _attachedFiles = _attachedFilesState({ topic, agent: _effectiveAgent, adhoc }).selected;
+    const explicitLookbackIds = lookbackSelection?.cleared ? lookbackSelection.ids : shellLookbackIds;
+    _contextIds = [...new Set([...explicitLookbackIds, ...pinnedIds, ...extraPinnedIds])];
+    const missing = new Set(await pruneMissingAttachedFiles(topic, stagedFiles));
+    _attachedFiles = _attachedFilesState(
+      { topic, agent: _effectiveAgent, adhoc }, stagedFiles.filter(file => !missing.has(file.path)),
+    ).selected;
   }
   if (!nativeShell) {
     const activeSessionId = !adhoc ? (_sessionIds[`${topic}@${_effectiveAgent || '_'}`] || null) : null;
     const activeSessionTurns = activeSessionId ? (_sessionTurnCounts[activeSessionId] || 0) : 0;
-    setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, activeSessionTurns);
-    liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
+    renderLiveContext(adhoc, activeSessionTurns);
     liveCtxSpan.dataset.mem = _includeTopicMemory ? 'true' : 'false';
     if (_effectiveAgent) liveCtxSpan.dataset.agent = _effectiveAgent;
     if (activeSessionId) liveCtxSpan.dataset.sessionId = activeSessionId;
@@ -6882,7 +6957,9 @@ async function sendMessage(text, opts = {}) {
   const chatPayload = {
     message, topic, agent, lookback, adhoc, source,
     ...(flowRoute ? { flow_route: flowRoute, ...(flowRunId ? { flow_run_id: flowRunId } : {}) } : {}),
-    ...(!nativeShell && adhoc && lookback > 0 ? { lookback_via_pins: true } : {}),
+    ...(!nativeShell && adhoc && lookback > 0 && lookbackViaPins ? { lookback_via_pins: true } : {}),
+    ...(!nativeShell && adhoc && lookback > 0 && !lookbackViaPins && lookbackExcludedIds.length
+      ? { lookback_excluded_ids: lookbackExcludedIds } : {}),
     ...(_includeTopicMemory ? { include_topic_memory: true } : {}),
     ...(_contextIds.length ? { pinned_ids: _contextIds } : {}),
     ...(_attachedFiles.length ? { attached_paths: _attachedFiles.map(f => f.path) } : {}),
@@ -6918,8 +6995,9 @@ async function sendMessage(text, opts = {}) {
           // up a duplicate "pending" bubble if realtime discovery already
           // spawned one for this msg_id in the meantime — then recover the
           // real content the same way an interrupted stream does.
-          if (msgId || completedFromStatus || completionRendered) return;
           if (lateResult?.ok && lateResult.msg_id) {
+            acceptChatStart(lateResult.context_ids);
+            if (msgId || completedFromStatus || completionRendered) return;
             // Discovery may have received and fully rendered the authoritative
             // turn before this delayed acknowledgement. In that ordering, keep
             // the discovered final bubble and discard this closure's stale
@@ -6948,8 +7026,7 @@ async function sendMessage(text, opts = {}) {
         flowRunId = result.flow_run_id || flowRunId;
         if (opts.onFlowRunId) { opts.onFlowRunId(flowRunId); flowRunIdEmitted = true; }
         attachMsgId(result.msg_id);
-        _lookbackUnselected.clear();
-        _lastLookbackSelectionKey = '';
+        acceptChatStart(result.context_ids);
         markSessionContextPending();
         detachedPolling = true;
         // From here on, the WS reconnect flow (not this closure's thinking-preview
@@ -7031,8 +7108,7 @@ async function sendMessage(text, opts = {}) {
     // sibling targets can fire without waiting on this one to complete.
     if (opts.onFlowRunId) { opts.onFlowRunId(flowRunId); flowRunIdEmitted = true; }
     if (!msgId) attachMsgId(res.headers.get('X-Squid-Msg-Id'));
-    _lookbackUnselected.clear();
-    _lastLookbackSelectionKey = '';
+    consumeLookbackSelection();
     markSessionContextPending();
 
     const reader  = res.body.getReader();
@@ -7067,6 +7143,7 @@ async function sendMessage(text, opts = {}) {
                 shellTimeoutSeconds = meta.shell_timeout;
                 refreshShellWaitingStatus();
               }
+              if (Array.isArray(meta.context_ids)) reportedContextIds = meta.context_ids;
               resolvedAgent = meta.agent || null;
               const metaRuntime = runtimeRef(meta.harness || '', meta.provider || null);
               // Correct the send-time provider guess once the resolved provider
@@ -7111,7 +7188,7 @@ async function sendMessage(text, opts = {}) {
                   }
                 }
               }
-              if (updateComposerRoute) {
+              if (updateComposerRoute && stickyChip === submittedChip) {
                 setTopicChip(topic, resolvedAgent, resolvedAdhoc, lookback, {
                   route,
                   chainTarget,
@@ -7125,7 +7202,7 @@ async function sendMessage(text, opts = {}) {
               if (meta.msg_id) {
                 queuePosition = null;
                 attachMsgId(meta.msg_id);
-                if (!nativeShell) setCtxLabel(liveCtxSpan, adhoc);
+                renderLiveContext();
                 bubble.dataset.topic = topic;
                 if (resolvedAgent) {
                   bubble.dataset.agent = resolvedAgent;
@@ -7197,7 +7274,7 @@ async function sendMessage(text, opts = {}) {
               }
               liveSessionTurnCount = parseInt(stats.session_turn_count || '0', 10) || 0;
               _advisoryTurnCount = liveSessionTurnCount;
-              if (!nativeShell) setCtxLabel(liveCtxSpan, !!stats.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
+              renderLiveContext(!!stats.adhoc);
               liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
               if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
               if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, stats.session_id || null, liveSessionTurnCount);
@@ -7285,8 +7362,7 @@ async function sendMessage(text, opts = {}) {
             if (flowRunId && msgId) watchFlowRun(flowRunId, msgId, flowRoute || route);
             if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
             // Update ctx label with pin count and store IDs for popup
-            if (!nativeShell) setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
-            liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
+            renderLiveContext();
             liveCtxSpan.dataset.mem = _includeTopicMemory ? 'true' : 'false';
             markSessionContextDelivered(lastSessionId);
             updateInContextMarkers();
@@ -7447,9 +7523,12 @@ async function sendOriginBroadcast(text, opts = {}) {
   let resolveSharedFlowRunId;
   const sharedFlowRunId = new Promise(resolve => { resolveSharedFlowRunId = resolve; });
   const sends = originTargets.map((target, i) => {
+    const cartSnapshot = contextCartSnapshot(target.topic);
     if (i === 0) {
       return sendMessage(text, {
         ...opts,
+        parsedInput: parsed,
+        cartSnapshot,
         broadcastTarget: target,
         flowRoute: parsed.route,
         displayFlowRoute,
@@ -7459,6 +7538,8 @@ async function sendOriginBroadcast(text, opts = {}) {
     }
     return sharedFlowRunId.then(flowRunId => sendMessage(text, {
       ...opts,
+      parsedInput: parsed,
+      cartSnapshot,
       broadcastTarget: target,
       flowRoute: parsed.route,
       displayFlowRoute,
@@ -8981,6 +9062,7 @@ function appendHistoryItem(item, container) {
   if (item.id) asstBubble.dataset.msgId = String(item.id);
   asstBubble.dataset.topic = item.topic || 'default';
   if (item.agent) asstBubble.dataset.agent = item.agent;
+  asstBubble.dataset.lookbackEligible = String(!item.adhoc && (!item.status || item.status === 'done'));
   if (item.session_id) asstBubble.dataset.sessionId = item.session_id;
 
   const asstHeader = document.createElement('div');
@@ -18128,6 +18210,24 @@ function escapeHtml(s) {
 function getPinnedItems() {
   try { return (JSON.parse(localStorage.getItem('pinnedItems') || '[]')).sort((a, b) => a.id - b.id); } catch { return []; }
 }
+function contextCartSnapshot(topic) {
+  return { selectedPins: getSelectedPins(topic), stagedFiles: getAttachedFiles(topic) };
+}
+
+function getSelectedPins(topic) {
+  const root = _memoryRootTopic(topic);
+  return getPinnedItems().filter(item => item.selectedTrees?.includes(root));
+}
+
+function setPinSelected(id, topic, selected) {
+  const root = _memoryRootTopic(topic);
+  setPinnedItems(getPinnedItems().map(item => {
+    if (item.id !== id) return item;
+    const trees = (item.selectedTrees || []).filter(tree => tree !== root);
+    return { ...item, selectedTrees: selected ? [...trees, root] : trees };
+  }));
+}
+
 function refreshPinnedContextUi() {
   const pinnedIds = new Set(getPinnedItems().map(item => Number(item.id)));
   document.querySelectorAll('.msg-pin-btn[data-msg-id]').forEach(btn => {
@@ -18155,21 +18255,35 @@ window.addEventListener('storage', event => {
     HIDDEN_ROUTES_KEY, HIDDEN_PROMPTS_KEY].includes(event.key)) applyComposerHistory();
 });
 
-function getAttachedFiles() {
-  try { return JSON.parse(localStorage.getItem('attachedFiles') || '[]'); } catch { return []; }
+function getStagedAttachments() {
+  try { return JSON.parse(sessionStorage.getItem('attachedFiles') || '{}') || {}; } catch { return {}; }
 }
-function setAttachedFiles(items) { localStorage.setItem('attachedFiles', JSON.stringify(items)); }
+function clearAttachmentsForTreeSwitch(topic) {
+  if (getStagedAttachments().root !== _memoryRootTopic(topic)) sessionStorage.removeItem('attachedFiles');
+}
+function getAttachedFiles(topic = _currentContextTarget().topic) {
+  const staged = getStagedAttachments();
+  return staged.root === _memoryRootTopic(topic) ? (staged.items || []) : [];
+}
+function setAttachedFiles(items, topic = _currentContextTarget().topic) {
+  sessionStorage.setItem('attachedFiles', JSON.stringify({ root: _memoryRootTopic(topic), items }));
+}
+function setAttachedFileSelected(path, topic, selected) {
+  setAttachedFiles(getAttachedFiles(topic).map(file =>
+    file.path === path ? { ...file, selected } : file), topic);
+}
+
 function getAttachedFilesInSession() {
   try { return JSON.parse(localStorage.getItem('attachedFilesInSession') || '{}'); } catch { return {}; }
 }
 function setAttachedFilesInSession(map) { localStorage.setItem('attachedFilesInSession', JSON.stringify(map)); }
-function _removeAttachedFilePath(path) {
+function _removeAttachedFilePath(path, topic = _currentContextTarget().topic) {
   if (!path) return false;
   let changed = false;
-  const items = getAttachedFiles();
+  const items = getAttachedFiles(topic);
   const nextItems = items.filter(f => f.path !== path);
   if (nextItems.length !== items.length) {
-    setAttachedFiles(nextItems);
+    setAttachedFiles(nextItems, topic);
     changed = true;
   }
   const inSession = getAttachedFilesInSession();
@@ -18198,8 +18312,7 @@ function removeAttachedFilePath(path) {
   }
   return changed;
 }
-async function pruneMissingAttachedFiles() {
-  const files = getAttachedFiles();
+async function pruneMissingAttachedFiles(topic = _currentContextTarget().topic, files = getAttachedFiles(topic)) {
   const paths = [...new Set(files.map(f => f.path).filter(Boolean))];
   if (!paths.length) return [];
   try {
@@ -18214,7 +18327,7 @@ async function pruneMissingAttachedFiles() {
       .filter(item => !item.exists || !item.is_file)
       .map(item => item.path);
     if (!missing.length) return [];
-    missing.forEach(path => _removeAttachedFilePath(path));
+    missing.forEach(path => _removeAttachedFilePath(path, topic));
     updatePinCount();
     if (pinPanel.classList.contains('open')) renderPinPanel();
     return missing;
@@ -18231,7 +18344,12 @@ function addAttachedFile(path) {
 }
 function openFileUploadPicker() {
   const savedPath = localStorage.getItem('squid_fv_last_path_picker') || null;
-  openFileViewer(savedPath, null, null, null, null, { onPick: addAttachedFile }, { persistKey: 'picker' });
+  const root = _memoryRootTopic(_currentContextTarget().topic);
+  openFileViewer(savedPath, null, null, null, null, {
+    onPick: path => {
+      if (_memoryRootTopic(_currentContextTarget().topic) === root) addAttachedFile(path);
+    },
+  }, { persistKey: 'picker' });
 }
 function clearAttachedFiles() {
   setAttachedFiles([]);
@@ -18242,10 +18360,10 @@ function clearPinnedItems() {
   setPinnedItems([]);
   document.querySelectorAll('.msg-pin-btn.pinned').forEach(b => b.classList.remove('pinned'));
   document.querySelectorAll('.msg.assistant.pinned-sel').forEach(b => b.classList.remove('pinned-sel'));
-  const { adhoc, lookback } = _currentContextTarget();
-  const lookbackItems = _allLookbackItems(adhoc, lookback);
-  _lastLookbackSelectionKey = _lookbackSelectionKey(adhoc, lookback, lookbackItems);
-  lookbackItems.forEach(item => _lookbackUnselected.add(item.id));
+  const { topic, adhoc, lookback, routeAgent } = _currentContextTarget();
+  if (adhoc && lookback > 0) {
+    _lookbackSelections.set(_lookbackSelectionKey(topic, lookback, routeAgent), { cleared: true, ids: new Set() });
+  }
   updateInContextMarkers();
   updatePinCount();
   if (pinPanel.classList.contains('open')) renderPinPanel();
@@ -18265,7 +18383,8 @@ function _currentContextTarget() {
   const lookback = adhoc
     ? (fromChip || !parsed.adhoc ? (stickyChip?.lookback || 0) : parsed.lookback)
     : 0;
-  let agent = parsed.agent || stickyChip?.agent || null;
+  const routeAgent = parsed.agent || null;
+  let agent = routeAgent || stickyChip?.agent || null;
   if (!agent && _topicsCache) {
     agent = _topicsCache.find(t => t.name === topic)?.agent || null;
   } else if (!agent) {
@@ -18276,7 +18395,7 @@ function _currentContextTarget() {
       updateInContextMarkers();
     });
   }
-  return { topic, agent, adhoc, lookback };
+  return { topic, agent, adhoc, lookback, routeAgent };
 }
 
 function _memoryOverrideKey(topic, agent, adhoc) {
@@ -18541,7 +18660,8 @@ async function _topicMemoryStateForSend(topic, agent, adhoc) {
   return { selected: _memorySelectionOverrides[key] ?? defaultSelected, revision };
 }
 
-function _injectablePinnedIds(topic, agent, adhoc, lookback, items = getPinnedItems()) {
+function _injectablePinnedIds(topic, agent, adhoc, items = getSelectedPins(topic)) {
+  if (adhoc) return items.map(item => item.id);
   const taKey = `${topic}@${agent || '_'}`;
   const currentSid = _sessionIds[taKey] || null;
   const injected = getInjectedInto();
@@ -18549,26 +18669,23 @@ function _injectablePinnedIds(topic, agent, adhoc, lookback, items = getPinnedIt
   return items
     .filter(item => {
       const sameSession = item.session_id && currentSid && item.session_id === currentSid;
-      if (sameSession && !adhoc) return false;
-      if (adhoc && lookback === 0) return true;
-      if (!adhoc && pending.includes(item.id)) return false;
+      if (sameSession || pending.includes(item.id)) return false;
       if (currentSid && (injected[currentSid] || []).includes(item.id)) return false;
       return true;
     })
     .map(item => item.id);
 }
 
-function _attachedFilesState(target = null) {
-  const { topic, agent, adhoc } = target || _currentContextTarget();
-  const files = getAttachedFiles();
-  if (adhoc) return { selected: files, pending: [], saved: [] };
+function _attachedFilesState(target = _currentContextTarget(), files = getAttachedFiles(target.topic)) {
+  const { topic, agent, adhoc } = target;
+  if (adhoc) return { selected: files.filter(file => file.selected !== false), pending: [], saved: [] };
   const taKey = `${topic}@${agent || '_'}`;
   const currentSid = _sessionIds[taKey] || null;
   const inSession = getAttachedFilesInSession();
   const sent = new Set(currentSid ? (inSession[currentSid] || []) : []);
   const pending = new Set(_pendingSessionAttachedFiles[taKey] || []);
   return {
-    selected: files.filter(f => !sent.has(f.path) && !pending.has(f.path)),
+    selected: files.filter(f => f.selected !== false && !sent.has(f.path) && !pending.has(f.path)),
     pending: files.filter(f => pending.has(f.path)),
     saved: files.filter(f => sent.has(f.path)),
   };
@@ -18587,18 +18704,18 @@ function updatePinCount() {
     // selected," at most +1 for "some head has memory selected," same as
     // the single-target formula below but clamped to boolean per category.
     const asTarget = a => ({ topic: a.topic, agent: a.agent, adhoc: !!a.fresh });
-    const anyPinSelected = broadcastAgents.some(a => _injectablePinnedIds(a.topic, a.agent, !!a.fresh, 0).length > 0);
+    const anyPinSelected = broadcastAgents.some(a => _injectablePinnedIds(a.topic, a.agent, !!a.fresh).length > 0);
     const anyMemSelected = broadcastAgents.some(a => _topicMemoryState(asTarget(a)).selected);
     selectedCount = (anyPinSelected ? 1 : 0) + (anyMemSelected ? 1 : 0);
     const anyPinPending = broadcastAgents.some(a => !a.fresh && (_pendingSessionInjectedIds[`${a.topic}@${a.agent || '_'}`] || []).length > 0);
     const anyMemPending = broadcastAgents.some(a => _topicMemoryState(asTarget(a)).pending);
     pendingCount = (anyPinPending ? 1 : 0) + (anyMemPending ? 1 : 0);
   } else {
-    const { topic, agent, adhoc, lookback } = _currentContextTarget();
+    const { topic, agent, adhoc, lookback, routeAgent } = _currentContextTarget();
     const taKey = `${topic}@${agent || '_'}`;
     const selectedIds = [
-      ..._activeLookbackItems(adhoc, lookback).map(item => item.id),
-      ..._injectablePinnedIds(topic, agent, adhoc, lookback),
+      ..._activeLookbackItems(topic, adhoc, lookback, agent, routeAgent).map(item => item.id),
+      ..._injectablePinnedIds(topic, agent, adhoc),
     ];
     const pendingIds = !adhoc ? (_pendingSessionInjectedIds[taKey] || []) : [];
     const memoryState = _topicMemoryState();
@@ -18623,45 +18740,21 @@ function _pinTagStr(item) {
   return item.agent ? `#${item.topic}@${item.agent}` : `#${item.topic}`;
 }
 
-function _pinStatus(item) {
-  const injected  = getInjectedInto();
-  const parsed    = parseInput(input.value);
-  const chipTopic = parsed.topic || stickyChip?.topic || 'default';
-  const isAdhoc   = parsed.adhoc || (stickyChip?.adhoc ?? false);
-
-  // Resolve effective agent: explicit in input > stickyChip > topics cache (sticky agent)
-  let chipAgent = parsed.agent || stickyChip?.agent || null;
-  if (!chipAgent) {
-    if (_topicsCache) {
-      chipAgent = _topicsCache.find(t => t.name === chipTopic)?.agent || null;
-    } else {
-      // Cache cold — load async and re-render panel when ready
-      _acTopics().then(() => {
-        if (_topicsCache && pinPanel.classList.contains('open')) renderPinPanel();
-      });
-    }
+function _pinStatus(item, { topic, agent, adhoc }, selected) {
+  const key = `${topic}@${agent || '_'}`;
+  const sessionId = !adhoc && _sessionIds[key];
+  if (sessionId && (getInjectedInto()[sessionId] || []).includes(item.id)) {
+    return { text: 'Sent', cls: 'pin-status-session' };
   }
-
-  const chipTaKey = `${chipTopic}@${chipAgent || '_'}`;
-  const currentSid = _sessionIds[chipTaKey] || null;
-  const sameSession = item.session_id && currentSid && item.session_id === currentSid;
-  const pending = _pendingSessionInjectedIds[chipTaKey] || [];
-
-  // Skip only if the pin is from the exact current session — --resume already covers it
-  if (sameSession && !isAdhoc) {
-    return { text: 'in session · skip', cls: 'pin-status-session' };
+  if (sessionId && item.session_id === sessionId) {
+    return { text: 'In session', cls: 'pin-status-session' };
   }
-
-  // Already available in this topic@agent session via a previous injected turn
-  // Only meaningful for !N lookback where model retains prior context; !0 is always fresh
-  const chipLookback = parsed.adhoc ? parsed.lookback : (stickyChip?.lookback ?? 0);
-  if (currentSid && (injected[currentSid] || []).includes(item.id) && !(isAdhoc && chipLookback === 0))
-    return { text: 'in session · skip', cls: 'pin-status-session' };
-
-  if (!isAdhoc && pending.includes(item.id))
+  if (!adhoc && (_pendingSessionInjectedIds[key] || []).includes(item.id)) {
     return { text: 'sending', cls: 'pin-status-session' };
-
-  return { text: 'will inject', cls: 'pin-status-inject' };
+  }
+  return selected
+    ? { text: 'Will inject', cls: 'pin-status-inject' }
+    : { text: 'Will skip', cls: 'pin-status-skip' };
 }
 
 function _memoryStatus(state) {
@@ -18677,8 +18770,10 @@ function _memoryStatus(state) {
 function _attachedFileStatus(file) {
   const state = _attachedFilesState();
   if (state.pending.some(f => f.path === file.path)) return { text: 'sending', cls: 'pin-status-session' };
-  if (state.saved.some(f => f.path === file.path)) return { text: 'in session · skip', cls: 'pin-status-session' };
-  return { text: 'will inject', cls: 'pin-status-inject' };
+  if (state.saved.some(f => f.path === file.path)) return { text: 'Sent', cls: 'pin-status-session' };
+  return file.selected !== false
+    ? { text: 'Will inject', cls: 'pin-status-inject' }
+    : { text: 'Will skip', cls: 'pin-status-skip' };
 }
 
 function renderPinPanel() {
@@ -18686,16 +18781,17 @@ function renderPinPanel() {
   const listEl = document.getElementById('pin-panel-list');
   const clearBtn = document.getElementById('pin-panel-clear');
   const clearFilesBtn = document.getElementById('pin-panel-clear-files');
-  const { topic: ctxTopic, agent: ctxAgent, adhoc, lookback } = _currentContextTarget();
-  const activeLbItems = _activeLookbackItems(adhoc, lookback);
-  const activeLbIds = new Set(activeLbItems.map(i => i.id));
-  const manualPinIds = new Set(items.map(i => i.id));
-  // Merge: lookback items first, then manual pins not already covered by lookback
-  const mergedItems = [
-    ...activeLbItems.map(i => ({ ...i, isLookback: true, isManual: manualPinIds.has(i.id) })),
-    ...items.filter(i => !activeLbIds.has(i.id)).map(i => ({ ...i, isLookback: false, isManual: true })),
-  ];
-  if (clearBtn) clearBtn.disabled = mergedItems.length === 0;
+  const target = _currentContextTarget();
+  const { topic, agent, adhoc, lookback, routeAgent } = target;
+  const lookbackItems = _allLookbackItems(topic, adhoc, lookback, agent);
+  const lookbackIds = new Set(lookbackItems.map(item => item.id));
+  const selectedIds = new Set([
+    ..._activeLookbackItems(topic, adhoc, lookback, agent, routeAgent).map(item => item.id),
+    ...getSelectedPins(topic).map(item => item.id),
+  ]);
+  const manualPinIds = new Set(items.map(item => item.id));
+  const mergedItems = [...lookbackItems, ...items.filter(item => !lookbackIds.has(item.id))];
+  if (clearBtn) clearBtn.disabled = mergedItems.length === 0 && !(adhoc && lookback > 0);
   let html = '';
   const memoryState = _topicMemoryState();
   const memoryStatus = _memoryStatus(memoryState);
@@ -18714,18 +18810,20 @@ function renderPinPanel() {
   if (mergedItems.length) {
     html += `<div class="pin-section-label">Pinned</div>`;
     mergedItems.forEach(item => {
-      const st = _pinStatus(item);
+      const checked = selectedIds.has(item.id);
+      const st = _pinStatus(item, target, checked);
       const tag = _pinTagStr(item);
       const preview = (item.content || '').replace(/\s+/g, ' ').slice(0, 90);
-      const itemCls = item.isLookback ? 'pin-item pin-item-lookback' : 'pin-item';
-      const control = item.isLookback
-        ? `<button class="pin-item-toggle active" data-lookback-id="${item.id}" type="button">On</button>`
-        : `<button class="pin-item-remove" data-id="${item.id}" type="button">✕</button>`;
+      const itemCls = lookbackIds.has(item.id) ? 'pin-item pin-item-lookback' : 'pin-item';
+      const remove = manualPinIds.has(item.id)
+        ? `<button class="pin-item-remove" data-id="${item.id}" aria-label="Remove pin" type="button">✕</button>`
+        : '';
       html += `<div class="${itemCls}" data-open-id="${item.id}">
         <span class="pin-item-tag">${escapeHtml(tag)}</span>
         <span class="pin-item-preview">${escapeHtml(preview)}</span>
         <span class="pin-item-status ${st.cls}">${st.text}</span>
-        ${control}
+        <button class="pin-item-toggle${checked ? ' active' : ''}" data-pin-select="${item.id}" type="button" aria-label="Include pinned context in next send" aria-pressed="${checked}">${checked ? 'On' : 'Off'}</button>
+        ${remove}
       </div>`;
     });
   } else {
@@ -18737,6 +18835,7 @@ function renderPinPanel() {
   if (attachedFiles.length) {
     html += `<div class="pin-section-label">Files</div>`;
     attachedFiles.forEach(file => {
+      const checked = file.selected !== false;
       const st = _attachedFileStatus(file);
       const lastSlash = file.path.lastIndexOf('/');
       const dirPart = lastSlash >= 0 ? file.path.slice(0, lastSlash + 1) : '';
@@ -18745,6 +18844,7 @@ function renderPinPanel() {
         <span class="pin-item-tag"><span class="material-symbols-outlined" aria-hidden="true">description</span></span>
         <span class="pin-item-preview pin-item-preview-path" title="${escapeHtml(file.path)}"><span class="pin-item-path-dir">${escapeHtml(dirPart)}</span><span class="pin-item-path-name">${escapeHtml(namePart)}</span></span>
         <span class="pin-item-status ${st.cls}">${st.text}</span>
+        <button class="pin-item-toggle${checked ? ' active' : ''}" data-file-select="${escapeHtml(file.path)}" type="button" aria-label="Include ${escapeHtml(namePart)} in next send" aria-pressed="${checked}">${checked ? 'On' : 'Off'}</button>
         <button class="pin-item-remove" data-file-remove="${escapeHtml(file.path)}" type="button">✕</button>
       </div>`;
     });
@@ -18774,19 +18874,34 @@ function renderPinPanel() {
       el.addEventListener('click', () => openMsgModal(parseInt(row.dataset.openId, 10)));
     });
   });
-  listEl.querySelectorAll('[data-lookback-id]').forEach(btn => {
-    btn.addEventListener('mousedown', e => {
-      e.preventDefault();
-      const id = parseInt(btn.dataset.lookbackId);
-      _lookbackUnselected.add(id);
-      updateInContextMarkers();
-      updatePinCount();
-      renderPinPanel();
+  listEl.querySelectorAll('[data-pin-select]').forEach(button => {
+    button.addEventListener('click', () => {
+      const selected = button.getAttribute('aria-pressed') !== 'true';
+      const id = Number(button.dataset.pinSelect);
+      if (lookbackIds.has(id)) {
+        _setLookbackSelected(topic, lookback, routeAgent, id, selected);
+      }
+      if (manualPinIds.has(id)) {
+        setPinSelected(id, topic, selected);
+      } else {
+        refreshPinnedContextUi();
+      }
+      listEl.querySelector(`[data-pin-select="${id}"]`)?.focus({ preventScroll: true });
     });
   });
   listEl.querySelectorAll('.pin-item[data-file-path]').forEach(row => {
     row.querySelectorAll('.pin-item-preview').forEach(el => {
       el.addEventListener('click', () => openFileViewer(row.dataset.filePath));
+    });
+  });
+  listEl.querySelectorAll('[data-file-select]').forEach(button => {
+    button.addEventListener('click', () => {
+      const selected = button.getAttribute('aria-pressed') !== 'true';
+      const path = button.dataset.fileSelect;
+      setAttachedFileSelected(path, topic, selected);
+      updatePinCount();
+      renderPinPanel();
+      listEl.querySelector(`[data-file-select="${CSS.escape(path)}"]`)?.focus({ preventScroll: true });
     });
   });
   listEl.querySelectorAll('[data-file-remove]').forEach(btn => {
@@ -19120,12 +19235,13 @@ function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
       btn.classList.remove('pinned');
       bubbleEl.classList.remove('pinned-sel');
     } else if (btn.classList.contains('lookback-sel')) {
-      _lookbackUnselected.add(msgId);
+      const target = _currentContextTarget();
+      _setLookbackSelected(target.topic, target.lookback, target.routeAgent, msgId, false);
       updateInContextMarkers();
     } else {
       const text = _messageBodyText(bubbleEl).slice(0, 300);
       const sid = bubbleEl.dataset.sessionId || null;
-      setPinnedItems([...pinned, { id: msgId, topic, agent: agent || null, session_id: sid, content: text }]);
+      setPinnedItems([...pinned, { id: msgId, topic, agent: agent || null, session_id: sid, content: text, selectedTrees: [_memoryRootTopic(_currentContextTarget().topic)] }]);
       btn.classList.add('pinned');
       bubbleEl.classList.add('pinned-sel');
     }
@@ -19223,9 +19339,12 @@ async function replyToMessage(bubbleEl, topic, agent, adhoc) {
   if (msgId == null || !sid || sid === currentSid) return;
 
   const pinned = getPinnedItems();
-  if (pinned.find(i => i.id === msgId)) return;
+  if (pinned.find(i => i.id === msgId)) {
+    setPinSelected(msgId, msgTopic, true);
+    return;
+  }
   const text = _messageBodyText(bubbleEl).slice(0, 300);
-  setPinnedItems([...pinned, { id: msgId, topic: msgTopic, agent: msgAgent, session_id: sid, content: text }]);
+  setPinnedItems([...pinned, { id: msgId, topic: msgTopic, agent: msgAgent, session_id: sid, content: text, selectedTrees: [_memoryRootTopic(msgTopic)] }]);
   bubbleEl.querySelector(`.msg-pin-btn[data-msg-id="${msgId}"]`)?.classList.add('pinned');
   bubbleEl.classList.add('pinned-sel');
   updatePinCount();
@@ -19774,7 +19893,9 @@ document.addEventListener('click', e => {
   if (!acEl.contains(e.target) && e.target !== input && !topicChipEl.contains(e.target)) {
     hideAutocomplete();
   }
-  if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
+  // Cart toggles can replace the clicked row before this listener runs.
+  const clickPath = e.composedPath();
+  if (!clickPath.includes(pinPanel) && !clickPath.includes(pinBtn)) closePinPanel();
   const ctxPopup = document.getElementById('ctx-popup');
   const statsTurnPopup = document.getElementById('stats-turn-popup');
   const inSecondary = e.target.closest('#msg-modal, #memory-modal, #topic-delete-modal, #agent-session-modal, #preset-name-modal');
@@ -19816,6 +19937,10 @@ function _isTextPath(path) {
   // and re-check the real extension underneath instead of misreading it as binary
   if (_GENERIC_SUFFIXES.has(ext)) return _isTextPath(path.slice(0, -(ext.length + 1)));
   return false;
+}
+
+function _isHtmlPreviewPath(path) {
+  return /\.html?$/i.test(path || '');
 }
 
 function _isWebPreviewPath(path) {
@@ -19874,7 +19999,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   const isInline = !!inlineContainer;
 
   const navHistory = [{ path: initialPath, line: initialLine, endLine: initialEndLine }];
-  let historyIdx = 0;
+  const startInPreview = viewerOpts?.preview && _isHtmlPreviewPath(initialPath);
+  if (startInPreview) navHistory.push({ ...navHistory[0], preview: 'web' });
+  let historyIdx = navHistory.length - 1;
   let path = initialPath;
   let line = initialLine;
   let endLine = initialEndLine;
@@ -19883,7 +20010,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   let pathIsText = false;
   let fileText = '';
   let markdownPreview = false;
-  let webPreview = false;
+  let webPreview = Boolean(startInPreview);
   let pushedFileViewerHistory = false;
   let setDirUploadStatus = null;
   const initialSearch = viewerOpts?.search || '';
@@ -21577,6 +21704,7 @@ function _renderWebFilePreview(container, path) {
   const frame = document.createElement('iframe');
   frame.className = 'fv-web-preview';
   frame.title = 'File preview';
+  if (_isHtmlPreviewPath(path)) frame.setAttribute('sandbox', 'allow-scripts');
   frame.src = '/localfile?' + new URLSearchParams({ path });
   container.appendChild(frame);
 }
@@ -21587,8 +21715,13 @@ document.addEventListener('click', e => {
   const href = a.getAttribute('href') || '';
   if (!href.startsWith('/localfile')) return;
   const url = new URL(a.href);
+  if (url.origin !== location.origin || url.pathname !== '/localfile') return;
   const pathVal = url.searchParams.get('path') || '';
   e.preventDefault();
+  if (url.hash === '#preview' && _isHtmlPreviewPath(pathVal) && !_isSquidWorktreePath(pathVal)) {
+    openFileViewer(pathVal, null, null, null, null, null, { preview: true });
+    return;
+  }
   const hm = url.hash.match(/^#L(\d+)(?:-L(\d+))?$/);
   const lineVal = hm ? parseInt(hm[1], 10) : null;
   const endLineVal = hm?.[2] ? parseInt(hm[2], 10) : null;

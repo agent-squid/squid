@@ -631,6 +631,7 @@ class ChatRequest(BaseModel):
     source: str = Field("human")
     lookback: int = Field(0)
     lookback_via_pins: bool = Field(False)
+    lookback_excluded_ids: Optional[list[int]] = None
     adhoc: bool = Field(False)
     pinned_ids: Optional[list[int]] = None
     attached_paths: Optional[list[str]] = None
@@ -1119,6 +1120,7 @@ async def _prepare_chat_turn(
     adhoc: bool = False,
     lookback: int = 0,
     lookback_via_pins: bool = False,
+    lookback_excluded_ids: Optional[list[int]] = None,
     pinned_ids: Optional[list[int]] = None,
     attached_paths: Optional[list[str]] = None,
     include_topic_memory: bool = False,
@@ -1258,7 +1260,7 @@ async def _prepare_chat_turn(
 
     if not native_backend_command and adhoc and lookback > 0 and not lookback_via_pins:
         context_history, context_ids = get_context_history(
-            topic, lookback, agent=resolved_agent
+            topic, lookback, agent=resolved_agent, excluded_ids=lookback_excluded_ids
         )
 
     memory_config = topic_memory_squid_config(topic)
@@ -1465,6 +1467,7 @@ async def _prepare_chat_turn(
         "effort": agent_config.get("effort"),
         "cwd": cwd,
         "context_history": context_history,
+        "context_ids": stored_context_ids or [],
         "user_msg_id": user_msg_id,
         "asst_msg_id": asst_msg_id,
         "task_id": task_id,
@@ -1589,6 +1592,7 @@ async def stream_response(
     effort: Optional[str] = None,
     codex_binding: Optional[codex_subscription.Binding] = None,
     approved_runtime: Optional[provider_policy.Runtime] = None,
+    context_ids: Optional[list[int]] = None,
 ) -> AsyncGenerator[str, None]:
     meta_payload = {
         "agent": agent,
@@ -1600,6 +1604,7 @@ async def stream_response(
         "effort": effort,
         **({"dedicated_codex": codex_binding.dedicated} if codex_binding else {}),
         "kind": "shell_result" if native_shell else "assistant",
+        **({"context_ids": context_ids} if context_ids is not None else {}),
         **({"shell_timeout": NATIVE_SHELL_TIMEOUT} if native_shell else {}),
     }
     yield sse_event("meta", json.dumps(meta_payload))
@@ -1783,6 +1788,7 @@ async def chat(req: ChatRequest, request: Request = None):
         adhoc=req.adhoc,
         lookback=req.lookback,
         lookback_via_pins=req.lookback_via_pins,
+        lookback_excluded_ids=req.lookback_excluded_ids,
         pinned_ids=req.pinned_ids,
         attached_paths=req.attached_paths,
         include_topic_memory=req.include_topic_memory,
@@ -1833,6 +1839,7 @@ async def chat(req: ChatRequest, request: Request = None):
             shell_pinned_contents=prepared["shell_pinned_contents"],
             shell_attached_paths=prepared["shell_attached_paths"],
             shell_topic_memory=prepared["shell_topic_memory"],
+            context_ids=prepared.get("context_ids"),
         ),
         media_type="text/event-stream",
         headers={
@@ -4780,6 +4787,8 @@ async def serve_local_file(path: str, request: Request, render: bool = False):
         return JSONResponse({"type": "directory", "path": str(p), "entries": entry_list}, headers=_nocache)
     if not p.is_file():
         return JSONResponse({"error": "not a file"}, status_code=400)
+    # Isolate active documents even when they are opened directly.
+    document_headers = {**_nocache, "Content-Security-Policy": "sandbox allow-scripts"}
     if render and p.suffix.lower() in (".md", ".markdown"):
         raw_content = p.read_text(errors="replace")
         _frontmatter, markdown_body = _split_frontmatter(raw_content)
@@ -4790,10 +4799,12 @@ async def serve_local_file(path: str, request: Request, render: bool = False):
 <script src="/vendor/marked.min.js"></script>
 <script>marked.setOptions({{gfm:true,breaks:true}});document.getElementById('out').innerHTML=marked.parse({md_content});</script>
 </body></html>"""
-        return HTMLResponse(html, headers=_nocache)
+        return HTMLResponse(html, headers=document_headers)
     mime = _LOCALFILE_TEXT_MIME_BY_SUFFIX.get(p.suffix.lower())
     if mime is None:
         mime, _ = mimetypes.guess_type(str(p))
+    if mime in {"text/html", "application/xhtml+xml", "image/svg+xml"}:
+        _nocache = document_headers
     if mime and mime.startswith("text/"):
         return PlainTextResponse(p.read_text(errors="replace"), media_type=mime, headers=_nocache)
     if (not mime or mime == "application/octet-stream") and _looks_like_text_file(p):
@@ -5491,6 +5502,7 @@ async def _realtime_chat_start(payload: dict, browser_session_id: Optional[str] 
     prepared = await _prepare_chat_turn(
         message=req.message, topic=topic, agent=req.agent, adhoc=req.adhoc,
         lookback=req.lookback, lookback_via_pins=req.lookback_via_pins,
+        lookback_excluded_ids=req.lookback_excluded_ids,
         pinned_ids=req.pinned_ids, attached_paths=req.attached_paths,
         include_topic_memory=req.include_topic_memory, source=req.source,
         flow_run_id=flow_run_id, flow_route=flow_route,
@@ -5513,7 +5525,7 @@ async def _realtime_chat_start(payload: dict, browser_session_id: Optional[str] 
     _realtime_chat_tasks.add(task)
     task.add_done_callback(_realtime_chat_tasks.discard)
     return {"ok": True, "msg_id": prepared["asst_msg_id"], "flow_run_id": flow_run_id,
-            "task_id": prepared.get("task_id")}
+            "task_id": prepared.get("task_id"), "context_ids": prepared.get("context_ids", [])}
 
 
 def _detach_auth_listener(session_id: Optional[str], q: Optional[asyncio.Queue]) -> None:

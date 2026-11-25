@@ -2314,7 +2314,10 @@ def get_session_injected_ids(session_id: str) -> list[int]:
 
 # ── context history ────────────────────────────────────────────────────────────
 
-def get_context_history(topic: str, limit: int, agent: Optional[str] = None) -> tuple[list[dict], list[int]]:
+def get_context_history(
+    topic: str, limit: int, agent: Optional[str] = None, *,
+    excluded_ids: Optional[list[int]] = None,
+) -> tuple[list[dict], list[int]]:
     """Return up to `limit` recent non-adhoc exchanges for a topic as context.
     Returns (formatted_history, message_ids) where message_ids are the assistant row IDs included."""
     if limit <= 0:
@@ -2334,7 +2337,10 @@ def get_context_history(topic: str, limit: int, agent: Optional[str] = None) -> 
 
     result = []
     ids = []
+    excluded = set(excluded_ids or [])
     for row in reversed(rows):
+        if row["id"] in excluded:
+            continue
         ids.append(row["id"])
         result.extend([
             {"role": "user",      "content": row["user_content"]},

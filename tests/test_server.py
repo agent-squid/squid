@@ -2322,6 +2322,43 @@ def test_localfile_serves_paths_outside_configured_roots(tmp_path):
         server._LOCALFILE_ROOTS[:] = original_roots
 
 
+@pytest.mark.parametrize("suffix", [".html", ".htm"])
+def test_localfile_html_is_sandboxed_on_direct_navigation(tmp_path, suffix):
+    requested = tmp_path / f"preview{suffix}"
+    html = "<!doctype html><title>Preview</title>"
+    requested.write_text(html)
+
+    response = PairedBrowserClient(server.app).get(
+        "/localfile", params={"path": str(requested)}, headers={"Sec-Fetch-Dest": "document"}
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["content-security-policy"] == "sandbox allow-scripts"
+    assert response.text == html
+
+
+@pytest.mark.parametrize("suffix, mime, document", [
+    (".svg", "image/svg+xml", '<svg xmlns="http://www.w3.org/2000/svg"/>'),
+    (".xhtml", "application/xhtml+xml", '<html xmlns="http://www.w3.org/1999/xhtml"/>'),
+])
+def test_localfile_sandboxes_active_documents_using_the_resolved_mime(tmp_path, suffix, mime, document):
+    target = tmp_path / f"preview{suffix}"
+    target.write_text(document)
+    alias = tmp_path / "preview.html"
+    alias.symlink_to(target)
+    client = PairedBrowserClient(server.app)
+
+    for requested in (target, alias):
+        response = client.get(
+            "/localfile", params={"path": str(requested)}, headers={"Sec-Fetch-Dest": "document"}
+        )
+        assert response.status_code == 200
+        assert response.headers["content-type"] == mime
+        assert response.headers["content-security-policy"] == "sandbox allow-scripts"
+        assert response.text == document
+
+
 def test_localfile_serves_unknown_extension_text_inline(tmp_path):
     root = tmp_path / "workspace"
     root.mkdir()
@@ -2445,6 +2482,7 @@ def test_localfile_markdown_preview_strips_frontmatter_and_preserves_escapes(tmp
         server._LOCALFILE_ROOTS[:] = [root.resolve()]
         res = client.get("/localfile", params={"path": str(md_file), "render": "1"})
         assert res.status_code == 200
+        assert res.headers["content-security-policy"] == "sandbox allow-scripts"
         assert "marked.parse(" in res.text
         assert "&#96;" not in res.text
         assert "title: `literal`" not in res.text
