@@ -1541,10 +1541,9 @@ test('/restart clears its persisted draft before the page reloads', async ({ pag
   await page.route('**/cmd', route => route.fulfill({ json: { ok: true } }));
   await page.goto('/');
   await page.fill('#input', '/restart');
-  await page.waitForTimeout(400);
-  expect(await page.evaluate(() => localStorage.getItem('squid_draft'))).toBe('/restart');
+  await expect.poll(() => page.evaluate(() => readStoredComposerDraft().draft?.text)).toBe('/restart');
 
   await page.keyboard.press('Enter');
-  await expect.poll(() => page.evaluate(() => localStorage.getItem('squid_draft'))).toBeNull();
+  await expect.poll(() => page.evaluate(() => readStoredComposerDraft().draft)).toBeNull();
   await expect(page.locator('#input')).toHaveValue('');
 });

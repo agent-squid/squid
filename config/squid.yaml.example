@@ -360,7 +360,7 @@ providers:
   #   label: oMLX
   #   color: "#615CED"
   #   base_url: "http://127.0.0.1:8080"
-  #   supported_apis: [/v1/messages]
+  #   supported_apis: [/v1/messages, /v1/responses]
   #   auth:
   #     type: api_key
   #     api_key: {env: OMLX_API_KEY}

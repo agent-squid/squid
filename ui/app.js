@@ -1599,7 +1599,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
   };
   _advisoryTurnCount = 0;
   // Don't persist a sessioned default chip — #default is adhoc-first; session there is ephemeral
-  if (topic !== 'default' || adhoc) {
+  if (opts.persist !== false && (topic !== 'default' || adhoc)) {
     const { suppressTurnCount: _omit, ...storedChip } = stickyChip;
     localStorage.setItem('squid_sticky_chip', JSON.stringify(storedChip));
   }
@@ -1730,7 +1730,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
     refreshRouteTurnCounts(route, { force: true });
   }
   input.placeholder = 'message…';
-  if (!opts.preview) updateRouteHistoryFilter(stickyChip, opts.followHistoryFilter !== false);
+  updateRouteHistoryFilter(stickyChip, opts.followHistoryFilter !== false);
   updateComposerActionTitles();
   updateActiveQuotaGauge();
   updatePinCount();
@@ -1824,7 +1824,7 @@ function _routePersistentSessionTargets(route) {
   return targets;
 }
 
-topicChipEl.addEventListener('click', () => {
+function expandTopicChip() {
   if (!stickyChip) return;
   const prompt = input.value;
   let tag = stickyChip.route || `#${stickyChip.topic}`;
@@ -1839,7 +1839,9 @@ topicChipEl.addEventListener('click', () => {
   input.setSelectionRange(tag.length, tag.length);
   handleComposerInput({ browseRoutes: true });
   input.focus();
-});
+}
+
+topicChipEl.addEventListener('click', expandTopicChip);
 
 function routeScopeText(route) {
   if (route?.route) return route.route;
@@ -2010,7 +2012,7 @@ chipStashBtn.addEventListener('click', async e => {
   const entry = route.route ? `${route.route} ${message}` : formatPromptHistoryEntry(route.topic, route.agent, route.adhoc, route.lookback || 0, message);
   recordPrompt(entry, { shareStash: true });
   input.value = '';
-  localStorage.removeItem('squid_draft');
+  saveComposerDraft();
   resizeComposer();
   _acRender(promptHistoryAutocompleteItems(matchingPromptHistory('', Infinity)), 'Recent Prompts');
   acSel = -1;
@@ -2654,9 +2656,16 @@ let promptHistoryLoaded = false;
 let promptHistoryLoading = false;
 let promptHistoryPos = -1; // -1 = editing draft; 0..N = navigating history
 let promptDraft = '';      // stashed current input while navigating
-let promptDraftChip = null; // stashed chip state while navigating history
 let commandEditRestore = null; // prompt replaced by clicking an editable search/filter badge
+const COMPOSER_DRAFT_HEAD_KEY = 'squid_composer_draft_head';
+const COMPOSER_DRAFT_REVISION_PREFIX = 'squid_composer_draft:';
+const LEGACY_COMPOSER_DRAFT_KEY = 'squid_composer_draft';
+const LEGACY_DRAFT_TEXT_KEY = 'squid_draft';
 let _draftSaveTimer = null;
+let lastSavedComposerDraft = null;
+let storedComposerDraftRevision = null;
+let legacyComposerDraftRecord = null;
+let legacyComposerDraft = null;
 const STASHED_PROMPTS_KEY = 'squid_stashed_prompts';
 const STASHED_PROMPT_TIMES_KEY = 'squid_stashed_prompt_times';
 const COMPOSER_HISTORY_OUTBOX_KEY = 'squid_composer_history_outbox';
@@ -3468,7 +3477,6 @@ function recordPrompt(text, { shareStash = false, submitted = false } = {}) {
   promptHistoryTimes.set(key, Date.now());
   promptHistoryPos = -1;
   promptDraft = '';
-  promptDraftChip = null;
 }
 
 function getStashedPrompts() {
@@ -3585,25 +3593,24 @@ function lastPromptForFlowRoute(route) {
   return '';
 }
 
-function applyPromptHistoryEntry(entry, { preview = false } = {}) {
+function applyPromptHistoryEntry(entry) {
   const { route, prompt } = splitPromptHistoryEntry(entry);
   if (route) {
     const chain = parseRouteChain(route);
     if (chain) {
       setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
-        preview,
         route: chain.route,
         chainTarget: chain.target,
         chainTargetFresh: chain.targetFresh,
         chainOperator: chain.operator,
         chainRounds: chain.rounds,
         chainTargetTopic: chain.targetTopic,
+        flowOrigins: chain.origins,
       });
     }
     const broadcast = !chain ? parseOriginBroadcast(route) : null;
     if (broadcast) {
       setTopicChip(broadcast.topic, null, false, 0, {
-        preview,
         route: broadcast.route,
         broadcastAgents: broadcast.agents,
       });
@@ -3615,7 +3622,6 @@ function applyPromptHistoryEntry(entry, { preview = false } = {}) {
         match[2] || null,
         !!match[3],
         0,
-        { preview },
       );
     }
   }
@@ -3660,9 +3666,6 @@ function matchingPromptHistory(value, limit = 8) {
 }
 
 function promptHistoryAutocompleteItems(entries) {
-  // Show every routed entry's route, including the current one: previewing an
-  // entry applies its route, so an entry without one would inherit whatever
-  // route the previously previewed row switched to.
   return entries.map(ph => {
     const { route, prompt } = splitPromptHistoryEntry(ph);
     const promptText = prompt || ph;
@@ -3678,7 +3681,8 @@ function promptHistoryAutocompleteItems(entries) {
       deletePromptEntry: ph,
       ...(routeHtml ? {
         routeHtml,
-        fullEntry: `${displayRouteKey} ${promptText}`,
+        routeSwitchLabel: `Use prompt and switch to ${displayRouteKey}`,
+        routeSwitchEntry: `${displayRouteKey} ${promptText}`,
       } : {}),
     };
   });
@@ -3722,10 +3726,9 @@ function parseHistoryRouteTarget(route) {
   };
 }
 
-function applyRouteTarget(routeTarget, { preview = false } = {}) {
+function applyRouteTarget(routeTarget, prompt = '') {
   if (!routeTarget) return;
   setTopicChip(routeTarget.topic, routeTarget.agent, routeTarget.adhoc, routeTarget.lookback || 0, {
-    preview,
     route: routeTarget.route,
     chainTarget: routeTarget.chainTarget,
     chainTargetFresh: routeTarget.chainTargetFresh,
@@ -3735,7 +3738,7 @@ function applyRouteTarget(routeTarget, { preview = false } = {}) {
     broadcastAgents: routeTarget.broadcastAgents,
     flowOrigins: routeTarget.flowOrigins,
   });
-  input.value = '';
+  input.value = prompt;
   input.setSelectionRange(0, 0);
   resizeComposer();
 }
@@ -3779,15 +3782,7 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
       insert: '',
       trail: false,
       routeTarget,
-      // Dedicated route-history browsing (ArrowLeft/ArrowRight over a
-      // composer that's only a route) — every item here is a full route to
-      // switch to, so previewing-by-highlight applying it live is the point.
-      // appendMatchingRouteHistoryItems below shares this same item shape
-      // but gets mixed into an otherwise plain-text "Routes" suggestion
-      // list, where auto-applying on mere highlight would leave the real
-      // chip stuck on a route the user only scrolled past — so it must NOT
-      // set this flag.
-      previewApply: true,
+      routeHistory: true,
       currentRoute: current,
       deleteRouteKey: current ? null : dedupeKey,
     });
@@ -3828,11 +3823,6 @@ function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
       label: prompt ? `<span class="ac-history-prompt">${_acLastPrompt(prompt)}</span>` : '',
       labelClass: 'ac-prompt-label',
       rowClass: 'ac-prompt-row',
-      // Plain route text, not '' — these items sit alongside live-typed
-      // insert-only suggestions in the same arrow-navigable list, so
-      // previewing one must behave the same way theirs does (fill the
-      // composer as text) rather than instantly switching the real chip;
-      // see previewApply on routeHistoryAutocompleteItems above for why.
       insert: routeKey,
       trail: false,
       routeTarget,
@@ -3967,8 +3957,7 @@ function cacheComposerHistorySnapshot(history) {
   }
 }
 
-async function initPromptHistory() {
-  const draft = localStorage.getItem('squid_draft');
+async function initPromptHistory(draft) {
   if (draft) { input.value = draft; resizeComposer(); }
   restoreComposerHistorySnapshot();
   await loadPromptHistory();
@@ -4530,7 +4519,7 @@ form.addEventListener('submit', async (e) => {
   expandedSlugEditToken++;
   const text = input.value.trim();
   if (!text) {
-    if (acOpen && acItems[acSel]?.previewApply) _acSelect(acSel);
+    if (acOpen && acItems[acSel]?.routeHistory) _acSelect(acSel);
     return;
   }
   commandEditRestore = null;
@@ -4538,6 +4527,7 @@ form.addEventListener('submit', async (e) => {
   if (!message) {
     recordHistoryRoute(route || promptHistoryRoute(topic, agent, adhoc));
     input.value = '';
+    saveComposerDraft();
     resizeComposer();
     hideAutocomplete();
     setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins });
@@ -4548,13 +4538,7 @@ form.addEventListener('submit', async (e) => {
     input.value = '';
     resizeComposer();
     hideAutocomplete();
-    if (cmd.command === 'restart' || cmd.command === 'refresh') {
-      // Both reload the page — clear the autosaved draft first, or the
-      // 300ms debounce (below) may have already captured "/restart"/"/refresh"
-      // itself, which initPromptHistory() would then restore into the input.
-      clearTimeout(_draftSaveTimer);
-      localStorage.removeItem('squid_draft');
-    }
+    saveComposerDraft();
     await handleCommand(cmd, topic, agent, adhoc, lookback, { route });
     // Re-set chip after topic-scoped commands so next message stays in context
     if (['clear', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
@@ -4576,7 +4560,7 @@ form.addEventListener('submit', async (e) => {
   // reconstruct from the chip's own (already-canonical) route.
   const historyEntry = !stickyChip ? text : (route ? `${route} ${message}` : formatPromptHistoryEntry(topic, agent, adhoc, lookback, message));
   try {
-    localStorage.removeItem('squid_draft');
+    saveComposerDraft();
     recordPrompt(historyEntry, { submitted: true });
   } catch (error) {
     if (!(error instanceof DOMException) || !['QuotaExceededError', 'SecurityError'].includes(error.name)) throw error;
@@ -4932,12 +4916,60 @@ function handleComposerInput({ browseRoutes = false } = {}) {
   _maybePromoteSlug(input.value);
   _maybeCollapseExpandedSlug(false, true);
   clearTimeout(_draftSaveTimer);
-  _draftSaveTimer = setTimeout(() => localStorage.setItem('squid_draft', input.value), 300);
+  _draftSaveTimer = setTimeout(saveComposerDraft, 300);
   if (promptHistoryPos !== -1 && input.value !== promptHistory[promptHistoryPos]) {
     promptHistoryPos = -1;
   }
 }
 
+function composerDraftSnapshot() {
+  return input.value ? JSON.stringify({ text: input.value, chip: stickyChip || null }) : null;
+}
+
+function readStoredComposerDraft() {
+  let revision = localStorage.getItem(COMPOSER_DRAFT_HEAD_KEY);
+  while (revision) {
+    const draft = readHistoryStorage(COMPOSER_DRAFT_REVISION_PREFIX + revision, null);
+    const currentRevision = localStorage.getItem(COMPOSER_DRAFT_HEAD_KEY);
+    if (revision === currentRevision) return { revision, draft };
+    revision = currentRevision;
+  }
+  return { revision: null, draft: null };
+}
+
+function saveComposerDraft() {
+  const snapshot = composerDraftSnapshot();
+  if (snapshot === lastSavedComposerDraft) return;
+  if (snapshot) {
+    const revision = Array.from(crypto.getRandomValues(new Uint32Array(4))).join('-');
+    localStorage.setItem(COMPOSER_DRAFT_REVISION_PREFIX + revision, snapshot);
+    const previousRevision = localStorage.getItem(COMPOSER_DRAFT_HEAD_KEY);
+    localStorage.setItem(COMPOSER_DRAFT_HEAD_KEY, revision);
+    if (previousRevision) localStorage.removeItem(COMPOSER_DRAFT_REVISION_PREFIX + previousRevision);
+    storedComposerDraftRevision = revision;
+  } else if (storedComposerDraftRevision) {
+    // The head may now belong to another tab. Only remove this tab's revision.
+    localStorage.removeItem(COMPOSER_DRAFT_REVISION_PREFIX + storedComposerDraftRevision);
+    storedComposerDraftRevision = null;
+  }
+  if (legacyComposerDraftRecord !== null && localStorage.getItem(LEGACY_COMPOSER_DRAFT_KEY) === legacyComposerDraftRecord) {
+    localStorage.removeItem(LEGACY_COMPOSER_DRAFT_KEY);
+  }
+  if (legacyComposerDraft !== null && localStorage.getItem(LEGACY_DRAFT_TEXT_KEY) === legacyComposerDraft) {
+    localStorage.removeItem(LEGACY_DRAFT_TEXT_KEY);
+  }
+  legacyComposerDraftRecord = null;
+  legacyComposerDraft = null;
+  lastSavedComposerDraft = snapshot;
+}
+
+window.addEventListener('storage', event => {
+  // Retire the previous head even when concurrent saves observed the same head.
+  if (event.storageArea === localStorage && event.key === COMPOSER_DRAFT_HEAD_KEY && event.oldValue) {
+    localStorage.removeItem(COMPOSER_DRAFT_REVISION_PREFIX + event.oldValue);
+  }
+});
+window.addEventListener('pagehide', saveComposerDraft);
 window.addEventListener('resize', resizeComposer);
 window.visualViewport?.addEventListener('resize', resizeComposer);
 input.addEventListener('input', () => handleComposerInput());
@@ -5070,7 +5102,7 @@ input.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Tab' && !acOpen && !sessionAdvisoryEl.hidden) { e.preventDefault(); stashComposerAndEdit('/clear'); return; }
   if (acOpen) {
-    if (acItems[0]?.routeTarget && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    if (acItems[0]?.routeHistory && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
       e.preventDefault();
       if (e.key === 'ArrowLeft') {
         acSel = Math.min(acSel + 1, acItems.length - 1);
@@ -5102,7 +5134,7 @@ input.addEventListener('keydown', (e) => {
     if (e.key === 'Tab') { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
     if (e.key === 'Escape') {
       e.preventDefault();
-      _acRestoreDraft();
+      hideAutocomplete();
       return;
     }
   }
@@ -5138,18 +5170,7 @@ input.addEventListener('keydown', (e) => {
     && input.selectionEnd === 0
   ) {
     e.preventDefault();
-    const prompt = input.value;
-    let tag = stickyChip.route || `#${stickyChip.topic}`;
-    if (!stickyChip.route) {
-      if (stickyChip.agent) tag += `@${stickyChip.agent}`;
-      if (stickyChip.adhoc) tag += `!${stickyChip.lookback || ''}`;
-    }
-    clearTopicChip();
-    editingExpandedSlug = true;
-    expandedSlugEditToken++;
-    input.value = prompt ? `${tag} ${prompt}` : tag;
-    input.setSelectionRange(tag.length, tag.length);
-    input.dispatchEvent(new Event('input'));
+    expandTopicChip();
   }
 });
 
@@ -6281,15 +6302,15 @@ async function sendMessage(text, opts = {}) {
   async function finalizeQuotaTracking() {
     if (quotaFinalized) return;
     quotaFinalized = true;
-    if (nativeShell || dedicatedQuota) return;
+    const afterOnly = gaugeTypeFor(quotaBackend) === 'antigravity';
+    if (nativeShell || dedicatedQuota || (afterOnly && (turnStatus !== 'done' || !msgId))) return;
     // Quota is a backend-wide meter, so this before/after difference is only an
     // observational signal. Parallel prompts have overlapping windows and can
     // double-count each other's usage; provider reporting lag can shift usage to
     // a later turn. Do not treat or aggregate it as exact per-prompt attribution.
     // See ADR-0023.
     await new Promise(r => setTimeout(r, 1000));
-    const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend, true);
-    const afterOnly = gaugeTypeFor(quotaBackend) === 'antigravity';
+    const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend, true, msgId);
     if (afterOnly) {
       quotaBeforeSnapshot = quotaAfterSnapshot?.previousRaw == null
         ? null : { raw: quotaAfterSnapshot.previousRaw };
@@ -9187,8 +9208,9 @@ function insertPendingHistoryItem(item) {
 // that skip onStored — so per-turn cleanup can't be stranded; callers only get
 // here once the turn has signalled completion and stop watching it after.
 async function replacePendingWithStoredItem(item, wipBubble, onStored = null, onSettled = null) {
+  let data;
   try {
-    const data = await readTurnStatus(item.id);
+    data = await readTurnStatus(item.id);
     if (!data || !wipBubble.parentNode) return;
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
     if (data.status === 'error' && !String(data.content || '').trim() && !bookmarkOnlyHistory) return;
@@ -9210,16 +9232,14 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, on
   } catch {} finally {
     // Local WS sends already refresh through their completion callbacks.
     // Discovered turns have no such owner now that agy active polling is off.
-    const trackedBackend = quotaTrackedMsgIds.get(Number(item.id));
-    const refreshDiscovered = !onStored && !onSettled
+    const refreshDiscovered = data?.status === 'done' && !onStored && !onSettled
       && item.source !== 'shell' && quotaTrackedMsgIds.has(Number(item.id));
     untrackQuotaForTurn(item.id);
     onSettled?.();
     if (refreshDiscovered) {
       try {
-        // Agent configuration can change while a discovered turn is running.
-        const backend = trackedBackend || await resolveQuotaProvider(item.topic, item.agent);
-        if (gaugeTypeFor(backend) === 'antigravity') await fetchQuotaForBackend(backend, true);
+        const backend = splitAgentRef(data.stats?.backend).provider;
+        if (gaugeTypeFor(backend) === 'antigravity') await fetchQuotaForBackend(backend, true, Number(item.id));
       } catch { /* quota lookup must not fail completed-turn rendering */ }
     }
   }
@@ -11411,7 +11431,7 @@ function showRecoverableQuotaError(backend, text, options = {}) {
   }, QUOTA_ERROR_BACKGROUND_RETRY_DELAY);
 }
 
-async function fetchQuotaForBackend(backend, requireFresh = false) {
+async function fetchQuotaForBackend(backend, explicitRefresh = false, turnId = null) {
   const provider = quotaStatusProviderKey(backend);
   let cfg = quotaConfigFor(provider);
   if (!cfg && !Object.keys(_providerMetadata).length) {
@@ -11420,11 +11440,12 @@ async function fetchQuotaForBackend(backend, requireFresh = false) {
   }
   if (!cfg) return null;
   const state = quotaStateFor(provider);
-  // Turn boundaries need a new native read after any existing poll. Ordinary
-  // polls coalesce below so slow CLI reads cannot build an unbounded queue.
-  if (state.inFlight && requireFresh && gaugeTypeFor(provider) === 'antigravity') {
+  const nativeQuota = gaugeTypeFor(provider) === 'antigravity';
+  if (nativeQuota && !explicitRefresh) return null;
+  // Serialize explicit native reads so turn completions get fresh samples.
+  if (state.inFlight && nativeQuota) {
     await state.requestDone;
-    return fetchQuotaForBackend(provider, true);
+    return fetchQuotaForBackend(provider, true, turnId);
   }
   if (state.inFlight) return state.raw == null ? null : { backend: provider, ...state };
   state.inFlight = true;
@@ -11433,7 +11454,19 @@ async function fetchQuotaForBackend(backend, requireFresh = false) {
   const label = backendDisplayName(provider);
   try {
     const url = `/quota/provider/${encodeURIComponent(provider)}`;
-    const res = await fetch(url);
+    const options = nativeQuota ? { method: 'POST' } : {};
+    if (nativeQuota && turnId != null) {
+      options.headers = { 'Content-Type': 'application/json' };
+      options.body = JSON.stringify({ turn_id: turnId });
+    }
+    const res = await fetch(url, options);
+    if (nativeQuota) {
+      const sample = Number(res.headers.get('X-Squid-Quota-Sample'));
+      if (Number.isSafeInteger(sample) && sample > 0) {
+        if (sample <= (state.lastNativeSample ?? 0)) return null;
+        state.lastNativeSample = sample;
+      }
+    }
     if (!res.ok) {
       const isAuthFailure = [400, 401, 403].includes(res.status);
       if (isAuthFailure && _providerMetadata[provider]?.dedicated_login) {
@@ -11450,7 +11483,8 @@ async function fetchQuotaForBackend(backend, requireFresh = false) {
         } else {
           showRecoverableQuotaError(provider, `${label} auth`);
         }
-      } else if (isAuthFailure && gaugeTypeFor(provider) === 'codex') {
+      } else if (nativeQuota) showQuotaError(provider, `${label} usage unavailable`);
+      else if (isAuthFailure && gaugeTypeFor(provider) === 'codex') {
         showRecoverableQuotaError(provider, `${label} auth`);
       } else if (isAuthFailure) showQuotaError(provider, `${label} auth`);
       else showTransientQuotaError(provider, `${label} error`);
@@ -11465,9 +11499,9 @@ async function fetchQuotaForBackend(backend, requireFresh = false) {
       showQuotaError(provider, `${label} n/a`);
       return null;
     }
-    if (gaugeTypeFor(provider) === 'antigravity'
+    if (nativeQuota
         && (data.status !== 'ok' || !Number.isFinite(data.raw) || data.raw < 0 || data.raw > 100)) {
-      showTransientQuotaError(provider, `${label} invalid quota`);
+      showQuotaError(provider, `${label} invalid quota`);
       return null;
     }
     const resetAt = typeof data.reset_at === 'number'
@@ -11512,7 +11546,8 @@ async function fetchQuotaForBackend(backend, requireFresh = false) {
     renderQuotaLoaded(provider, snapshot);
     return { backend: provider, ...state, previousRaw };
   } catch {
-    showTransientQuotaError(provider, `${label} error`);
+    if (nativeQuota) showQuotaError(provider, `${label} usage unavailable`);
+    else showTransientQuotaError(provider, `${label} error`);
     return null;
   } finally {
     state.inFlight = false;
@@ -11958,7 +11993,7 @@ function initAntigravityQuota() {
 
   display.addEventListener('click', () => {
     if (activeQuotaBackend && gaugeTypeFor(activeQuotaBackend) === 'antigravity') {
-      fetchQuotaForBackend(activeQuotaBackend);
+      fetchQuotaForBackend(activeQuotaBackend, true);
     }
   });
 }
@@ -16048,41 +16083,18 @@ function hideAutocomplete() {
 function _acPreview() {
   if (acSel < 0 || acSel >= acItems.length) return;
   const item = acItems[acSel];
-  if (item.highlightOnly) return;
+  if (item.routeHistory) {
+    applyRouteTarget(item.routeTarget);
+    return;
+  }
+  if (item.highlightOnly || editingExpandedSlug) return;
   if (!_acStashedForNav) {
     promptDraft = input.value;
-    promptDraftChip = stickyChip ? { ...stickyChip } : null;
     _acStashedForNav = true;
   }
-  if (item.fullEntry) {
-    applyPromptHistoryEntry(item.fullEntry, { preview: true });
-  } else if (item.routeTarget && item.previewApply) {
-    applyRouteTarget(item.routeTarget, { preview: true });
-  } else {
-    // A route-less history prompt belongs to the route navigation started
-    // from, not to the route an earlier previewed row applied.
-    if (item.deletePromptEntry) _acRestoreDraftChip();
-    input.value = item.insert;
-    input.setSelectionRange(item.insert.length, item.insert.length);
-    resizeComposer();
-  }
-}
-
-function _acRestoreDraftChip() {
-  if (promptDraftChip) {
-    setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0, {
-      preview: true,
-      route: promptDraftChip.route,
-      chainTarget: promptDraftChip.chainTarget,
-      chainTargetFresh: promptDraftChip.chainTargetFresh,
-      chainOperator: promptDraftChip.chainOperator,
-      chainRounds: promptDraftChip.chainRounds,
-      chainTargetTopic: promptDraftChip.chainTargetTopic,
-      broadcastAgents: promptDraftChip.broadcastAgents,
-      flowOrigins: promptDraftChip.flowOrigins,
-    });
-  }
-  else clearTopicChip();
+  input.value = item.insert;
+  input.setSelectionRange(item.insert.length, item.insert.length);
+  resizeComposer();
 }
 
 function _acRestoreDraft() {
@@ -16090,9 +16102,7 @@ function _acRestoreDraft() {
   hideAutocomplete();
   if (had) {
     input.value = promptDraft;
-    _acRestoreDraftChip();
     promptDraft = '';
-    promptDraftChip = null;
     resizeComposer();
   }
 }
@@ -16107,18 +16117,19 @@ function _acHighlight() {
 function _acRender(items, title = 'Suggestions') {
   if (!items.length) { hideAutocomplete(); return; }
   acItems = items; acSel = 0;
-  const rows = items.map((item, i) =>
-    `<div class="ac-item${item.dividerAbove && i < items.length - 1 ? ' ac-item-divider' : ''}" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
-    `<div class="ac-row${item.rowClass ? ` ${item.rowClass}` : ''}">` +
-    (item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="Switch to this route">${item.routeHtml}${item.routeSwitchIcon === false ? '' : '<span class="ac-route-switch-icon" aria-hidden="true"></span>'}</button> ` : '') +
-    `<span class="ac-label${item.labelClass ? ` ${item.labelClass}` : ''}">${item.label}</span>` +
-    (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
-    (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') +
-    (item.deleteTopic ? `<button class="ac-del-btn" data-topic="${item.deleteTopic}" type="button" title="Delete #${item.deleteTopic} sessions">✕</button>` : '') +
-    ((item.deletePromptEntry != null || item.deleteRouteKey) ? `<button class="ac-del-btn ac-del-prompt-btn" data-i="${i}" type="button" title="Remove from history" aria-label="Remove from history">✕</button>` : '') +
-    `</div>` +
-    `</div>`
-  ).reverse().join('');
+  const rows = items.map((item, i) => {
+    const routeSwitchLabel = item.routeSwitchLabel ? escapeHtml(item.routeSwitchLabel) : '';
+    const routeButton = item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="${routeSwitchLabel || 'Switch to this route'}"${routeSwitchLabel ? ` aria-label="${routeSwitchLabel}"` : ''}>${item.routeHtml}${item.routeSwitchIcon === false ? '' : '<span class="ac-route-switch-icon" aria-hidden="true"></span>'}</button>` : '';
+    const label = `<span class="ac-label${title === 'Routes' && !item.routeHtml ? ' ac-route-label' : ''}${item.labelClass ? ` ${item.labelClass}` : ''}">${item.label}</span>`;
+    return `<div class="ac-item${item.dividerAbove && i < items.length - 1 ? ' ac-item-divider' : ''}" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
+      `<div class="ac-row${item.rowClass ? ` ${item.rowClass}` : ''}">` +
+      (item.routeSwitchEntry ? `${label} ${routeButton}` : `${routeButton}${routeButton ? ' ' : ''}${label}`) +
+      (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
+      (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') +
+      (item.deleteTopic ? `<button class="ac-del-btn" data-topic="${item.deleteTopic}" type="button" title="Delete #${item.deleteTopic} sessions">✕</button>` : '') +
+      ((item.deletePromptEntry != null || item.deleteRouteKey) ? `<button class="ac-del-btn ac-del-prompt-btn" data-i="${i}" type="button" title="Remove from history" aria-label="Remove from history">✕</button>` : '') +
+      `</div></div>`;
+  }).reverse().join('');
   acEl.innerHTML =
     `<div class="ac-list">${rows}</div>` +
     `<div class="ac-header">` +
@@ -16135,10 +16146,10 @@ function _acRender(items, title = 'Suggestions') {
         e.preventDefault();
         const idx = Number(routeBtn.dataset.i);
         const item = idx >= 0 && idx < acItems.length ? acItems[idx] : null;
-        const fullEntry = item?.fullEntry || null;
-        if (fullEntry) {
+        const routeSwitchEntry = item?.routeSwitchEntry || null;
+        if (routeSwitchEntry) {
           hideAutocomplete();
-          applyPromptHistoryEntry(fullEntry);
+          applyPromptHistoryEntry(routeSwitchEntry);
           recordHistoryRoute(currentPromptHistoryRoute());
           input.focus();
         } else if (item) {
@@ -16191,7 +16202,7 @@ function _acRender(items, title = 'Suggestions') {
   acEl.querySelector('.ac-close').addEventListener('mousedown', e => {
     e.preventDefault();
     e.stopPropagation();
-    _acRestoreDraft();
+    hideAutocomplete();
     messages.focus();
   });
   acEl.classList.add('open');
@@ -16213,7 +16224,6 @@ function _acSelect(idx, { fromPointer = false } = {}) {
     updateAutocomplete();
     return;
   }
-  if (item.deletePromptEntry && !item.fullEntry && _acStashedForNav) _acRestoreDraftChip();
   hideAutocomplete();
   if (item.execute) {
     input.value = item.insert;
@@ -16233,13 +16243,16 @@ function _acSelect(idx, { fromPointer = false } = {}) {
       return;
     }
   }
-  if (item.fullEntry) {
-    applyPromptHistoryEntry(item.fullEntry);
+  if (item.deletePromptEntry) {
+    input.value = item.insert;
+    input.setSelectionRange(item.insert.length, item.insert.length);
+    resizeComposer();
     input.focus();
     return;
   }
   if (item.routeTarget) {
-    applyRouteTarget(item.routeTarget);
+    const separator = editingExpandedSlug ? input.value.indexOf(' ') : -1;
+    applyRouteTarget(item.routeTarget, separator >= 0 ? input.value.slice(separator + 1) : '');
     recordHistoryRoute(currentPromptHistoryRoute());
     input.focus();
     return;
@@ -19650,8 +19663,7 @@ for (const kind of ['search', 'filter']) {
     if (e.key === 'Escape' && !list.hidden) {
       e.preventDefault();
       e.stopPropagation();
-      closeScopeOptions(kind);
-      document.getElementById(kind === 'search' ? 'search-bar-keywords' : 'filter-bar-scope').focus();
+      document.getElementById(`${kind}-bar-scope`).focus();
       closeScopeOptions(kind);
     } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
@@ -19693,13 +19705,13 @@ document.getElementById('filter-bar-clear').addEventListener('click', () => {
   clearFilter();
 });
 
-function submitSearchPanel() {
+function submitSearchPanel({ focusInvalid = true } = {}) {
   const scopeInput = document.getElementById('search-bar-scope');
   const parsedScope = parseScopeInput(scopeInput.value.trim() || '#all', { allowAll: true });
   if (parsedScope === null) {
     scopeInput.setAttribute('aria-invalid', 'true');
     showCmdFeedback('Search scope: use #topic, @agent, @agent! (ad hoc), @agent* (both), a route, or #all.');
-    scopeInput.focus();
+    if (focusInvalid) scopeInput.focus();
     return;
   }
   scopeInput.removeAttribute('aria-invalid');
@@ -19716,7 +19728,28 @@ function submitSearchPanel() {
 }
 
 
-document.getElementById('search-bar-submit').addEventListener('click', submitSearchPanel);
+document.getElementById('search-bar').addEventListener('focusout', e => {
+  const scopePicker = document.getElementById('search-scope-picker');
+  const keywords = document.getElementById('search-bar-keywords');
+  const leavingScope = scopePicker.contains(e.target) && !scopePicker.contains(e.relatedTarget);
+  if (!searchPanelOpen || (!leavingScope && e.target !== keywords)) return;
+  // Closing or resetting the panel can discard pending edits.
+  if (e.relatedTarget?.closest('#search-bar-reset, #search-bar-clear, #chip-search-btn')) return;
+
+  const scope = document.getElementById('search-bar-scope').value.trim() || '#all';
+  const appliedScope = searchScopeText(searchActive ? searchState : historyFilter) || '#all';
+  const appliedKeywords = searchActive ? searchState.keywords : '';
+  if (scope !== appliedScope || keywords.value.trim() !== appliedKeywords) {
+    submitSearchPanel({ focusInvalid: false });
+  }
+});
+
+const searchSubmitButton = document.getElementById('search-bar-submit');
+searchSubmitButton.addEventListener('mousedown', e => {
+  // Keep the editor focused so a click submits only once.
+  if (document.activeElement?.matches('#search-bar-scope, #search-bar-keywords')) e.preventDefault();
+});
+searchSubmitButton.addEventListener('click', () => submitSearchPanel());
 for (const id of ['search-bar-scope', 'search-bar-keywords']) {
   document.getElementById(id).addEventListener('keydown', e => {
     if (e.key !== 'Enter' || e.isComposing) return;
@@ -21566,8 +21599,16 @@ document.addEventListener('click', e => {
   }
 });
 
+const storedDraft = readStoredComposerDraft();
+storedComposerDraftRevision = storedDraft.revision;
+let composerDraft = storedDraft.draft;
+if (!storedDraft.revision) {
+  legacyComposerDraftRecord = localStorage.getItem(LEGACY_COMPOSER_DRAFT_KEY);
+  legacyComposerDraft = localStorage.getItem(LEGACY_DRAFT_TEXT_KEY);
+  try { composerDraft = JSON.parse(legacyComposerDraftRecord); } catch { /* ignore */ }
+}
 initHistoryScroll();
-initPromptHistory();
+initPromptHistory(composerDraft?.text ?? legacyComposerDraft);
 initStats();
 initTopicsView();
 initAliases();
@@ -21602,7 +21643,7 @@ Promise.all([historyBootstrapSettled, bootBannerSettled]).then(() => {
   if (!_transcriptTouchedDuringBoot) messages.scrollTop = messages.scrollHeight;
 }).catch(() => {});
 try {
-  const saved = JSON.parse(localStorage.getItem('squid_sticky_chip') || 'null');
+  const saved = composerDraft ? composerDraft.chip : readHistoryStorage('squid_sticky_chip', null);
   if (saved?.topic) {
     setTopicChip(saved.topic, saved.agent || null, saved.adhoc || false, saved.lookback || 0, {
       route: saved.route,
@@ -21612,15 +21653,19 @@ try {
       chainRounds: saved.chainRounds,
       chainTargetTopic: saved.chainTargetTopic,
       broadcastAgents: saved.broadcastAgents || null,
+      flowOrigins: saved.flowOrigins || null,
+      persist: false,
     });
-  } else {
+  } else if (!composerDraft) {
     _acAgents().then(agents => {
-      if (stickyChip) return;
-      const first = agents[0];
-      if (first) setTopicChip('default', first.name, true, 0);
+      if (stickyChip || !agents.length) return;
+      const unchanged = composerDraftSnapshot() === lastSavedComposerDraft;
+      setTopicChip('default', agents[0].name, true, 0, { persist: false });
+      if (unchanged) lastSavedComposerDraft = composerDraftSnapshot();
     }).catch(() => {});
   }
 } catch { /* ignore */ }
+lastSavedComposerDraft = composerDraftSnapshot();
 
 // Patch bookmarklet hrefs with the actual origin (avoids hardcoding the port).
 document.querySelectorAll('.creds-bookmarklet').forEach(a => {

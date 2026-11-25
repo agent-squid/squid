@@ -3002,12 +3002,59 @@ def test_antigravity_quota_native_command(monkeypatch, remaining, expected):
     monkeypatch.setattr(server, "AGY_PATH", "/test/agy")
     monkeypatch.setattr(server.asyncio, "create_subprocess_exec", spawn)
     provider = Provider(id="antigravity", label="agy", gauge=Gauge("antigravity"))
-    response = asyncio.run(server._quota_snapshot_for_provider(provider, "antigravity"))
+    monkeypatch.setattr(server, "get_provider", lambda _: provider)
+    passive = asyncio.run(server.quota_provider("antigravity"))
+    assert json.loads(passive.body) == {"status": "none"}
+    spawn.assert_not_awaited()
+    response = asyncio.run(server.refresh_native_provider_quota("antigravity"))
     data = json.loads(response.body)
+    newer = asyncio.run(server.refresh_native_provider_quota("antigravity"))
+    assert int(newer.headers["X-Squid-Quota-Sample"]) > int(response.headers["X-Squid-Quota-Sample"])
     assert data["used_percent"] == expected
     assert len(data["buckets"]) == 2
     assert "Gemini weekly" in data["title"]
     assert spawn.call_args.args[:6] == ("/test/agy", "--print", "/usage", "--output-format", "json", "--print-timeout")
+
+
+@pytest.mark.parametrize("status_code", [200, 502])
+def test_antigravity_quota_shares_turn_check_across_clients(monkeypatch, status_code):
+    provider = Provider(id="antigravity", gauge=Gauge("antigravity"))
+    wrong_provider = Provider(id="wrong-agy", gauge=Gauge("antigravity"))
+    monkeypatch.setattr(server, "get_provider", {provider.id: provider, wrong_provider.id: wrong_provider}.get)
+    monkeypatch.setattr(server, "get_message", lambda _: {
+        "role": "assistant", "status": "done", "source": "human",
+        "stats": {"backend": "antigravity:antigravity"},
+    })
+    monkeypatch.setattr(server, "_native_quota_turn_checks", server.OrderedDict())
+
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def sample():
+            started.set()
+            await release.wait()
+            return JSONResponse({"sample": True}, status_code=status_code)
+
+        check = AsyncMock(side_effect=sample)
+        monkeypatch.setattr(server, "quota_antigravity", check)
+        turn = server.NativeQuotaRefreshRequest(turn_id=123)
+        first = asyncio.create_task(server.refresh_native_provider_quota(provider.id, turn))
+        await started.wait()
+        second = asyncio.create_task(server.refresh_native_provider_quota(provider.id, turn))
+        await asyncio.sleep(0)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        release.set()
+        assert (await second).status_code == status_code
+        assert (await server.refresh_native_provider_quota(provider.id, turn)).status_code == status_code
+        assert (await server.refresh_native_provider_quota(wrong_provider.id, turn)).status_code == 409
+        check.assert_awaited_once()
+        await server.refresh_native_provider_quota(provider.id)
+        assert check.await_count == 2
+
+    asyncio.run(run())
 
 
 def test_antigravity_quota_missing_cli(monkeypatch):

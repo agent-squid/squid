@@ -4359,15 +4359,22 @@ def _codex_usage_windows(data: dict) -> tuple[Optional[dict], Optional[dict]]:
     return five_hour, seven_day
 
 
+_last_native_quota_sample = 0
+
+
 async def quota_antigravity():
     """Ask the native CLI for fresh quota, without starting a model turn."""
+    global _last_native_quota_sample
+    _last_native_quota_sample = max(_last_native_quota_sample + 1, time.time_ns() // 1000)
+    headers = {"X-Squid-Quota-Sample": str(_last_native_quota_sample)}
     if not AGY_PATH:
-        return JSONResponse({"error": "agy CLI not installed"}, status_code=503)
+        return JSONResponse({"error": "agy CLI not installed"}, status_code=503, headers=headers)
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             AGY_PATH, "--print", "/usage", "--output-format", "json",
             "--print-timeout", "30s",
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=35)
@@ -4399,9 +4406,9 @@ async def quota_antigravity():
             "status": "ok", "text": f"{round(used)}%", "raw": used,
             "used_percent": used, "reset_at": limiting["reset_at"],
             "title": title, "buckets": buckets,
-        })
+        }, headers=headers)
     except (OSError, ValueError, TypeError, AttributeError, asyncio.TimeoutError):
-        return JSONResponse({"error": "Antigravity quota unavailable; check agy login"}, status_code=502)
+        return JSONResponse({"error": "Antigravity quota unavailable; check agy login"}, status_code=502, headers=headers)
     finally:
         if proc is not None and proc.returncode is None:
             try:
@@ -4507,7 +4514,7 @@ async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResp
         })
 
     if gauge.type == "antigravity":
-        return await quota_antigravity()
+        return JSONResponse({"status": "none"})
 
     if gauge.type in _BALANCE_GAUGES:
         return await _balance_snapshot(provider, ref, _BALANCE_GAUGES[gauge.type])
@@ -4587,6 +4594,47 @@ async def quota_provider(provider_id: str):
     if provider is None:
         return JSONResponse({"error": f"Unknown provider {provider_id!r}"}, status_code=404)
     return await _quota_snapshot_for_provider(provider, provider_id)
+
+
+class NativeQuotaRefreshRequest(BaseModel):
+    turn_id: int = Field(gt=0)
+
+
+# Share the native check, including failures, across browsers observing a turn.
+_native_quota_turn_checks: OrderedDict[tuple[str, int], asyncio.Task[JSONResponse]] = OrderedDict()
+_NATIVE_QUOTA_TURN_CACHE_SIZE = 1024
+
+
+@app.post("/quota/provider/{provider_id}")
+async def refresh_native_provider_quota(
+    provider_id: str, refresh: NativeQuotaRefreshRequest | None = None,
+):
+    """Refresh on demand or reuse the check for a completed turn."""
+    provider = get_provider(provider_id)
+    if provider is None or provider.gauge.type != "antigravity":
+        return JSONResponse({"error": "Native quota refresh unavailable"}, status_code=404)
+    if refresh is None:
+        return await quota_antigravity()
+
+    key = (provider.id, refresh.turn_id)
+    check = _native_quota_turn_checks.get(key)
+    if check is None:
+        turn = get_message(refresh.turn_id)
+        if not turn or turn["role"] != "assistant" or turn["status"] != "done" or turn["source"] == "shell":
+            return JSONResponse({"error": "Native quota refresh requires a successful turn"}, status_code=409)
+        _, recorded_provider = split_agent_ref((turn.get("stats") or {}).get("backend"))
+        if recorded_provider != provider.id:
+            return JSONResponse({"error": "Native quota refresh requires the turn's provider"}, status_code=409)
+        check = asyncio.create_task(quota_antigravity())
+        _native_quota_turn_checks[key] = check
+    # A disconnected browser must not cancel a check another browser is using.
+    response = await asyncio.shield(check)
+    while len(_native_quota_turn_checks) > _NATIVE_QUOTA_TURN_CACHE_SIZE:
+        oldest = next(iter(_native_quota_turn_checks))
+        if not _native_quota_turn_checks[oldest].done():
+            break
+        _native_quota_turn_checks.popitem(last=False)
+    return response
 
 
 @app.get("/journals/{topic}")

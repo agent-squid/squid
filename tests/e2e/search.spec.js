@@ -23,6 +23,49 @@ async function mockBackend(page) {
   await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
 }
 
+test('history search applies edited fields when focus leaves them', async ({ page }) => {
+  await mockBackend(page);
+  await page.addInitScript(() => sessionStorage.setItem('squid_skip_sw_reload', '1'));
+  const searches = [];
+  await page.route('**/search?**', route => {
+    searches.push(new URL(route.request().url()));
+    return route.fulfill({ json: { items: [] } });
+  });
+  await page.goto('/');
+  await page.locator('#chip-search-btn').click();
+
+  const keywords = page.locator('#search-bar-keywords');
+  await keywords.fill('needle');
+  await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
+  expect(searches).toHaveLength(0);
+  await page.locator('#input').focus();
+  await expect.poll(() => searches.length).toBe(1);
+  await expect(page.locator('#input')).toBeFocused();
+
+  await activeScope(page).fill('#squid');
+  await activeScope(page).press('Escape');
+  await expect(page.locator('#search-scope-options')).toBeHidden();
+  await expect(activeScope(page)).toBeFocused();
+  await expect(activeScope(page)).toHaveValue('#squid');
+  expect(searches).toHaveLength(1);
+  await keywords.focus();
+  await expect.poll(() => searches.length).toBe(2);
+  expect(searches[1].searchParams.get('topic')).toBe('squid');
+  await page.locator('#input').focus();
+  expect(searches).toHaveLength(2);
+
+  await keywords.fill('another needle');
+  await page.locator('#search-bar-submit').click();
+  await expect.poll(() => searches.length).toBe(3);
+  expect(searches[2].searchParams.get('q')).toBe('another needle');
+
+  await keywords.fill('tabbed needle');
+  await keywords.press('Tab');
+  await expect(page.locator('#search-bar-submit')).toBeFocused();
+  await expect.poll(() => searches.length).toBe(4);
+  expect(searches[3].searchParams.get('q')).toBe('tabbed needle');
+});
+
 test('explicit #all search shows editable scope and keywords', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');

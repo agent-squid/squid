@@ -26,10 +26,10 @@ test('typed prompt prefixes show unique routed history with the current route fi
   const items = page.locator('#autocomplete .ac-item');
   await expect(items).toHaveCount(3);
   await expect(page.locator('#autocomplete .ac-title')).toHaveText('Recent Prompts');
-  const currentRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@codex push the changes' });
-  const olderRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku! push the changes' });
+  const currentRouteItem = page.locator('#autocomplete .ac-item', { hasText: 'push the changes #squid@codex' });
+  const olderRouteItem = page.locator('#autocomplete .ac-item', { hasText: 'push the changes #squid@haiku!' });
   await expect(currentRouteItem).toBeVisible();
-  await expect(page.locator('#autocomplete .ac-item', { hasText: '#other@codex push the changes' })).toBeVisible();
+  await expect(page.locator('#autocomplete .ac-item', { hasText: 'push the changes #other@codex' })).toBeVisible();
   await expect(olderRouteItem).toBeVisible();
   await expect.poll(async () => {
     const currentBox = await currentRouteItem.boundingBox();
@@ -39,7 +39,7 @@ test('typed prompt prefixes show unique routed history with the current route fi
   await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toContainText('#squid@codex');
   await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('push the changes');
   await page.locator('#input').press('ArrowUp');
-  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex push the changes');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('push the changes #other@codex');
   await page.locator('#input').press('ArrowDown');
   await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toContainText('#squid@codex');
   await expect(page.getByRole('button', { name: 'Close suggestions' })).toBeVisible();
@@ -67,11 +67,11 @@ test('every routed item shows its route chip, including the current route', asyn
   await expect(page.locator('#autocomplete .ac-item')).toHaveCount(3);
   await expect(page.locator('#autocomplete .ac-item:not(:has(.ac-route-btn))')).toHaveCount(0);
   for (const route of ['#squid@codex', '#other@codex', '#squid@haiku!']) {
-    await expect(page.locator('#autocomplete .ac-item', { hasText: `${route} push` }).locator('.ac-route-btn')).toContainText(route);
+    await expect(page.locator('#autocomplete .ac-item', { hasText: `push the changes ${route}` }).locator('.ac-route-btn')).toContainText(route);
   }
 });
 
-test('arrowing through recent prompts applies each prompt\'s own route', async ({ page }) => {
+test('arrowing through recent prompts preserves the current route', async ({ page }) => {
   await mockBackend(page);
   await page.unroute('**/prompts/recent**');
   await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [
@@ -85,30 +85,19 @@ test('arrowing through recent prompts applies each prompt\'s own route', async (
   })));
   await page.goto('/');
 
+  const composer = page.locator('#input');
   const chip = page.locator('#topic-chip');
   const selected = page.locator('#autocomplete .ac-item.selected');
-  await page.locator('#input').press('ArrowUp');
-  await expect(selected).toContainText('what is your model?');
-  await expect(chip).toContainText('#squid@codex!');
-  // Up moves to older entries. A route-less entry keeps the route navigation
-  // started from, not the one the previous row applied.
-  const expectations = [
-    ['review before publish', '#squid@codex', '#squid@codex!'],
-    ['what is your model?', '#squid@claude!', '#squid@codex'],
-    ['address the issues', '#squid@codex', '#squid@claude'],
-  ];
-  for (const [text, route, stale] of expectations) {
-    await page.locator('#input').press('ArrowUp');
-    await expect(selected).toContainText(text);
-    await expect(chip).toContainText(route);
-    await expect(chip).not.toContainText(stale);
+  const prompts = ['what is your model?', 'review before publish', 'what is your model?', 'address the issues'];
+  for (const prompt of prompts) {
+    await composer.press('ArrowUp');
+    await expect(selected).toContainText(prompt);
+    await expect(composer).toHaveValue(prompt);
+    await expect(chip).toHaveText('#squid@codex');
   }
-  // Returning past the other-route row restores the current route's row.
-  await page.locator('#input').press('ArrowDown');
-  await expect(chip).toContainText('#squid@claude!');
-  await page.locator('#input').press('ArrowDown');
-  await expect(chip).toContainText('#squid@codex');
-  await expect(chip).not.toContainText('#squid@claude');
+  await composer.press('ArrowDown');
+  await expect(selected.locator('.ac-route-btn')).toContainText('#squid@claude!');
+  await expect(chip).toHaveText('#squid@codex');
 });
 
 test('resubmitting a removed prompt restores it to autocomplete', async ({ page }) => {
@@ -127,7 +116,7 @@ test('resubmitting a removed prompt restores it to autocomplete', async ({ page 
   }, { entry, key });
   await page.fill('#input', 'push');
 
-  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku! push the changes' })).toBeVisible();
+  await expect(page.locator('#autocomplete .ac-item', { hasText: 'push the changes #squid@haiku!' })).toBeVisible();
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('squid_hidden_prompts') || '[]'))).toEqual([]);
 });
 
@@ -170,7 +159,7 @@ test('flow-backed prompt history displays the submitted origin route', async ({ 
 
   await page.fill('#input', 'sum');
 
-  const item = page.locator('#autocomplete .ac-item', { hasText: '#squid@opencode! summarize' });
+  const item = page.locator('#autocomplete .ac-item', { hasText: 'summarize #squid@opencode!' });
   await expect(item).toBeVisible();
   await expect(item).not.toContainText('>@review');
   await expect(item.locator('.ac-route-switch-icon')).toHaveCount(1);
@@ -182,18 +171,23 @@ test('route and prompt history use the same typography and row height', async ({
   await expect.poll(() => page.evaluate(() => promptHistoryLoaded)).toBe(true);
   for (const width of [390, 1280]) {
     await page.setViewportSize({ width, height: 800 });
-    const [prompt, route, routeWithoutPrompt] = await page.evaluate(() => {
+    const { metrics: [prompt, route, routeWithoutPrompt], firstElements } = await page.evaluate(() => {
       const entry = '#other@codex push the changes';
       const [promptItem] = promptHistoryAutocompleteItems([entry]);
       const routes = routeHistoryAutocompleteItems('#unused@codex');
       const routeItem = routes.find(item => item.routeTarget.topic === 'other');
       _acRender([promptItem, routeItem, routes[0]]);
-      return Array.from(acEl.querySelectorAll('.ac-item')).reverse().map(item => ({
-        height: item.getBoundingClientRect().height,
-        labelSize: getComputedStyle(item.querySelector('.ac-label')).fontSize,
-        chipSize: getComputedStyle(item.querySelector('.ac-route-btn')).fontSize,
-      }));
+      const rows = Array.from(acEl.querySelectorAll('.ac-row')).reverse();
+      return {
+        metrics: rows.map(row => ({
+          height: row.parentElement.getBoundingClientRect().height,
+          labelSize: getComputedStyle(row.querySelector('.ac-label')).fontSize,
+          chipSize: getComputedStyle(row.querySelector('.ac-route-btn')).fontSize,
+        })),
+        firstElements: rows.map(row => row.firstElementChild.tagName),
+      };
     });
+    expect(firstElements).toEqual(['SPAN', 'BUTTON', 'BUTTON']);
     expect(route).toEqual(prompt);
     expect(routeWithoutPrompt).toEqual(prompt);
   }
@@ -723,10 +717,10 @@ test('default topic prompt history distinguishes agent routes', async ({ page })
 
   await page.fill('#input', 'compare');
 
-  const sameRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#default@agentB compare models' });
+  const sameRouteItem = page.locator('#autocomplete .ac-item', { hasText: 'compare models #default@agentB' });
   await expect(sameRouteItem.locator('.ac-route-btn')).toContainText('#default@agentB');
 
-  const otherRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#default@agentA compare models' });
+  const otherRouteItem = page.locator('#autocomplete .ac-item', { hasText: 'compare models #default@agentA' });
   await expect(otherRouteItem.locator('.ac-route-btn')).toBeVisible();
   await expect(otherRouteItem.locator('.ac-route-btn')).toContainText('#default@agentA');
 });
@@ -744,7 +738,7 @@ test('adhoc prompt history route chips ignore lookback counts', async ({ page })
 
   await page.fill('#input', 'reuse');
 
-  const sameRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@codex! reuse context' });
+  const sameRouteItem = page.locator('#autocomplete .ac-item', { hasText: 'reuse context #squid@codex!' });
   await expect(sameRouteItem.locator('.ac-route-btn')).toContainText('#squid@codex!');
   await expect(sameRouteItem.locator('.ac-route-btn')).not.toContainText('!2');
 
@@ -762,7 +756,7 @@ test('clicking a different-route item body inserts prompt only without changing 
   await page.goto('/');
 
   await page.fill('#input', 'push');
-  const otherRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#other@codex push the changes' });
+  const otherRouteItem = page.locator('#autocomplete .ac-item', { hasText: 'push the changes #other@codex' });
   await otherRouteItem.locator('.ac-history-prompt').click();
 
   await expect(page.locator('#input')).toHaveValue('push the changes');
@@ -770,20 +764,21 @@ test('clicking a different-route item body inserts prompt only without changing 
   await expect(page.locator('#topic-chip')).toContainText('#squid@codex');
 });
 
-test('Tab completion converts a routed prompt history slug into the topic chip', async ({ page }) => {
+test('Tab completion inserts the prompt and preserves the current route', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
-    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+    topic: 'draft', agent: 'codex', adhoc: false, lookback: 0,
   })));
   await page.goto('/');
 
   const composer = page.locator('#input');
   await composer.fill('push');
+  await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toContainText('#other@codex');
   await composer.press('Tab');
 
   await expect(composer).toHaveValue('push the changes');
   await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
-  await expect(page.locator('#topic-chip')).toContainText('#squid@codex');
+  await expect(page.locator('#topic-chip')).toContainText('#draft@codex');
 });
 
 test('clicking prompt history normalizes adhoc lookback out of the converted chip', async ({ page }) => {
@@ -795,15 +790,17 @@ test('clicking prompt history normalizes adhoc lookback out of the converted chi
 
   const composer = page.locator('#input');
   await composer.fill('review');
-  await expect(page.locator('#autocomplete .ac-item .ac-route-btn')).toContainText('#squid@haiku!');
-  await page.locator('#autocomplete .ac-item .ac-route-btn').click();
+  const label = 'Use prompt and switch to #squid@haiku!';
+  const routeButton = page.locator('#autocomplete').getByRole('button', { name: label, exact: true });
+  await expect(routeButton).toHaveAttribute('title', label);
+  await routeButton.locator('.ac-route-switch-icon').click();
 
   await expect(composer).toHaveValue('review the changes');
   await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
   await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
 });
 
-test('ArrowUp converts recalled prompt routes to chips and ArrowDown restores the draft', async ({ page }) => {
+test('ArrowUp previews prompt text and ArrowDown restores the draft', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
     '#squid@haiku!3 review the changes',
@@ -820,20 +817,130 @@ test('ArrowUp converts recalled prompt routes to chips and ArrowDown restores th
   await composer.press('ArrowUp');
 
   await expect(composer).toHaveValue('review the changes');
-  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
+  await expect(page.locator('#topic-chip')).toContainText('#draft@codex');
 
   await composer.press('ArrowUp');
   await expect(composer).toHaveValue('inspect the changes');
-  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+  await expect(page.locator('#topic-chip')).toContainText('#draft@codex');
 
   await composer.press('ArrowDown');
   await expect(composer).toHaveValue('review the changes');
-  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
+  await expect(page.locator('#topic-chip')).toContainText('#draft@codex');
 
   await composer.press('ArrowDown');
   await expect(composer).toHaveValue('unfinished draft');
   await expect(page.locator('#topic-chip')).toContainText('#draft@codex');
 });
+
+for (const dismissal of ['Escape', 'outside click', 'close button']) {
+  test(`recalled prompt and the current route survive ${dismissal} and reload`, async ({ page }) => {
+    await mockBackend(page);
+    await page.addInitScript(() => sessionStorage.setItem('squid_skip_sw_reload', '1'));
+    await page.goto('/');
+    await page.evaluate(() => {
+      setTopicChip('squid', 'codex');
+      applyHistoryFilter({ topic: 'squid', agent: 'codex', adhoc: false });
+    });
+    await expect.poll(() => page.evaluate(() => promptHistoryLoaded)).toBe(true);
+
+    const composer = page.locator('#input');
+    const chip = page.locator('#topic-chip');
+    await composer.press('ArrowUp');
+    await expect(composer).toHaveValue('push the changes');
+    await expect(chip).toContainText('#squid@codex');
+    await expect(page.locator('#search-bar-scope')).toHaveValue('#squid@codex');
+
+    if (dismissal === 'Escape') await composer.press('Escape');
+    if (dismissal === 'outside click') await page.locator('#messages').click();
+    if (dismissal === 'close button') await page.getByRole('button', { name: 'Close suggestions' }).click();
+    await expect(page.locator('#autocomplete')).toBeHidden();
+    await expect(composer).toHaveValue('push the changes');
+    await expect(chip).toContainText('#squid@codex');
+
+    const draft = dismissal === 'Escape' ? '  edited prompt\nsecond line  ' : 'push the changes';
+    if (dismissal === 'Escape') await composer.fill(draft);
+    await page.reload();
+    await expect(composer).toHaveValue(draft);
+    await expect(chip).toContainText('#squid@codex');
+  });
+}
+
+test('refresh keeps an explicitly selected sessioned default route with its draft', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: {
+    items: ['#default@claude review the changes'],
+  } }));
+  await page.goto('/');
+  await page.evaluate(() => setTopicChip('other', 'codex'));
+  await expect.poll(() => page.evaluate(() => promptHistoryLoaded)).toBe(true);
+
+  const composer = page.locator('#input');
+  await composer.fill('review');
+  await page.locator('#autocomplete .ac-route-btn', { hasText: '#default@claude' }).click();
+  await expect(page.locator('#topic-chip')).toContainText('#default@claude');
+  await page.reload();
+  await expect(composer).toHaveValue('review the changes');
+  await expect(page.locator('#topic-chip')).toContainText('#default@claude');
+  await expect.poll(() => page.evaluate(() => stickyChip?.adhoc)).toBe(false);
+});
+
+test('an untouched tab leaves a newer draft and route intact on reload', async ({ page, context }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.evaluate(() => {
+    setTopicChip('squid', 'codex');
+    localStorage.setItem('squid_draft', 'older draft');
+  });
+  const staleTab = await context.newPage();
+  await mockBackend(staleTab);
+  await staleTab.goto('/');
+  await expect(staleTab.locator('#input')).toHaveValue('older draft');
+
+  await page.evaluate(() => setTopicChip('other', 'codex'));
+  await page.locator('#input').fill('newer draft');
+  await expect.poll(() => page.evaluate(() => readStoredComposerDraft().draft?.text)).toBe('newer draft');
+
+  await staleTab.reload();
+  await expect(staleTab.locator('#input')).toHaveValue('newer draft');
+  await expect(staleTab.locator('#topic-chip')).toContainText('#other@codex');
+});
+
+for (const sameText of [false, true]) {
+  test(`clearing an older draft preserves the newer tab's ${sameText ? 'resaved original text' : 'edited text'}`, async ({ browser }) => {
+    const context = await browser.newContext({ serviceWorkers: 'block' });
+    try {
+      const olderTab = await context.newPage();
+      const newerTab = await context.newPage();
+      await mockBackend(olderTab);
+      await mockBackend(newerTab);
+      await olderTab.goto('/');
+      const olderComposer = olderTab.locator('#input');
+      const newerComposer = newerTab.locator('#input');
+      const savedDraft = () => newerTab.evaluate(() => readStoredComposerDraft().draft?.text ?? null);
+
+      await olderComposer.fill('older draft');
+      await expect.poll(() => olderTab.evaluate(() => readStoredComposerDraft().draft?.text)).toBe('older draft');
+      await newerTab.goto('/');
+      await newerComposer.fill('newer draft');
+      await expect.poll(savedDraft).toBe('newer draft');
+      const expectedDraft = sameText ? 'older draft' : 'newer draft';
+      if (sameText) {
+        await newerComposer.fill(expectedDraft);
+        await expect.poll(savedDraft).toBe(expectedDraft);
+      }
+
+      await olderComposer.fill('');
+      await expect.poll(() => olderTab.evaluate(() => lastSavedComposerDraft)).toBeNull();
+      await newerTab.reload();
+      await expect(newerComposer).toHaveValue(expectedDraft);
+
+      await newerComposer.fill('');
+      await expect.poll(savedDraft).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+}
 
 test('ArrowUp moves within a multiline draft before recalling prompt history', async ({ page }) => {
   await mockBackend(page);
@@ -855,7 +962,7 @@ test('ArrowUp moves within a multiline draft before recalling prompt history', a
   await composer.evaluate(input => input.setSelectionRange(0, 0));
   await composer.press('ArrowUp');
   await expect(composer).toHaveValue('push the changes');
-  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+  await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
 
   await composer.press('ArrowDown');
   await expect(composer).toHaveValue('fix this word\nkeep editing here');
@@ -1244,6 +1351,46 @@ for (const { name, chip, route } of [
     await expect.poll(() => composer.evaluate(input => input.selectionEnd)).toBe(route.length);
   });
 }
+
+test('Backspace and chip click show the same scrollable route picker and preserve the draft', async ({ page }) => {
+  await mockBackend(page);
+  await page.setViewportSize({ width: 390, height: 760 });
+  const longTopic = 'architecture'.repeat(8);
+  const longRoute = `#${longTopic}@haiku`;
+  await page.route(/\/topics(?:\?include_agent_history=true)?$/, r => r.fulfill({ json: [
+    { name: longTopic, agent: 'haiku', last_prompt: 'review the design' },
+  ] }));
+  await page.route('**/topics/squid/agents/history', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [
+    { name: 'codex', backend: 'codex' },
+  ] }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  const chip = page.locator('#topic-chip');
+  const picker = page.locator('#autocomplete');
+  const labels = picker.locator('.ac-route-label');
+  await composer.fill('keep this draft');
+  await chip.click();
+  await expect(labels).toHaveText([longRoute, '#squid@codex!']);
+  await composer.press('Escape');
+  await composer.press('ArrowRight');
+  await expect(composer).toHaveValue('keep this draft');
+
+  await composer.press('Home');
+  await composer.press('Backspace');
+  await expect(labels).toHaveText([longRoute, '#squid@codex!']);
+  await expect.poll(() => labels.first().evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+  await composer.press('ArrowUp');
+  await expect(composer).toHaveValue('#squid@codex keep this draft');
+  await composer.press('Tab');
+  await expect(chip).toContainText(longRoute);
+  await expect(composer).toHaveValue('keep this draft');
+  await expect(picker).toBeHidden();
+});
 
 test('Backspace on an empty prompt keeps expanding the topic chip as before', async ({ page }) => {
   await mockBackend(page);

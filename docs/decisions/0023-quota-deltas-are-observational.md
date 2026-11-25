@@ -34,6 +34,14 @@ per-session ledger.
 
 ## Decision
 
+- Scope automatic quota polling to the provider running a prompt. A
+  turn-boundary sample may run as part of that prompt's lifecycle. Idle
+  displays should reuse previously fetched data.
+- For quota sources that can initiate interactive sign-in, passive views and
+  retry timers must never launch the quota command. Antigravity samples once
+  after a successful turn or on an explicit gauge refresh. Its delta covers
+  consecutive successful readings of the same bucket and reset window.
+
 - Treat `quota_before`, `quota_after`, and `quota_delta` as observations of the
   backend-wide quota meter during a prompt's wall-clock interval.
 - Do not describe a quota delta as exact per-prompt consumption.

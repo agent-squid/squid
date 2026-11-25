@@ -5680,6 +5680,13 @@ button {
 }
 .ac-item:hover .ac-del-btn, .ac-item.selected .ac-del-btn { color: var(--remove-mark); }
 .ac-del-btn:hover { color: var(--danger) !important; }
+.ac-route-label {
+  min-width: 0;
+  flex-shrink: 1;
+  white-space: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
 .ac-route-btn {
   flex: 0 0 auto;
   width: max-content;
@@ -5704,11 +5711,15 @@ button {
   scrollbar-width: thin;
   -webkit-overflow-scrolling: touch;
 }
+.ac-prompt-label + .ac-route-btn { margin: 0 0 0 0.4rem; }
 .ac-route-btn::-webkit-scrollbar { height: 4px; }
 .ac-route-btn::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
 .ac-route-btn:hover { border-color: var(--accent-dim); background: var(--surface-2); }
 .ac-route-btn .ac-topic { color: var(--accent-dim); }
 .ac-route-btn .ac-agent { color: var(--agent-color, #848899); }
+.ac-route-btn:has(.ac-route-switch-icon):not(:hover):not(:focus-visible) > :not(.ac-route-switch-icon) {
+  opacity: 0.8;
+}
 .ac-route-chain-arrow { color: var(--text-dim); padding: 0 0.12rem; }
 .ac-broadcast-sep { color: var(--text-dim); font-weight: 700; padding: 0 0.05rem; }
 .ac-route-switch-icon {

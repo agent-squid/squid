@@ -68,12 +68,15 @@ Installer shell syntax validation also passed.
 
 ## Live quota
 
-The `antigravity` gauge runs `agy --print /usage --output-format json` to
-retrieve quota without a model turn. It uses the existing native login and the
-shared gauge refresh flow, including a fresh read after each browser turn, plus opening/returning to Squid.
-Recovered turns discovered from history or another device also refresh on completion.
-Local completion callbacks retain ownership so their reads are not duplicated.
-It does not read quota before submission or poll during an active agy turn.
+The `antigravity` gauge runs `agy --print /usage --output-format json` with
+the native login after a successful Antigravity turn or when the user clicks
+the gauge. This includes successful recovered turns. Local completion callbacks
+own their refreshes within a tab. Tabs observing the same completion share
+the server’s recent result for that turn, including a failed check. Automatic
+refreshes use the provider recorded for the turn. Browsers ignore a replayed
+result after seeing a newer sample.
+Passive views reuse the last reading in the browser. Failed reads have no
+automatic retry. See [ADR-0023](decisions/0023-quota-deltas-are-observational.md).
 Changes compare consecutive successful readings of the same model group/window
 and reset period. First readings, bucket switches, resets, and decreases establish
 a new baseline without recording a delta. Failed reads preserve the last successful baseline.
