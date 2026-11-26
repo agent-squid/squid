@@ -1419,7 +1419,6 @@ const chipStashBtn = document.getElementById('chip-stash-btn');
 let stickyChip = null; // { topic, agent, adhoc, chainTarget?, chainTargetFresh?, route? } | null
 let editingExpandedSlug = false;
 let expandedSlugEditToken = 0;
-let browseCompletedRoute = false;
 let composerActionTitleSeq = 0;
 let lastCommittedComposerScope = null;
 const TOPIC_SLUG_SRC = '[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)*';
@@ -1862,6 +1861,7 @@ function _routePersistentSessionTargets(route) {
 function expandTopicChip() {
   if (!stickyChip) return;
   const prompt = input.value;
+  const lookback = stickyChip.lookback;
   let tag = stickyChip.route || `#${stickyChip.topic}`;
   if (!stickyChip.route) {
     if (stickyChip.agent) tag += `@${stickyChip.agent}`;
@@ -1872,7 +1872,7 @@ function expandTopicChip() {
   expandedSlugEditToken++;
   input.value = prompt ? `${tag} ${prompt}` : tag;
   input.setSelectionRange(tag.length, tag.length);
-  handleComposerInput({ browseRoutes: true });
+  handleComposerInput(() => openRouteHistoryAutocomplete(null, tag, lookback));
   input.focus();
 }
 
@@ -2711,6 +2711,7 @@ let composerHistoryRefreshTimer = null;
 let composerHistoryRefreshPending = false;
 let lastComposerHistoryWrite = 0;
 let recentRoutes = [];
+let serverRouteEntries = [];
 let promptHistoryTimes = new Map();
 const HIDDEN_PROMPTS_KEY  = 'squid_hidden_prompts';
 const HIDDEN_ROUTES_KEY = 'squid_hidden_routes';
@@ -3779,16 +3780,23 @@ function applyRouteTarget(routeTarget, prompt = '') {
 }
 
 function recentRouteHistoryEntries() {
-  const promptsByRoute = new Map();
-  const promptRoutes = [];
+  const promptRoutes = serverRouteEntries.map(entry => {
+    const key = `${normalizePromptHistoryRoute(entry.route).toLowerCase()}\0${entry.prompt}`;
+    return hiddenPromptKeys.has(key) ? { ...entry, prompt: '' } : entry;
+  });
   for (const entry of promptHistory) {
     const { route, prompt } = splitPromptHistoryEntry(entry);
     if (!route) continue;
-    const normalized = normalizePromptHistoryRoute(route).toLowerCase();
-    const key = `${normalized}\0${prompt}`;
+    const key = `${normalizePromptHistoryRoute(route).toLowerCase()}\0${prompt}`;
     if (hiddenPromptKeys.has(key)) continue;
-    if (!promptsByRoute.has(normalized)) promptsByRoute.set(normalized, prompt);
     promptRoutes.push({ route, prompt, time: promptHistoryTimes.get(key) || 0 });
+  }
+  const promptsByRoute = new Map();
+  promptRoutes.sort((a, b) => b.time - a.time);
+  for (const { route, prompt } of promptRoutes) {
+    if (!prompt) continue;
+    const key = normalizePromptHistoryRoute(route).toLowerCase();
+    if (!promptsByRoute.has(key)) promptsByRoute.set(key, prompt);
   }
   const entries = recentRoutes.map(({ key, value, updated_at }) => ({
     route: value, prompt: promptsByRoute.get(key) || '', time: updated_at,
@@ -3796,7 +3804,7 @@ function recentRouteHistoryEntries() {
   return entries.concat(promptRoutes).sort((a, b) => b.time - a.time);
 }
 
-function routeHistoryAutocompleteItems(currentRoute = '') {
+function routeHistoryAutocompleteItems(currentRoute = '', lookback = 0) {
   const normalizedCurrent = normalizePromptHistoryRoute(currentRoute);
   const items = [];
   const seen = new Set();
@@ -3808,6 +3816,7 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
     if (!routeKey || !routeTarget || seen.has(dedupeKey)) return;
     if (!current && hiddenRouteKeys.has(dedupeKey)) return;
     seen.add(dedupeKey);
+    if (current && routeTarget.adhoc) routeTarget.lookback = lookback;
     items.push({
       routeHtml: _acRouteHtml(routeKey),
       routeSwitchIcon: false,
@@ -3818,6 +3827,7 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
       trail: false,
       routeTarget,
       routeHistory: true,
+      routeKey,
       currentRoute: current,
       deleteRouteKey: current ? null : dedupeKey,
     });
@@ -3825,7 +3835,6 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
 
   addRoute(normalizedCurrent, '', true);
   for (const { route, prompt } of recentRouteHistoryEntries()) {
-    if (items.length >= 9) break;
     addRoute(route, prompt);
   }
   return items;
@@ -3885,8 +3894,8 @@ function composerRouteForRouteHistory() {
   return currentPromptHistoryRoute();
 }
 
-function openRouteHistoryAutocomplete(direction) {
-  const items = routeHistoryAutocompleteItems(composerRouteForRouteHistory());
+function openRouteHistoryAutocomplete(direction, currentRoute = composerRouteForRouteHistory(), lookback = 0) {
+  const items = routeHistoryAutocompleteItems(currentRoute, lookback);
   if (!items.length) return false;
   const currentIndex = Math.max(0, items.findIndex(item => item.currentRoute));
   _acRender(items, 'Routes');
@@ -3900,6 +3909,26 @@ function openRouteHistoryAutocomplete(direction) {
   _acHighlight();
   if (direction) _acPreview();
   return true;
+}
+
+function refreshOpenRouteHistory() {
+  if (!acOpen || !acItems[0]?.routeHistory) return;
+  const current = acItems.find(item => item.currentRoute);
+  const items = routeHistoryAutocompleteItems(current?.routeKey || '', current?.routeTarget.lookback);
+  if (items.length === acItems.length && items.every((item, index) =>
+    item.routeHtml === acItems[index].routeHtml && item.label === acItems[index].label &&
+    item.routeKey === acItems[index].routeKey
+  )) return;
+
+  const selectedKey = acItems[acSel]?.routeKey;
+  const selectedIndex = items.findIndex(item => item.routeKey === selectedKey);
+  const currentIndex = items.findIndex(item => item.currentRoute);
+  const nextIndex = selectedIndex >= 0 ? selectedIndex : Math.max(0, currentIndex);
+  if (selectedIndex < 0 && !editingExpandedSlug) {
+    if (current) applyRouteTarget(current.routeTarget, input.value);
+    else clearTopicChip();
+  }
+  _acRender(items, 'Routes', nextIndex);
 }
 
 function readHistoryStorage(key, fallback) {
@@ -3960,7 +3989,7 @@ function applyComposerHistory() {
       if (item.value && item.kind === 'prompt') entries.push({ text: item.value, time: item.updated_at });
     }
   }
-  recentRoutes = routes.sort((a, b) => b.updated_at - a.updated_at).slice(0, 200);
+  recentRoutes = routes.sort((a, b) => b.updated_at - a.updated_at);
   entries.sort((a, b) => b.time - a.time);
   promptHistoryTimes = new Map(entries.map(({ text, time }) => [promptHistoryDedupKey(text), time]).reverse());
   promptHistory = mergePromptHistory(entries
@@ -4023,6 +4052,11 @@ async function loadPromptHistory() {
     serverPromptEntries = Array.isArray(data.entries)
       ? data.entries.map(entry => ({ text: entry.text, time: Date.parse(entry.created_at) || 0 }))
       : data.items.map(text => ({ text, time: 0 }));
+    if (Array.isArray(data.routes)) {
+      serverRouteEntries = data.routes.map(({ route, prompt, created_at }) => ({
+        route, prompt: (prompt || '').trim(), time: Date.parse(created_at) || 0,
+      }));
+    }
     if (Array.isArray(data.history)) {
       serverComposerHistory = data.history;
       if (cacheComposerHistorySnapshot(data.history) && sent.length) {
@@ -4036,7 +4070,8 @@ async function loadPromptHistory() {
     applyComposerHistory();
     const firstLoad = !promptHistoryLoaded;
     promptHistoryLoaded = true;
-    if (firstLoad && input.value.trim() && acSel < 0) updateAutocomplete();
+    if (acItems[0]?.routeHistory) refreshOpenRouteHistory();
+    else if (firstLoad && input.value.trim() && acSel < 0) updateAutocomplete();
   } catch { /* Keep local entries and queued writes until the next refresh. */ }
   finally {
     promptHistoryLoading = false;
@@ -4550,15 +4585,17 @@ form.addEventListener('submit', async (e) => {
   e.preventDefault();
   // Resolve command availability before parseInput/parseCommand classify /pair.
   await featureFlags;
+  const text = input.value.trim();
+  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, message } = parseInput(text);
+  // An incomplete route falls back to plain message text in parseInput.
+  if (editingExpandedSlug && text.startsWith('#') && message === text) return;
   editingExpandedSlug = false;
   expandedSlugEditToken++;
-  const text = input.value.trim();
   if (!text) {
     if (acOpen && acItems[acSel]?.routeHistory) _acSelect(acSel);
     return;
   }
   commandEditRestore = null;
-  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, message } = parseInput(text);
   if (!message) {
     recordHistoryRoute(route || promptHistoryRoute(topic, agent, adhoc));
     input.value = '';
@@ -4944,10 +4981,9 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
   input.dispatchEvent(new Event('input'));
 }
 
-function handleComposerInput({ browseRoutes = false } = {}) {
-  browseCompletedRoute = browseRoutes;
+function handleComposerInput(showSuggestions = updateAutocomplete) {
   resizeComposer();
-  updateAutocomplete();
+  showSuggestions();
   // Expanded #topic@agent!N text is still being edited. The chip creation path
   // is the commit point that selects lookback responses.
   if (!input.value.trimStart().startsWith('#')) refreshContextIndicators();
@@ -5012,15 +5048,6 @@ window.addEventListener('pagehide', saveComposerDraft);
 window.addEventListener('resize', resizeComposer);
 window.visualViewport?.addEventListener('resize', resizeComposer);
 input.addEventListener('input', () => handleComposerInput());
-input.addEventListener('click', () => {
-  if ((stickyChip && !editingExpandedSlug) || !/^#[^\s]+@/.test(input.value)) return;
-  const routeEnd = editingExpandedSlug ? input.value.search(/\s/) : -1;
-  if (input.selectionStart !== input.selectionEnd ||
-      input.selectionEnd > (routeEnd < 0 ? input.value.length : routeEnd)) return;
-  browseCompletedRoute = true;
-  updateAutocomplete();
-});
-
 document.addEventListener('selectionchange', () => {
   if (document.activeElement === input) _maybeCollapseExpandedSlug();
 });
@@ -5141,7 +5168,7 @@ input.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Tab' && !acOpen && !sessionAdvisoryEl.hidden) { e.preventDefault(); stashComposerAndEdit('/clear'); return; }
   if (acOpen) {
-    if (acItems[0]?.routeHistory && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    if (!editingExpandedSlug && acItems[0]?.routeHistory && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
       e.preventDefault();
       if (e.key === 'ArrowLeft') {
         acSel = Math.min(acSel + 1, acItems.length - 1);
@@ -5200,6 +5227,10 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && closeEscSurfaces()) { e.preventDefault(); return; }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !window.matchMedia('(pointer: coarse)').matches) {
     e.preventDefault();
+    if (editingExpandedSlug && acOpen && acItems[acSel]?.routeHistory) {
+      _acSelect(acSel);
+      return;
+    }
     form.requestSubmit();
   }
   if (
@@ -16120,19 +16151,19 @@ let _acStashedForNav = false;
 
 function invalidateTopicsCache() { _topicsCache = null; }
 
-async function _acTopics({ includeAgentHistory = false } = {}) {
-  if (!includeAgentHistory && _topicsCache) return _topicsCache;
+async function _acTopics() {
+  if (_topicsCache) return _topicsCache;
   try {
-    const response = await fetch(includeAgentHistory ? '/topics?include_agent_history=true' : '/topics');
+    const response = await fetch('/topics');
     if (response.ok) {
       const topics = await response.json();
       if (Array.isArray(topics)) {
-        if (!includeAgentHistory) _topicsCache = topics;
+        _topicsCache = topics;
         return topics;
       }
     }
   } catch { /* A later lookup can retry. */ }
-  return includeAgentHistory ? [] : _topicsCache || [];
+  return _topicsCache || [];
 }
 
 async function _acAgents() {
@@ -16153,7 +16184,6 @@ async function _acAgents() {
 
 function hideAutocomplete() {
   const wasOpen = acOpen;
-  browseCompletedRoute = false;
   acEl.classList.remove('open');
   acOpen = false; acItems = []; acSel = -1; _acStashedForNav = false;
   if (wasOpen) {
@@ -16165,11 +16195,11 @@ function hideAutocomplete() {
 function _acPreview() {
   if (acSel < 0 || acSel >= acItems.length) return;
   const item = acItems[acSel];
+  if (editingExpandedSlug) return;
   if (item.routeHistory) {
     applyRouteTarget(item.routeTarget);
     return;
   }
-  if (item.highlightOnly || editingExpandedSlug) return;
   if (!_acStashedForNav) {
     promptDraft = input.value;
     _acStashedForNav = true;
@@ -16196,14 +16226,14 @@ function _acHighlight() {
   if (acSel >= 0) acEl.querySelector(`.ac-item[data-i="${acSel}"]`)?.scrollIntoView({ block: 'nearest' });
 }
 
-function _acRender(items, title = 'Suggestions') {
+function _acRender(items, title = 'Suggestions', selectedIndex = 0) {
   if (!items.length) { hideAutocomplete(); return; }
-  acItems = items; acSel = 0;
+  acItems = items; acSel = selectedIndex;
   const rows = items.map((item, i) => {
     const routeSwitchLabel = item.routeSwitchLabel ? escapeHtml(item.routeSwitchLabel) : '';
     const routeButton = item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="${routeSwitchLabel || 'Switch to this route'}"${routeSwitchLabel ? ` aria-label="${routeSwitchLabel}"` : ''}>${item.routeHtml}${item.routeSwitchIcon === false ? '' : '<span class="ac-route-switch-icon" aria-hidden="true"></span>'}</button>` : '';
     const label = `<span class="ac-label${title === 'Routes' && !item.routeHtml ? ' ac-route-label' : ''}${item.labelClass ? ` ${item.labelClass}` : ''}">${item.label}</span>`;
-    return `<div class="ac-item${item.dividerAbove && i < items.length - 1 ? ' ac-item-divider' : ''}" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
+    return `<div class="ac-item" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
       `<div class="ac-row${item.rowClass ? ` ${item.rowClass}` : ''}">` +
       (item.routeSwitchEntry ? `${label} ${routeButton}` : `${routeButton}${routeButton ? ' ' : ''}${label}`) +
       (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
@@ -16240,7 +16270,7 @@ function _acRender(items, title = 'Suggestions') {
         return;
       }
       e.preventDefault();
-      _acSelect(Number(el.dataset.i), { fromPointer: true });
+      _acSelect(Number(el.dataset.i));
     })
   );
   acEl.querySelectorAll('.ac-del-btn:not(.ac-del-prompt-btn)').forEach(btn =>
@@ -16293,19 +16323,13 @@ function _acRender(items, title = 'Suggestions') {
   _acHighlight();
   requestAnimationFrame(() => {
     const list = acEl.querySelector('.ac-list');
-    if (list) list.scrollTop = list.scrollHeight;
+    if (list && acSel === 0) list.scrollTop = list.scrollHeight;
   });
 }
 
-function _acSelect(idx, { fromPointer = false } = {}) {
+function _acSelect(idx) {
   if (idx < 0 || idx >= acItems.length) return;
   const item = acItems[idx];
-  if (fromPointer && item.browseRouteFrom === input.value) {
-    browseCompletedRoute = true;
-    input.focus();
-    updateAutocomplete();
-    return;
-  }
   hideAutocomplete();
   if (item.execute) {
     input.value = item.insert;
@@ -16321,7 +16345,6 @@ function _acSelect(idx, { fromPointer = false } = {}) {
       resizeComposer();
       input.focus();
       input.dispatchEvent(new Event('input'));
-      if (item.collapseSlug) _maybeCollapseExpandedSlug(true, true);
       return;
     }
   }
@@ -16364,7 +16387,6 @@ function _acSelect(idx, { fromPointer = false } = {}) {
   resizeComposer();
   input.focus();
   input.dispatchEvent(new Event('input'));
-  if (item.collapseSlug) _maybeCollapseExpandedSlug(true, true);
 }
 
 function _agentStyleAttr(agentName, backendFallback = null) {
@@ -16487,6 +16509,8 @@ async function updateAutocomplete() {
   const promptSeparator = editingExpandedSlug ? val.indexOf(' ') : -1;
   const slugVal = promptSeparator >= 0 ? val.slice(0, promptSeparator) : val;
   const replacingSlug = editingExpandedSlug && promptSeparator >= 0;
+  if (editingExpandedSlug && slugVal === '#' && openRouteHistoryAutocomplete(null, '')) return;
+  if (editingExpandedSlug && acItems[0]?.routeHistory) hideAutocomplete();
 
   // Command popup: message portion starts with /
   const { message: msgPart } = parseInput(val);
@@ -16522,12 +16546,11 @@ async function updateAutocomplete() {
   const routeSyntaxActive = !stickyChip || editingExpandedSlug;
   const chainSyntaxActive = routeSyntaxActive || new RegExp(`^#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:[+,](?:#${TOPIC_SLUG_SRC})?(?:@${AGENT_SLUG_SRC})?!?)*(?:<>?|>|=>)`).test(slugVal);
   const broadcastSyntaxActive = routeSyntaxActive || new RegExp(`^#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:,(?:#${TOPIC_SLUG_SRC}@?${AGENT_SLUG_PARTIAL_SRC}|@${AGENT_SLUG_PARTIAL_SRC}|#${TOPIC_SLUG_SRC}|${AGENT_SLUG_PARTIAL_SRC})!?)*,$`).test(slugVal);
-  const aliasSyntaxActive = routeSyntaxActive || new RegExp(`^#${TOPIC_SLUG_SRC}@${AGENT_SLUG_PARTIAL_SRC}$`).test(slugVal);
   const mTopic = routeSyntaxActive && slugVal.match(new RegExp(`^#(${TOPIC_SLUG_PARTIAL_SRC})[!]?$`));
   const mMultiOriginChainAlias = chainSyntaxActive && slugVal.match(new RegExp(`^(#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:[+,](?:#${TOPIC_SLUG_SRC})?(?:@${AGENT_SLUG_SRC})?!?)+)(<>?|>|=>)(?:@?)(${AGENT_SLUG_PARTIAL_SRC})(!)?$`));
   const mChainAlias = chainSyntaxActive && slugVal.match(new RegExp(`^#(${TOPIC_SLUG_SRC})@(${AGENT_SLUG_SRC})(!)?(<>?|=>|>)(?:@?)(${AGENT_SLUG_PARTIAL_SRC})(!)?$`));
   const mChainTopicTarget = chainSyntaxActive && slugVal.match(new RegExp(`^#(${TOPIC_SLUG_SRC})@(${AGENT_SLUG_SRC})(!)?(<>?|=>|>)#(${TOPIC_SLUG_PARTIAL_SRC})$`));
-  const mAlias = aliasSyntaxActive && slugVal.match(new RegExp(`^#(${TOPIC_SLUG_SRC})@(${AGENT_SLUG_PARTIAL_SRC})(!\\d*)?$`));
+  const mAlias = routeSyntaxActive && slugVal.match(new RegExp(`^#(${TOPIC_SLUG_SRC})@(${AGENT_SLUG_PARTIAL_SRC})(!\\d*)?$`));
   // Origin Broadcast (ADR-0032): autocomplete for whichever trailing atom is
   // currently being typed after the last comma — everything before it (the
   // already-typed atoms) is preserved verbatim, never rewritten. `,` and
@@ -16735,88 +16758,17 @@ async function updateAutocomplete() {
     const prefix = mAlias[2].toLowerCase();
     const adhocSuffix = mAlias[3] || '';
     const preserveAdhocSuffix = mAlias[3] !== undefined;
-    const browseRoutes = browseCompletedRoute;
-    const [agents, history, topics] = await Promise.all([
+    const [agents, history] = await Promise.all([
       _acAgents(),
       fetch(`/topics/${encodeURIComponent(topic)}/agents/history`).then(r => r.ok ? r.json() : []).catch(() => []),
-      browseRoutes ? _acTopics({ includeAgentHistory: true }) : [],
     ]);
-    if (input.value !== val || browseCompletedRoute !== browseRoutes) return;
+    if (input.value !== val) return;
 
     const usedNames = new Set(history.map(h => h.agent));
     const backendByAgent = new Map(agents.map(a => [a.name, a.backend]));
     const items = [];
-
     const isDefault = topic.toLowerCase() === 'default';
-    const currentHistory = browseRoutes && history.find(h => h.agent.toLowerCase() === prefix);
-    const currentAgent = browseRoutes && agents.find(a => a.name.toLowerCase() === prefix);
-    if (currentHistory || currentAgent) {
-      const agent = currentHistory?.agent || currentAgent.name;
-      const backend = backendByAgent.get(agent) || null;
-      const topicByName = new Map(topics.map(t => [t.name.toLowerCase(), t]));
-      const currentTopic = topic.toLowerCase();
-      const isCurrentAgent = (name, agent) => name.toLowerCase() === currentTopic && agent?.toLowerCase() === prefix;
-      const otherRoutes = [];
-      for (const t of topics) {
-        if (!isCurrentAgent(t.name, t.agent)) {
-          const route = promptHistoryRoute(t.name, t.agent, !!t.sticky_adhoc) || `#${t.name}`;
-          otherRoutes.push({ route, prompt: t.last_prompt, time: Date.parse(t.last_at) || 0 });
-        }
-        for (const lane of t.agent_history || []) {
-          if (isCurrentAgent(t.name, lane.agent)) continue;
-          for (const [adhoc, prompt, timestamp] of [
-            [false, lane.last_prompt, lane.last_session_at],
-            [true, lane.last_adhoc_prompt, lane.last_adhoc_at],
-          ]) {
-            if (!prompt) continue;
-            const route = promptHistoryRoute(t.name, lane.agent, adhoc);
-            otherRoutes.push({ route, prompt, time: Date.parse(timestamp || lane.last_at) || 0 });
-          }
-        }
-      }
-      for (const entry of recentRouteHistoryEntries()) {
-        const target = parseHistoryRouteTarget(normalizePromptHistoryRoute(entry.route));
-        if (!target?.agent || target.route || !topicByName.has(target.topic)) continue;
-        if (isCurrentAgent(target.topic, target.agent)) continue;
-        otherRoutes.push(entry);
-      }
-      const seen = new Set();
-      const recentItems = [];
-      for (const { route, prompt } of otherRoutes.sort((a, b) => b.time - a.time)) {
-        const insert = normalizePromptHistoryRoute(route) || route;
-        const deleteRouteKey = insert.toLowerCase();
-        if (seen.has(deleteRouteKey) || hiddenRouteKeys.has(deleteRouteKey)) continue;
-        const target = parseHistoryRouteTarget(insert);
-        if (!target) continue;
-        seen.add(deleteRouteKey);
-        const summary = topicByName.get(target.topic);
-        const backend = backendByAgent.get(target.agent) || (target.agent === summary?.agent ? summary.last_backend : null);
-        const topicStatus = target.agent ? null : summary;
-        recentItems.push({
-          label: _acRouteLabel(target.topic, (target.agent || '') + (target.adhoc ? '!' : ''), backend),
-          insert,
-          sub: _acLastPrompt(prompt),
-          meta: topicStatus?.active ? '● live' : topicStatus?.queue_depth > 0 ? `queue ${topicStatus.queue_depth}` : '',
-          deleteRouteKey,
-        });
-      }
-      const switchToAdhoc = !preserveAdhocSuffix;
-      if (switchToAdhoc || !isDefault) {
-        const suffix = switchToAdhoc ? '!' : '';
-        items.push({
-          label: _acRouteLabel(topic, agent + suffix, backend),
-          insert: `#${topic}@${agent}${suffix}`,
-          sub: _acLastPrompt(switchToAdhoc ? currentHistory?.last_adhoc_prompt : currentHistory?.last_prompt),
-          meta: switchToAdhoc ? 'adhoc' : 'session',
-          dividerAbove: recentItems.length > 0,
-        });
-      }
-      items.push(...recentItems);
-      _acRender(items.map(item => ({
-        ...item, replaceSlug: replacingSlug, deleteTopic: null, collapseSlug: true, highlightOnly: true,
-      })), 'Routes');
-      return;
-    }
+
     // Used agents — with last prompt
     for (const h of history) {
       if (!h.agent.toLowerCase().startsWith(prefix)) continue;
@@ -16870,10 +16822,6 @@ async function updateAutocomplete() {
       });
     }
 
-    const typedRoute = slugVal.toLowerCase();
-    for (const item of items) {
-      if (item.insert.toLowerCase() === typedRoute) item.browseRouteFrom = val;
-    }
     appendMatchingRouteHistoryItems(items, slugVal);
     _acRender(items.slice(0, 10), 'Routes');
   } else if (editingExpandedSlug) {

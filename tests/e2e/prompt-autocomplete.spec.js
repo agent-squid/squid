@@ -234,17 +234,24 @@ test('left and right browse recent routes from an empty composer', async ({ page
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('squid_sticky_chip')).topic)).toBe('other');
 });
 
-test('route history ranks prompt-backed routes alongside saved routes', async ({ page }) => {
+test('route history includes older database routes alongside saved and recent routes', async ({ page }) => {
   await mockBackend(page);
   const time = Date.parse('2026-11-23T00:00:00Z');
   const entries = [
     { text: '#squid@claude check the history', created_at: new Date(time + 1000).toISOString() },
   ];
-  const routes = ['#squid@codex', ...Array.from({ length: 9 }, (_, i) => `#older${i}@codex`)];
+  const savedRoutes = ['#squid@codex', ...Array.from({ length: 9 }, (_, i) => `#older${i}@codex`)];
   await page.route('**/prompts/recent**', r => r.fulfill({ json: {
     items: entries.map(entry => entry.text),
     entries,
-    history: routes.map(value => ({ kind: 'route', key: value, value, hidden: false, updated_at: time })),
+    routes: [
+      { route: '#squid@haiku!', prompt: 'older ad hoc prompt', created_at: new Date(time - 1000).toISOString() },
+      { route: '#hidden@haiku', prompt: 'hidden route prompt', created_at: new Date(time - 1000).toISOString() },
+    ],
+    history: [
+      ...savedRoutes.map(value => ({ kind: 'route', key: value, value, hidden: false, updated_at: time })),
+      { kind: 'route', key: '#hidden@haiku', value: '', hidden: true, updated_at: time },
+    ],
   } }));
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
     topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
@@ -253,10 +260,20 @@ test('route history ranks prompt-backed routes alongside saved routes', async ({
   await expect.poll(() => page.evaluate(() => promptHistoryLoaded)).toBe(true);
   await page.locator('#input').press('ArrowLeft');
   const rows = page.locator('#autocomplete .ac-item');
-  await expect(rows).toHaveCount(9);
+  await expect(rows).toHaveCount(12);
   await expect(rows.filter({ hasText: '#squid@claude' })).toHaveClass(/selected/);
   await expect(rows.filter({ hasText: '#squid@claude' })).toContainText('check the history');
   await expect(rows.filter({ hasText: '#squid@codex' })).toHaveCount(1);
+  const olderRoute = rows.filter({ hasText: '#squid@haiku!' });
+  await expect(olderRoute).toContainText('older ad hoc prompt');
+  await expect(rows.filter({ hasText: '#hidden@haiku' })).toHaveCount(0);
+
+  await page.locator('#input').press('Escape');
+  await page.locator('#topic-chip').click();
+  await expect(rows).toHaveCount(12);
+  await page.locator('#input').press('Tab');
+  await page.locator('#input').press('Backspace');
+  await expect(rows).toHaveCount(12);
 });
 
 test('deleting a recent route persists without removing its prompts', async ({ page }) => {
@@ -285,6 +302,50 @@ test('deleting a recent route persists without removing its prompts', async ({ p
   await expect(removed).toContainText('push the changes');
 });
 
+test('server history refresh updates the open route picker and preserves the draft', async ({ page }) => {
+  await mockBackend(page);
+  const items = ['#older@codex older prompt'];
+  const history = [];
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items, history } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+  await page.waitForFunction(() => typeof promptHistoryLoaded !== 'undefined' && promptHistoryLoaded);
+
+  const composer = page.locator('#input');
+  const chip = page.locator('#topic-chip');
+  const picker = page.locator('#autocomplete');
+  const selected = picker.locator('.selected .ac-route-btn');
+  await composer.fill('keep this draft');
+  await chip.click();
+  await composer.press('ArrowUp');
+  await expect(selected).toHaveText('#older@codex');
+
+  items.unshift('#newer@codex newer prompt');
+  await page.evaluate(() => loadPromptHistory());
+  await expect(picker.locator('.ac-route-btn', { hasText: '#newer@codex' })).toBeVisible();
+  await expect(selected).toHaveText('#older@codex');
+
+  history.push({ kind: 'route', key: '#older@codex', value: '', hidden: true, updated_at: Date.now() });
+  await page.evaluate(() => loadPromptHistory());
+  await expect(picker.locator('.ac-route-btn', { hasText: '#older@codex' })).toHaveCount(0);
+  await expect(selected).toHaveText('#squid@codex');
+  await expect(composer).toHaveValue('#squid@codex keep this draft');
+  await composer.press('Enter');
+  await expect(chip).toContainText('#squid@codex');
+  await expect(composer).toHaveValue('keep this draft');
+
+  await composer.fill('');
+  await composer.press('Escape');
+  await composer.press('ArrowLeft');
+  await expect(chip).toContainText('#newer@codex');
+  history.push({ kind: 'route', key: '#newer@codex', value: '', hidden: true, updated_at: Date.now() });
+  await page.evaluate(() => loadPromptHistory());
+  await expect(picker.locator('.ac-route-btn', { hasText: '#newer@codex' })).toHaveCount(0);
+  await expect(chip).toContainText('#squid@codex');
+});
+
 test('left opens route autocomplete when the composer contains only a route', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
@@ -298,192 +359,6 @@ test('left opens route autocomplete when the composer contains only a route', as
   await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex');
   await expect(page.locator('#topic-chip')).toContainText('#other@codex');
   await expect(composer).toHaveValue('');
-});
-
-test('tapping a completed route shows only the other mode below recent topic routes', async ({ browser }) => {
-  // A service worker taking control can reload the page during this scenario.
-  const page = await browser.newPage({
-    viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block',
-  });
-  try {
-    await mockBackend(page);
-    await page.route('**/prompts/recent**', r => r.fulfill({ json: {
-      items: ['#other@codex push the changes'],
-    } }));
-    let topicsUnavailable = false;
-    await page.route(/\/topics(?:\?include_agent_history=true)?$/, r => r.fulfill(topicsUnavailable ? {
-      status: 503, json: { detail: 'Topics temporarily unavailable' },
-    } : { json: [
-      { name: 'squid', agent: 'codex', last_prompt: 'pull the latest squid' },
-      { name: 'other', agent: 'codex', last_prompt: 'push the changes' },
-      { name: 'older', agent: 'haiku', sticky_adhoc: true, last_prompt: 'summarize' },
-    ] }));
-    let pendingAgentHistory;
-    await page.route('**/topics/squid/agents/history', async r => {
-      await pendingAgentHistory;
-      await r.fulfill({ json: [
-        { agent: 'codex', last_prompt: 'pull the latest squid', last_adhoc_prompt: 'check this once' },
-      ] });
-    });
-    await page.route('**/config/agents', r => r.fulfill({ json: [
-      { name: 'claude', backend: 'claudecode:anthropic' },
-    ] }));
-    await page.goto('/');
-
-    const composer = page.locator('#input');
-    const picker = page.locator('#autocomplete');
-    const labels = picker.locator('.ac-label');
-    const switchRow = picker.locator('.ac-item-divider');
-    const chip = page.locator('#topic-chip');
-    await page.evaluate(() => clearTopicChip());
-    await page.route('**/topics/other/agents/history', r => r.fulfill({ json: [] }));
-    await composer.fill('#other@co');
-    await expect(picker.locator('.ac-item', { hasText: '#other@codex' })).toBeVisible();
-
-    await composer.fill('#');
-    await expect(labels).toHaveText(['#older@haiku', '#other@codex', '#squid@codex']);
-
-    await composer.fill('#squid@claude');
-    await expect(labels).toHaveText(['#squid@claude']);
-    await picker.locator('.ac-item', { hasText: '#squid@claude' }).tap();
-    await expect(labels).toHaveText(['#older@haiku!', '#other@codex', '#squid@codex', '#squid@claude!']);
-    await expect(switchRow).toContainText('#squid@claude!');
-    await expect(composer).toHaveValue('#squid@claude');
-
-    await composer.fill('#');
-    await expect(labels).toHaveText(['#older@haiku', '#other@codex', '#squid@codex']);
-    await composer.fill('#squid@claude');
-    await expect(labels).toHaveText(['#squid@claude']);
-    let releaseAgentHistory;
-    pendingAgentHistory = new Promise(resolve => { releaseAgentHistory = resolve; });
-    try {
-      await composer.fill('#squid@claud');
-      await picker.locator('.ac-item', { hasText: '#squid@claude' }).tap();
-    } finally {
-      releaseAgentHistory();
-      pendingAgentHistory = null;
-    }
-    await expect(chip).toContainText('#squid@claude');
-    await page.evaluate(() => clearTopicChip());
-
-    await composer.fill('#squid@codex');
-    await expect(labels).toHaveText(['#squid@codex!', '#squid@codex']);
-    await expect(switchRow).toHaveCount(0);
-
-    await composer.tap();
-    await expect(labels).toHaveText(['#older@haiku!', '#other@codex', '#squid@claude', '#squid@codex!']);
-    await expect(switchRow).toHaveCSS('border-top-width', '1px');
-    await expect(switchRow).toContainText('check this once');
-    await expect(picker).not.toContainText('Route history');
-    await expect(picker.locator('.ac-item.selected .ac-label')).toHaveText('#squid@codex!');
-
-    await composer.fill('#squid@code');
-    await expect(labels).toHaveText(['#squid@codex!', '#squid@codex']);
-    await expect(switchRow).toHaveCount(0);
-
-    await composer.fill('#squid@codex keep this draft');
-    await expect(chip).toContainText('#squid@codex');
-    await chip.tap();
-    await expect(labels).toHaveText(['#older@haiku!', '#other@codex', '#squid@claude', '#squid@codex!']);
-    await switchRow.tap();
-    await expect(chip).toContainText('#squid@codex!');
-    await expect(composer).toHaveValue('keep this draft');
-
-    await chip.tap();
-    await expect(labels).toHaveText(['#older@haiku!', '#other@codex', '#squid@claude', '#squid@codex']);
-    await expect(switchRow).toContainText('pull the latest squid');
-    await expect(switchRow.locator('.ac-meta')).toHaveText('session');
-    await switchRow.tap();
-    await expect(chip).toContainText('#squid@codex');
-    await expect(chip).not.toContainText('!');
-    await expect(composer).toHaveValue('keep this draft');
-
-    topicsUnavailable = true;
-    await page.evaluate(() => invalidateTopicsCache());
-    await chip.tap();
-    await expect(labels).toHaveText(['#squid@codex!']);
-    await expect(switchRow).toHaveCount(0);
-
-    topicsUnavailable = false;
-    await composer.tap({ position: { x: 10, y: 10 } });
-    await expect(labels).toHaveText(['#older@haiku!', '#other@codex', '#squid@claude', '#squid@codex!']);
-    const otherRow = picker.locator('.ac-item', { hasText: '#other@codex' });
-    await expect(switchRow.getByTitle('Remove from history')).toHaveCount(0);
-    await otherRow.getByTitle('Remove from history').tap();
-    await expect(otherRow).toHaveCount(0);
-    await picker.locator('.ac-item', { hasText: '#older@haiku' }).tap();
-    await expect(chip).toContainText('#older@haiku!');
-    await expect(composer).toHaveValue('keep this draft');
-
-    await page.evaluate(() => clearTopicChip());
-    await composer.fill('#other@co');
-    await expect(otherRow).toHaveCount(0);
-    await composer.fill('push');
-    await expect(otherRow).toContainText('push the changes');
-
-    await page.evaluate(() => clearTopicChip());
-    await composer.fill('#squid@codex');
-    await composer.tap();
-    await expect(labels).toHaveText(['#older@haiku!', '#squid@claude', '#squid@codex!']);
-  } finally {
-    await page.close();
-  }
-});
-
-test('tapping the route chip recalls agents beyond recent prompts without topic-wide badges', async ({ browser }) => {
-  const page = await browser.newPage({
-    viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block',
-  });
-  try {
-    await mockBackend(page);
-    await page.route('**/topics?include_agent_history=true', r => r.fulfill({ json: [
-      {
-        name: 'squid', agent: 'codex', active: true,
-        agent_history: [{
-          agent: 'claude', last_adhoc_prompt: 'older squid prompt', last_adhoc_at: '2026-11-21T00:00:00Z',
-        }],
-      },
-      {
-        name: 'other', agent: 'codex', queue_depth: 2, last_at: '2026-11-22T00:00:00Z',
-        agent_history: [{
-          agent: 'claude', last_prompt: 'older prompt on another topic', last_session_at: '2026-11-20T00:00:00Z',
-        }],
-      },
-    ] }));
-    await page.route('**/topics/squid/agents/history', r => r.fulfill({ json: [
-      { agent: 'codex' }, { agent: 'claude' },
-    ] }));
-    await page.route('**/config/agents', r => r.fulfill({ json: [
-      { name: 'codex', backend: 'codex' },
-      { name: 'claude', backend: 'claudecode' },
-    ] }));
-    await page.route('**/prompts/recent**', r => r.fulfill({ json: {
-      items: Array.from({ length: 200 }, (_, i) => `#squid@codex recent prompt ${i}`),
-      history: [],
-    } }));
-    await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
-      topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
-    })));
-    await page.goto('/');
-    await expect.poll(() => page.evaluate(() => promptHistoryLoaded)).toBe(true);
-    const chip = page.locator('#topic-chip');
-    const composer = page.locator('#input');
-    await composer.fill('keep this draft');
-    await expect(chip).toContainText('#squid@codex');
-    await chip.tap();
-
-    const labels = page.locator('#autocomplete .ac-label');
-    await expect(labels).toHaveText(['#other@claude', '#squid@claude!', '#other@codex', '#squid@codex!']);
-    const routeRows = page.locator('#autocomplete .ac-item');
-    await expect(routeRows.filter({ hasText: '#squid@claude!' })).toContainText('older squid prompt');
-    await expect(routeRows.filter({ hasText: '#other@claude' })).toContainText('older prompt on another topic');
-    await expect(page.locator('#autocomplete .ac-meta')).toHaveText(['adhoc']);
-    await labels.getByText('#squid@claude!', { exact: true }).tap();
-    await expect(chip).toContainText('#squid@claude!');
-    await expect(composer).toHaveValue('keep this draft');
-  } finally {
-    await page.close();
-  }
 });
 
 test('route autocomplete includes multi-head flow routes from prompt history', async ({ page }) => {
@@ -616,10 +491,16 @@ test('route autocomplete includes saved flows matching an agent route prefix', a
     { name: 'qwen', backend: 'codex' },
   ] }));
   await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [] }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'qwen', adhoc: false, lookback: 0,
+  })));
   await page.goto('/');
+  await expect.poll(() => page.evaluate(() => promptHistoryLoaded)).toBe(true);
 
   const composer = page.locator('#input');
-  await composer.fill('#squid@qwen');
+  await page.locator('#topic-chip').click();
+  await composer.press('Backspace');
+  await composer.pressSequentially('qwen');
 
   await expect(page.locator('#autocomplete')).toHaveClass(/open/);
   await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
@@ -1059,7 +940,7 @@ test('plain Enter sends the message without selecting from autocomplete', async 
   await expect(page.locator('#autocomplete')).not.toHaveClass(/open/);
 });
 
-test('search composer action prefills the effective default agent route', async ({ page }) => {
+test('search composer action opens all-history search and preserves the draft', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/topics', r => r.fulfill({ json: [
     { name: 'default', agent: 'codex', sticky_adhoc: false, last_model: null, last_backend: 'codex', queue_depth: 0, active: false },
@@ -1070,7 +951,10 @@ test('search composer action prefills the effective default agent route', async 
   await page.fill('#input', 'needle');
   await page.locator('#chip-search-btn').click();
 
-  await expect(page.locator('#input')).toHaveValue('/s #default@codex needle');
+  await expect(page.locator('#search-bar')).toBeVisible();
+  await expect(page.locator('#search-bar-scope')).toHaveValue('#all');
+  await expect(page.locator('#search-bar-keywords')).toBeFocused();
+  await expect(page.locator('#input')).toHaveValue('needle');
 });
 
 test('composer input icons render at 16px', async ({ page }) => {
@@ -1352,44 +1236,80 @@ for (const { name, chip, route } of [
   });
 }
 
-test('Backspace and chip click show the same scrollable route picker and preserve the draft', async ({ page }) => {
+test('Backspace and chip click show the same scrollable route history and preserve the draft', async ({ page }) => {
   await mockBackend(page);
   await page.setViewportSize({ width: 390, height: 760 });
-  const longTopic = 'architecture'.repeat(8);
-  const longRoute = `#${longTopic}@haiku`;
-  await page.route(/\/topics(?:\?include_agent_history=true)?$/, r => r.fulfill({ json: [
-    { name: longTopic, agent: 'haiku', last_prompt: 'review the design' },
-  ] }));
-  await page.route('**/topics/squid/agents/history', r => r.fulfill({ json: [] }));
-  await page.route('**/config/agents', r => r.fulfill({ json: [
-    { name: 'codex', backend: 'codex' },
-  ] }));
+  const longRoute = '#architecture@codex+@reviewer>#handoff@verylongreviewagent!';
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [
+    `${longRoute} review the design`,
+  ] } }));
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
     topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
   })));
   await page.goto('/');
+  await expect.poll(() => page.evaluate(() => promptHistoryLoaded)).toBe(true);
 
   const composer = page.locator('#input');
   const chip = page.locator('#topic-chip');
   const picker = page.locator('#autocomplete');
-  const labels = picker.locator('.ac-route-label');
+  const routes = picker.locator('.ac-route-btn');
   await composer.fill('keep this draft');
   await chip.click();
-  await expect(labels).toHaveText([longRoute, '#squid@codex!']);
+  await expect(routes).toHaveText([longRoute, '#squid@codex']);
   await composer.press('Escape');
   await composer.press('ArrowRight');
   await expect(composer).toHaveValue('keep this draft');
 
   await composer.press('Home');
   await composer.press('Backspace');
-  await expect(labels).toHaveText([longRoute, '#squid@codex!']);
-  await expect.poll(() => labels.first().evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+  await expect(routes).toHaveText([longRoute, '#squid@codex']);
+  await expect.poll(() => routes.first().evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
   await composer.press('ArrowUp');
   await expect(composer).toHaveValue('#squid@codex keep this draft');
-  await composer.press('Tab');
+  await composer.press('Enter');
   await expect(chip).toContainText(longRoute);
   await expect(composer).toHaveValue('keep this draft');
   await expect(picker).toBeHidden();
+});
+
+test('editing a route clears history selection while agent suggestions load', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/config/agents', r => r.fulfill({ json: [
+    { name: 'claude', backend: 'claude' },
+  ] }));
+  let releaseAgentHistory;
+  const agentHistory = new Promise(resolve => { releaseAgentHistory = resolve; });
+  await page.route('**/topics/squid/agents/history', async r => {
+    await agentHistory;
+    await r.fulfill({ json: [] });
+  });
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+  await page.waitForFunction(() => typeof promptHistoryLoaded !== 'undefined' && promptHistoryLoaded);
+
+  const composer = page.locator('#input');
+  const chip = page.locator('#topic-chip');
+  const picker = page.locator('#autocomplete');
+  try {
+    await composer.fill('keep this draft');
+    await chip.click();
+    await composer.press('ArrowUp');
+    await expect(picker.locator('.selected .ac-route-btn')).toBeVisible();
+    await expect(picker.locator('.selected .ac-route-btn')).not.toHaveText('#squid@codex');
+
+    await composer.press('Backspace');
+    await expect(composer).toHaveValue('#squid@ keep this draft');
+    await expect(picker).toBeHidden();
+    await composer.press('Enter');
+  } finally {
+    releaseAgentHistory();
+  }
+
+  await expect(picker.locator('.ac-route-label', { hasText: '#squid@claude' })).toBeVisible();
+  await expect(composer).toHaveValue('#squid@ keep this draft');
+  await expect(chip).toBeHidden();
 });
 
 test('Backspace on an empty prompt keeps expanding the topic chip as before', async ({ page }) => {
@@ -1405,14 +1325,28 @@ test('Backspace on an empty prompt keeps expanding the topic chip as before', as
 
   await expect(composer).toHaveValue('#squid@codex!3');
   await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
+  await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toHaveText('#squid@codex!');
+
+  await composer.press('Tab');
+  await expect(composer).toHaveValue('');
+  await expect.poll(() => page.evaluate(() => stickyChip?.lookback)).toBe(3);
 });
 
-test('Backspace in an expanded route deletes agent semantically and topic by char', async ({ page }) => {
+test('Editing an expanded route switches between agent suggestions, topic suggestions, and history', async ({ page }) => {
   await mockBackend(page);
+  await page.route('**/topics', r => r.fulfill({ json: [
+    { name: 'squid', agent: 'codex' },
+  ] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [
+    { name: 'codex', backend: 'codex' },
+    { name: 'claude', backend: 'claude' },
+  ] }));
+  await page.route('**/topics/squid/agents/history', r => r.fulfill({ json: [] }));
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
     topic: 'squid', agent: 'codex', adhoc: true, lookback: 12,
   })));
   await page.goto('/');
+  await expect.poll(() => page.evaluate(() => promptHistoryLoaded)).toBe(true);
 
   const composer = page.locator('#input');
   await composer.fill('fix the bug');
@@ -1427,11 +1361,18 @@ test('Backspace in an expanded route deletes agent semantically and topic by cha
   await expect(composer).toHaveValue('#squid@codex fix the bug');
   await composer.press('Backspace');
   await expect(composer).toHaveValue('#squid@ fix the bug');
+  await expect(page.locator('#autocomplete .ac-route-label', { hasText: '#squid@claude' })).toBeVisible();
   await composer.press('Backspace');
   await expect(composer).toHaveValue('#squid fix the bug');
+  await composer.press('Shift+ArrowLeft');
   await composer.press('Backspace');
   await expect(composer).toHaveValue('#squi fix the bug');
   await expect.poll(() => composer.evaluate(input => input.selectionStart)).toBe(5);
+  await expect(page.locator('#autocomplete .ac-route-label', { hasText: '#squid@codex' })).toBeVisible();
+
+  await composer.press('Backspace');
+  await expect(composer).toHaveValue('# fix the bug');
+  await expect(page.locator('#autocomplete .ac-route-btn', { hasText: '#other@codex' })).toBeVisible();
 });
 
 test('Backspace inside a populated prompt keeps the topic chip and edits normally', async ({ page }) => {
@@ -1531,10 +1472,16 @@ test('agent autocomplete supports an empty agent slot before adhoc lookback', as
   await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [
     { agent: 'claude', last_prompt: 'session prompt', last_adhoc_prompt: 'adhoc prompt' },
   ] }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: true, lookback: 12,
+  })));
   await page.goto('/');
 
   const composer = page.locator('#input');
-  await composer.fill('#squid@!12');
+  await page.locator('#topic-chip').click();
+  await composer.evaluate(input => input.setSelectionRange('#squid@codex'.length, '#squid@codex'.length));
+  await composer.press('Backspace');
+  await expect(composer).toHaveValue('#squid@!12');
 
   await expect(page.locator('#autocomplete')).toHaveClass(/open/);
   const claudeItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@claude!12' });

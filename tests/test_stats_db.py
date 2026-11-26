@@ -1368,6 +1368,32 @@ def test_recent_prompts_returns_limit_unique_routed_prompts(tmp_path, monkeypatc
     assert stats_db.get_recent_prompts(limit=6)[-1] == "#squid@haiku! push the changes"
 
 
+def test_composer_route_entries_include_older_lanes_and_latest_flow_prompts(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "stats.db")
+    stats_db.init_db()
+    stats_db.upsert_agent("codex", "codex", None, None)
+    stats_db.upsert_agent("review", "codex", None, None)
+    stats_db.upsert_topic("squid", "codex", last_prompt="session prompt")
+    stats_db.upsert_topic("squid", "codex", last_prompt="ad hoc prompt", adhoc=True)
+    stats_db.upsert_topic("squid", "review", last_prompt="newer lane")
+    flow = "#squid@codex>@review"
+    stats_db.insert_user_message("squid", "codex", "old flow prompt", flow_route=flow)
+    stats_db.insert_user_message("squid", "codex", "latest flow prompt", flow_route=flow)
+
+    entries = {row["route"]: row["prompt"] for row in stats_db.get_composer_route_entries()}
+    assert entries == {
+        "#squid@codex": "session prompt",
+        "#squid@codex!": "ad hoc prompt",
+        "#squid@review": "newer lane",
+        flow: "latest flow prompt",
+    }
+
+    for index in range(201):
+        route = f"#saved{index}@codex"
+        stats_db.update_composer_history("route", route, route, False, index + 1)
+    assert len(stats_db.get_composer_history()) == 201
+
+
 def test_composer_history_ignores_retried_writes_older_than_a_hide(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "stats.db")
     stats_db.init_db()

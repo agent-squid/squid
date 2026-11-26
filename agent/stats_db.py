@@ -3118,6 +3118,43 @@ def get_recent_prompt_entries(limit: int = 50) -> list[dict]:
     return results
 
 
+def get_composer_route_entries() -> list[dict]:
+    """Return the latest stored prompt and timestamp for each route."""
+    entries = []
+    for topic in get_topics_summary(include_agent_history=True):
+        topic_route = f'#{topic["name"]}'
+        route = topic_route
+        if topic["agent"]:
+            route += f'@{topic["agent"]}'
+        if topic["sticky_adhoc"]:
+            route += "!"
+        entries.append({"route": route, "prompt": topic["last_prompt"], "created_at": topic["last_at"]})
+        for lane in topic["agent_history"]:
+            route = f'{topic_route}@{lane["agent"]}'
+            if lane["last_prompt"]:
+                entries.append({
+                    "route": route, "prompt": lane["last_prompt"],
+                    "created_at": lane["last_session_at"] or lane["last_at"],
+                })
+            if lane["last_adhoc_prompt"]:
+                entries.append({
+                    "route": route + "!", "prompt": lane["last_adhoc_prompt"],
+                    "created_at": lane["last_adhoc_at"] or lane["last_at"],
+                })
+    with _connection() as conn:
+        entries.extend(dict(row) for row in conn.execute(
+            """SELECT flow_route AS route, content AS prompt, created_at
+               FROM chat_messages
+               WHERE id IN (
+                   SELECT MAX(id) FROM chat_messages
+                   WHERE role = 'user' AND COALESCE(source, 'human') = 'human'
+                     AND flow_route > '' AND TRIM(content) != ''
+                   GROUP BY flow_route
+               )"""
+        ))
+    return entries
+
+
 def get_composer_history() -> list[dict]:
     with _connection() as conn:
         return [dict(row) for row in conn.execute(
@@ -3156,7 +3193,7 @@ def update_composer_history(
         )
         if not changed.rowcount:
             return
-        if not hidden:
+        if not hidden and kind == "prompt":
             conn.execute(
                 """DELETE FROM composer_history WHERE kind = ? AND hidden = 0 AND key IN (
                        SELECT key FROM composer_history WHERE kind = ? AND hidden = 0

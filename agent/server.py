@@ -103,7 +103,7 @@ from .stats_db import (
     clear_agent_sessions, get_agent_sessions, get_agent_home_mode, set_agent_home_mode,
     get_diff_revert_eligibility, record_git_diff_revert, get_message_gitdiff,
     search_messages, search_prompts,
-    get_recent_prompt_entries, get_composer_history, update_composer_history,
+    get_recent_prompt_entries, get_composer_history, get_composer_route_entries, update_composer_history,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
     get_message_annotations, set_message_annotation, remove_message_annotation,
@@ -2540,14 +2540,15 @@ class ComposerHistoryRequest(BaseModel):
 
 @app.get("/prompts/recent")
 async def prompts_recent(limit: int = 50):
-    entries, agents, history = await asyncio.gather(
+    entries, agents, history, routes = await asyncio.gather(
         asyncio.to_thread(get_recent_prompt_entries, max(1, min(limit, 200))),
         asyncio.to_thread(_public_agent_map),
         asyncio.to_thread(get_composer_history),
+        asyncio.to_thread(get_composer_route_entries),
     )
     return JSONResponse({
         "items": [entry["text"] for entry in entries],
-        "entries": entries, "agents": agents, "history": history,
+        "entries": entries, "agents": agents, "history": history, "routes": routes,
     })
 
 
