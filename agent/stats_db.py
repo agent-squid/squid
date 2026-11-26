@@ -2279,7 +2279,7 @@ def get_session_injected_context(session_id: str) -> dict:
             """SELECT u.context
                FROM chat_messages AS u
                JOIN chat_messages AS a ON a.reply_to = u.id
-               WHERE a.session_id=? AND u.role='user' AND u.context IS NOT NULL
+               WHERE a.session_id=? AND a.status='done' AND u.role='user' AND u.context IS NOT NULL
                ORDER BY u.id""",
             (session_id,),
         ).fetchall()

@@ -21,16 +21,21 @@ function setup(initial = {}, localStorage = makeStorage(initial)) {
       dataset: { topic, msgId: String(index + 1) }, children: [],
     })) },
     _sessionIds: {},
-    _pendingSessionInjectedIds: {},
-    _pendingSessionAttachedFiles: {},
+    pendingCartContextByRoute: new Map(),
+    pendingAttachmentCounts: new Map(),
+    pendingAttachmentsByRoute: new Map(),
+    pinPanel: { classList: { contains: () => false } },
+    updatePinCount() {},
   });
   for (const [start, end] of [
+    ['function historyPromptContext(', 'function makeHistoryContextControl('],
     ['function getPinnedItems()', 'function refreshPinnedContextUi()'],
-    ['function getStagedAttachments()', 'function _removeAttachedFilePath('],
+    ['function getStagedAttachments()', 'function addAttachedFile('],
     ['function getInjectedInto()', 'function _currentContextTarget()'],
     ['function _memoryRootTopic(', 'function _memoryCacheKeys('],
     ['function _injectablePinnedIds(', 'function updatePinCount('],
     ['function _pinStatus(', 'function _memoryStatus('],
+    ['function _attachedFileStatus(', 'function renderPinPanel('],
     ['const _lookbackSelections', 'function updateInContextMarkers('],
   ]) vm.runInContext(source.slice(source.indexOf(start), source.indexOf(end)), context);
   context.setPinnedItems = items => context.localStorage.setItem('pinnedItems', JSON.stringify(items));
@@ -52,14 +57,17 @@ test('legacy pins remain available and checkbox changes persist per tree', () =>
   assert.equal(cart.getSelectedPins('other').length, 0);
 });
 
-test('sent status remains visible after deselecting a pin', () => {
+test('a pin already in the session is locked and checked even after deselection', () => {
   const cart = setup({ pinnedItems: [{ id: 1, selectedTrees: ['work'] }], injectedInto: { session: [1] } });
   const target = { topic: 'work', agent: 'echo', adhoc: false };
   cart._sessionIds['work@echo'] = 'session';
   assert.equal(cart._injectablePinnedIds('work', 'echo', false).length, 0);
   assert.equal(cart._injectablePinnedIds('work', 'echo', true).join(','), '1');
   cart.setPinSelected(1, 'work', false);
-  assert.equal(cart._pinStatus(cart.getPinnedItems()[0], target, false).text, 'Sent');
+  const state = cart._pinStatus(cart.getPinnedItems()[0], target, false);
+  assert.equal(state.text, 'In session');
+  assert.equal(state.checked, true);
+  assert.equal(state.disabled, true);
   assert.equal(cart._injectablePinnedIds('work', 'echo', true).length, 0);
 });
 
@@ -138,24 +146,179 @@ test('a rendered lookback deselection survives candidate changes', () => {
   assert.equal(cart._activeLookbackItems('work.first', true, 3, 'echo').map(item => item.id).join(','), '1');
 });
 
-test('unchecked attachments stay staged and keep their delivery status', () => {
+test('attachments are used once, retryable on failure, and selectable again', () => {
   const cart = setup();
   const target = { topic: 'work', agent: 'echo', adhoc: true };
-  const path = '/draft.txt';
-  cart.setAttachedFiles([{ path }], target.topic);
-  assert.equal(cart._attachedFilesState(target).selected[0].path, path);
-  cart.setAttachedFileSelected(path, target.topic, false);
-  assert.equal(cart.getAttachedFiles(target.topic)[0].path, path);
+  cart.setAttachedFiles([{ path: '/draft.txt' }], target.topic);
+  const [file] = cart._attachedFilesState(target).selected;
+  const failedSend = cart.trackAttachmentSend(target, [file]);
+  assert.equal(cart._attachedFileStatus(file).text, 'Sending');
   assert.equal(cart._attachedFilesState(target).selected.length, 0);
+  failedSend(false);
+  assert.equal(cart._attachedFilesState(target).selected.length, 1);
 
-  cart._sessionIds['work@echo'] = 'session';
-  cart.setAttachedFilesInSession({ session: [path] });
-  target.adhoc = false;
-  assert.equal(cart._attachedFilesState(target).saved[0].path, path);
-  cart.setAttachedFileSelected(path, target.topic, true);
-  assert.equal(cart._attachedFilesState(target).selected.length, 0);
-  target.adhoc = true;
+  const successfulSend = cart.trackAttachmentSend(target, [file]);
+  successfulSend(true);
+  const sibling = { ...target, topic: 'work.sibling', adhoc: false };
+  const [used] = cart._attachedFilesState(sibling).available;
+  assert.equal(cart._attachedFileStatus(used).text, 'Used');
+  assert.equal(cart._attachedFilesState(sibling).selected.length, 0);
+  cart.setAttachedFileSelected(file.path, sibling.topic, true);
+  assert.equal(cart._attachedFilesState(sibling).selected[0].path, file.path);
+});
+
+test('send preparation skips pins that start sending during file validation', async () => {
+  const cart = setup();
+  const target = { topic: 'work', agent: 'echo', adhoc: false };
+  let finishValidation;
+  Object.assign(cart, {
+    topic: target.topic, _effectiveAgent: target.agent, adhoc: false, nativeShell: false,
+    opts: {}, stagedFiles: [], selectedPins: [{ id: 1 }], lookbackSelection: null, shellLookbackIds: [],
+    _topicMemoryStateForSend: async () => ({ selected: false }),
+  });
+  const start = source.indexOf('  const availability = opts.retryContext');
+  const end = source.indexOf('  if (!nativeShell) {', start);
+  cart.checkAttachedFiles = () => new Promise(resolve => { finishValidation = resolve; });
+  const prepared = vm.runInContext('(async () => {' + source.slice(start, end) + 'return _contextIds; })()', cart);
+  cart.trackPendingCartContext(target, [1], null);
+  finishValidation(new Map());
+  assert.equal((await prepared).length, 0);
+});
+
+test('a second send skips an attachment used while it was preparing', () => {
+  const cart = setup();
+  const target = { topic: 'work', agent: 'echo', adhoc: false };
+  cart.setAttachedFiles([{ path: '/draft.txt' }], target.topic);
+  const { stagedFiles } = cart.contextCartSnapshot(target.topic);
+  const settle = cart.trackAttachmentSend(target, stagedFiles);
+  assert.equal(cart.contextCartSnapshot(target.topic).stagedFiles.length, 0);
+
+  settle(true);
+  const availability = new Map([['/draft.txt', false]]);
+  assert.equal(cart.getAttachmentsForSend(target.topic, stagedFiles, availability, false).length, 0);
+  assert.equal(cart.getAttachmentsForSend(target.topic, stagedFiles, availability, true).length, 1);
+});
+
+test('missing files stay in the cart and recover their previous selection', async () => {
+  const cart = setup();
+  const target = { topic: 'work' };
+  const path = '/draft.txt';
+  let exists = false;
+  cart.fetch = async () => ({
+    ok: true, json: async () => ({ paths: [{ path, exists, is_file: exists }] }),
+  });
+  cart.setAttachedFiles([{ path }], target.topic);
+  await cart.checkAttachedFiles(target.topic);
+  const status = cart._attachedFileStatus(cart.getAttachedFiles(target.topic)[0]);
+  assert.equal(status.text, 'No file');
+  assert.equal(status.checked, false);
+  assert.equal(status.disabled, true);
+  assert.equal(cart._attachedFilesState(target).available.length, 0);
+  exists = true;
+  await cart.checkAttachedFiles(target.topic);
   assert.equal(cart._attachedFilesState(target).selected[0].path, path);
+});
+
+test('an old send cannot consume a file restaged after switching trees', () => {
+  const cart = setup();
+  const topic = 'work';
+  const path = '/draft.txt';
+  cart.setAttachedFiles([{ path }], topic);
+  const settle = cart.trackAttachmentSend({ topic }, cart.getAttachedFiles(topic));
+  cart.clearAttachmentsForTreeSwitch('other');
+  cart.setAttachedFiles([{ path }], topic);
+  settle(true);
+  assert.equal(cart._attachedFilesState({ topic }).selected[0].path, path);
+});
+
+test('completing one turn keeps the other turn’s pins and memory pending', () => {
+  const cart = setup();
+  const target = { topic: 'work', agent: 'echo', adhoc: false };
+  const clearFirst = cart.trackPendingCartContext(target, [1, 2], 'revision');
+  const clearSecond = cart.trackPendingCartContext(target, [2, 3], 'revision');
+  Object.assign(cart, {
+    topic: target.topic, _effectiveAgent: target.agent, resolvedAgent: target.agent, adhoc: false,
+    _contextIds: [1, 2], reportedContextIds: undefined, _includeTopicMemory: true, _attachedFiles: [],
+    settleAttachments: null, clearPendingContext: clearFirst,
+    _topicMemoryForSend: { revision: 'revision' },
+    _memorySelectionOverrides: {}, _memoryInjectedInto: {},
+    _memoryOverrideKey: () => 'work@echo', _memoryInjectedKey: () => 'work@echo',
+  });
+  const start = source.indexOf('  function markSessionContextDelivered(');
+  const end = source.indexOf('  function saveCartTurn(', start);
+  vm.runInContext(source.slice(start, end)
+    + 'markSessionContextDelivered("session", { prompt_context: "[1,4]" });', cart);
+  assert.equal(cart.getInjectedInto().session.join(','), '1,4');
+  clearFirst();
+
+  assert.equal(cart.hasPendingCartPin(target, 1), false);
+  assert.equal(cart.hasPendingCartPin(target, 2), true);
+  assert.equal(cart.hasPendingCartPin(target, 3), true);
+  assert.equal(cart.hasPendingCartMemory(target, 'revision'), true);
+  assert.equal(cart._pinStatus({ id: 3 }, target, true).text, 'Sending');
+  assert.equal(cart._injectablePinnedIds(target.topic, target.agent, false, [{ id: 3 }]).length, 0);
+
+  clearSecond();
+  assert.equal(cart.hasPendingCartPin(target, 2), false);
+  assert.equal(cart.hasPendingCartPin(target, 3), false);
+  assert.equal(cart.hasPendingCartMemory(target, 'revision'), false);
+});
+
+test('badge prioritizes ready items and excludes locked items', () => {
+  const cart = setup({
+    pinnedItems: [
+      { id: 1, selectedTrees: ['work'] },
+      { id: 2, selectedTrees: ['other'] },
+      { id: 3, session_id: 'session', selectedTrees: ['work'] },
+      { id: 4, selectedTrees: ['work'] },
+    ],
+  });
+  const target = { topic: 'work', agent: 'echo', adhoc: false };
+  cart._currentContextTarget = () => target;
+  cart._topicMemoryState = () => ({ exists: false, selected: false });
+  cart.stickyChip = null;
+  cart._sessionIds['work@echo'] = 'session';
+  cart.pinCountEl = { classList: { toggle() {} } };
+  const classes = new Map();
+  cart.pinBtn = { classList: { toggle: (name, active) => classes.set(name, active) }, setAttribute() {} };
+  cart.setAttachedFiles([{ path: '/used.txt', selected: false, used: true }, { path: '/missing.txt', unavailable: true }], target.topic);
+  vm.runInContext(source.slice(source.indexOf('function updatePinCount('), source.indexOf('function _pinTagStr(')), cart);
+  const clearPin = cart.trackPendingCartContext(target, [4], null);
+  assert.equal(cart.pinCountEl.textContent, 1);
+  assert.equal(classes.get('has-context'), true);
+  assert.equal(classes.get('has-context-pending'), false);
+  assert.match(cart.pinBtn.title, /1 ready to send/);
+  cart.setPinnedItems(cart.getPinnedItems().filter(pin => pin.id !== 1));
+  cart.updatePinCount();
+  assert.equal(cart.pinCountEl.textContent, 1);
+  assert.equal(classes.get('has-context'), false);
+  assert.equal(classes.get('has-context-pending'), true);
+  assert.match(cart.pinBtn.title, /1 sending/);
+  cart.setPinnedItems(cart.getPinnedItems().filter(pin => pin.id !== 2));
+  cart.setAttachedFiles([{ path: '/draft.txt' }, { path: '/missing.txt', unavailable: true }], target.topic);
+  const [file] = cart.getAttachedFiles(target.topic);
+  const settle = cart.trackAttachmentSend(target, [file]);
+  assert.equal(cart.pinCountEl.textContent, 2);
+  for (const destination of [{ topic: 'work.sibling' }, { agent: 'other' }, { adhoc: true }]) {
+    cart._currentContextTarget = () => ({ ...target, ...destination });
+    cart.updatePinCount();
+    assert.equal(classes.get('has-context-pending'), false);
+    assert.equal(cart._attachedFileStatus(file).text, 'Sending');
+  }
+  cart._currentContextTarget = () => target;
+  cart.updatePinCount();
+  assert.equal(classes.get('has-context-pending'), true);
+  clearPin();
+  settle(false);
+  assert.equal(classes.get('has-context-pending'), false);
+  assert.equal(classes.get('has-context'), true);
+  cart.setPinnedItems(cart.getPinnedItems().filter(pin => pin.id !== 4));
+  cart.setAttachedFileSelected(file.path, target.topic, false);
+  cart.updatePinCount();
+  assert.match(cart.pinBtn.title, /1 available to select/);
+  cart.setAttachedFiles([{ path: '/missing.txt', unavailable: true }], target.topic);
+  cart.updatePinCount();
+  assert.equal(cart.pinCountEl.textContent, '');
 });
 
 test('cart clicks stay inside the panel after the clicked row is replaced', () => {
@@ -206,4 +369,133 @@ test('late success consumes the override and shows reported context even after c
   assert.equal(consumed, 1);
   assert.equal(displayedCount, 2);
   assert.equal(liveCtxSpan.dataset.pinnedIds, '[3,5]');
+});
+
+test('a late acknowledgment restores attachment tracking after local timeout cleanup', async () => {
+  const cart = setup();
+  const topic = 'work';
+  const file = { id: 'draft', path: '/draft.txt' };
+  cart.setAttachedFiles([file], topic);
+  Object.assign(cart, {
+    topic, _effectiveAgent: 'echo', adhoc: false, _attachedFiles: [file],
+    quotaFinalized: true, msgId: null, completionRendered: false, completedFromStatus: false,
+    chatPayload: {}, acceptChatStart() {}, savePendingCartTurn() {},
+    attachMsgId(id) { cart.msgId = id; return true; },
+    markSessionContextPending() {},
+    startStatusFallback(id) { assert.equal(id, 42); },
+    detachedPolling: false,
+  });
+  let acknowledge;
+  cart.realtimeV1 = { start(_payload, onLate) { acknowledge = onLate; } };
+  const trackingStart = source.indexOf('  let settleAttachments = null;');
+  const trackingEnd = source.indexOf('  function attachMsgId(', trackingStart);
+  const callbackStart = source.indexOf('        const startChat = () => realtimeV1.start(');
+  const callbackEnd = source.indexOf('        let result = await startChat();', callbackStart);
+  vm.runInContext(source.slice(trackingStart, trackingEnd) + source.slice(callbackStart, callbackEnd)
+    + 'trackCartAttachments(); startChat();', cart);
+  await vm.runInContext('finalizeQuotaTracking()', cart);
+  assert.equal(cart.pendingAttachmentCounts.has(file.id), false);
+
+  acknowledge({ ok: true, msg_id: 42 });
+  assert.equal(cart.pendingAttachmentCounts.get(file.id), 1);
+  vm.runInContext('settleAttachments(true)', cart);
+  assert.equal(cart.getAttachedFiles(topic)[0].used, true);
+  assert.equal(cart.getAttachedFiles(topic)[0].selected, false);
+});
+
+test('refresh restores the sending badge on its route until the stored turn settles', async () => {
+  for (const status of ['done', 'cancelled']) {
+    const sender = setup();
+    const target = { topic: 'work', agent: 'echo', adhoc: false };
+    sender.setAttachedFiles([{ path: '/draft.txt' }], target.topic);
+    const [file] = sender.getAttachedFiles(target.topic);
+    sender.savePendingCartTurn(42, { ...target, fileIds: [file.id], pinIds: [] });
+
+    const cart = setup({}, sender.localStorage);
+    cart.sessionStorage = sender.sessionStorage;
+    let destination = target;
+    cart._currentContextTarget = () => destination;
+    cart._topicMemoryState = () => ({ exists: false });
+    cart.stickyChip = null;
+    cart.pinCountEl = { classList: { toggle() {} } };
+    const classes = new Map();
+    cart.pinBtn = { classList: { toggle: (name, active) => classes.set(name, active) }, setAttribute() {} };
+    vm.runInContext(source.slice(source.indexOf('function updatePinCount('), source.indexOf('function _pinTagStr(')), cart);
+    let poll;
+    let turnStatus = 'pending';
+    cart.setTimeout = callback => { poll = callback; };
+    cart.fetch = async url => {
+      assert.equal(url, '/chat/42/status');
+      return { ok: true, json: async () => ({ status: turnStatus, session_id: 'session', prompt_context: '[7]', content: 'Partial response' }) };
+    };
+    cart.restorePendingCartTurns();
+    await new Promise(setImmediate);
+
+    assert.match(cart.pinBtn.title, /1 sending/);
+    assert.equal(classes.get('has-context-pending'), true);
+    destination = { ...target, agent: 'other' };
+    cart.updatePinCount();
+    assert.equal(classes.get('has-context-pending'), false);
+    destination = target;
+    cart.updatePinCount();
+    assert.equal(classes.get('has-context-pending'), true);
+
+    turnStatus = status;
+    await poll();
+    assert.equal(classes.get('has-context-pending'), false);
+    assert.equal(classes.get('has-context'), status === 'cancelled');
+    assert.equal(cart.getAttachedFiles(target.topic)[0].used, status === 'done' ? true : undefined);
+    assert.equal(Object.keys(cart.readPendingCartTurns()).length, 0);
+    assert.equal(cart.getInjectedInto().session?.join(','), status === 'done' ? '7' : undefined);
+  }
+});
+
+test('realtime completion retries an unavailable or pending status before releasing the cart', () => {
+  const fallback = [];
+  const delivered = [];
+  let finalized = 0;
+  const context = vm.createContext({
+    msgId: 42, lastSessionId: null, turnStatus: 'pending', resolvedAgent: null,
+    startStatusFallback: id => fallback.push(id),
+    markSessionContextDelivered: id => delivered.push(id),
+    finalizeQuotaTracking: () => { finalized++; },
+  });
+  const start = source.indexOf('          onSettled: data => {');
+  const end = source.indexOf('          onProcessing:', start);
+  const { onSettled } = vm.runInContext('({' + source.slice(start, end) + '})', context);
+
+  onSettled(null);
+  onSettled({ status: 'pending' });
+  assert.deepEqual(fallback, [42, 42]);
+  assert.equal(finalized, 0);
+  onSettled({ status: 'done', agent: 'echo', session_id: 'session' });
+  assert.deepEqual(delivered, ['session']);
+  assert.equal(finalized, 1);
+});
+
+test('status recovery confirms context when another path rendered the response', async () => {
+  const confirmed = [];
+  const context = vm.createContext({
+    statusTimer: null,
+    topic: 'work', adhoc: false, _sessionIds: {},
+    liveBookmarkState: false,
+    completionRendered: false,
+    completedFromStatus: false,
+    resolvedAgent: null,
+    lastSessionId: null,
+    readTurnStatus: async () => ({ status: 'done', agent: 'echo', stats: { session_id: 'session' } }),
+    _activePollImmediate: null,
+    setInterval: () => 1,
+    adoptCompletedBubbleRenderedElsewhere: () => true,
+    turnStatus: 'pending',
+    finalizeQuotaTracking() {},
+    markSessionContextDelivered: sessionId => confirmed.push(sessionId),
+    settleAttachments() {},
+  });
+  const start = source.indexOf('  function startStatusFallback(');
+  const end = source.indexOf('  // Compute pinned IDs', start);
+  vm.runInContext(source.slice(start, end) + 'startStatusFallback(42);', context);
+  await new Promise(setImmediate);
+  assert.deepEqual(confirmed, ['session']);
+  assert.equal(context._sessionIds['work@echo'], 'session');
 });

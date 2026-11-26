@@ -812,7 +812,8 @@ def _start_step(parent, token):
 
 
 @pytest.mark.parametrize('body', [
-    SEQUENCE | {'steps': []}, SEQUENCE | {'steps': SEQUENCE['steps'] * 3},
+    SEQUENCE | {'steps': []},
+    SEQUENCE | {'steps': [dict(mode='isolated', prompt='ok')] * 31},
     SEQUENCE | {'steps': [dict(mode='publish', prompt='bad')]},
     SEQUENCE | {'steps': [dict(mode='isolated', prompt='')]},
     SEQUENCE | {'steps': [dict(mode='isolated', prompt='x' * 16001)]},

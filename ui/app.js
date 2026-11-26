@@ -1374,16 +1374,11 @@ function clearCachedSessionId(topic, agent) {
     const inj = getInjectedInto();
     delete inj[sid];
     setInjectedInto(inj);
-    const attached = getAttachedFilesInSession();
-    delete attached[sid];
-    setAttachedFilesInSession(attached);
     delete _sessionTurnCounts[sid];
   }
   delete _sessionIds[taKey];
   delete _memoryInjectedInto[taKey];
-  delete _pendingSessionMemoryRevisions[taKey];
-  delete _pendingSessionInjectedIds[taKey];
-  delete _pendingSessionAttachedFiles[taKey];
+  pendingCartContextByRoute.delete(contextCartRouteKey({ topic, agent, adhoc: false }));
   delete _sessionLookupCache[taKey];
   if (agent) delete _sessionLookupCache[`${topic}@${agent}`];
   if (agent) delete _sessionTurnCountsByRoute[`${topic}@${agent}`];
@@ -6156,29 +6151,23 @@ async function sendMessage(text, opts = {}) {
         pollProcs();
       } else if (msgId) {
         await cancelRealtimeMessage(msgId, topic, agent, 'live_bubble_stop');
+        const data = await readTurnStatus(msgId, { signal: AbortSignal.timeout(2000) }).catch(() => null);
+        if (data?.status === 'done' || (completionRendered && turnStatus === 'done')) {
+          if (data?.status === 'done') markSessionContextDelivered(data.session_id || data.stats?.session_id || lastSessionId, data);
+          return;
+        }
         userAborted = true;
         turnStatus = 'cancelled';
         controller.abort();
         renderCancelledThinking('Cancelled.');
-        // A cancelled turn that reached a session id still earns a turn
-        // index server-side (mark_assistant_cancelled) — reflect that in
-        // the chip/route-chain turn counts, same as a clean completion.
-        if (!adhoc) {
-          try {
-            const statusRes = await fetch(`/chat/${msgId}/status`);
-            if (statusRes.ok) {
-              const data = await statusRes.json();
-              if (data.session_turn_count != null) {
-                resolvedAgent = data.agent || resolvedAgent;
-                liveSessionTurnCount = parseInt(data.session_turn_count, 10) || liveSessionTurnCount;
-                const cancelledSessionId = data.session_id || lastSessionId;
-                if (cancelledSessionId) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = cancelledSessionId;
-                if (!suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, cancelledSessionId || null, liveSessionTurnCount);
-                if (chainMarker) updateRouteChainMarkerTurnCount(chainMarker, 'origin', liveSessionTurnCount);
-                if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
-              }
-            }
-          } catch {}
+        if (!adhoc && data?.session_turn_count != null) {
+          resolvedAgent = data.agent || resolvedAgent;
+          liveSessionTurnCount = parseInt(data.session_turn_count, 10) || liveSessionTurnCount;
+          const cancelledSessionId = data.session_id || lastSessionId;
+          if (cancelledSessionId) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = cancelledSessionId;
+          if (!suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, cancelledSessionId || null, liveSessionTurnCount);
+          if (chainMarker) updateRouteChainMarkerTurnCount(chainMarker, 'origin', liveSessionTurnCount);
+          if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
         }
       }
     } catch (error) {
@@ -6385,7 +6374,19 @@ async function sendMessage(text, opts = {}) {
     renderCancelledThinking('Dequeued.');
   }
 
+  let settleAttachments = null;
+  let clearPendingContext = () => {};
+
+  function trackCartAttachments() {
+    settleAttachments ??= trackAttachmentSend({ topic, agent: _effectiveAgent, adhoc }, _attachedFiles);
+  }
+
   async function finalizeQuotaTracking() {
+    settleAttachments?.(false);
+    settleAttachments = null;
+    clearPendingContext();
+    clearPendingContext = () => {};
+    if (msgId) savePendingCartTurn(msgId, null);
     if (quotaFinalized) return;
     quotaFinalized = true;
     const afterOnly = gaugeTypeFor(quotaBackend) === 'antigravity';
@@ -6467,6 +6468,7 @@ async function sendMessage(text, opts = {}) {
     const parsed = parseInt(id, 10);
     if (!Number.isFinite(parsed) || parsed <= 0) return false;
     msgId = parsed;
+    saveCartTurn();
     bubble.dataset.msgId = String(msgId);
     liveCtxSpan.dataset.msgId = String(msgId);
     thinkingBubble.dataset.msgId = String(msgId);
@@ -6714,77 +6716,57 @@ async function sendMessage(text, opts = {}) {
     }
   }
 
-  function markSessionContextDelivered(sessionId) {
-    const pendingAgentKeys = [
-      `${topic}@${_effectiveAgent || '_'}`,
-      `${topic}@${resolvedAgent || '_'}`,
-    ];
+  function markSessionContextDelivered(sessionId, storedTurn) {
+    settleAttachments?.(true);
+    if (storedTurn?.prompt_context !== undefined) reportedContextIds = historyPromptContext(storedTurn).pins;
+    const deliveredPins = reportedContextIds ?? _contextIds;
     const memoryKeys = [
       _memoryInjectedKey(topic, _effectiveAgent),
       _memoryInjectedKey(topic, resolvedAgent),
     ];
-    const changed = _contextIds.length || _includeTopicMemory || _attachedFiles.length;
+    const changed = deliveredPins.length || _includeTopicMemory || _attachedFiles.length;
 
-    if (_contextIds.length) {
+    if (deliveredPins.length) {
       if (!(adhoc && lookback === 0) && sessionId) {
         const injected = getInjectedInto();
-        injected[sessionId] = [...new Set([...(injected[sessionId] || []), ..._contextIds])];
+        injected[sessionId] = [...new Set([...(injected[sessionId] || []), ...deliveredPins])];
         setInjectedInto(injected);
       }
-      if (!adhoc) pendingAgentKeys.forEach(key => { delete _pendingSessionInjectedIds[key]; });
     }
     if (_includeTopicMemory && !adhoc) {
+      delete _memorySelectionOverrides[_memoryOverrideKey(topic, _effectiveAgent, false)];
       memoryKeys.forEach(key => {
         if (key) {
           _memoryInjectedInto[key] = _topicMemoryForSend.revision;
-          delete _pendingSessionMemoryRevisions[key];
         }
       });
     }
-    if (_attachedFiles.length && !adhoc) {
-      if (sessionId) {
-        const inSession = getAttachedFilesInSession();
-        inSession[sessionId] = [...new Set([
-          ...(inSession[sessionId] || []),
-          ..._attachedFiles.map(f => f.path),
-        ])];
-        setAttachedFilesInSession(inSession);
-      }
-      pendingAgentKeys.forEach(key => { delete _pendingSessionAttachedFiles[key]; });
-    }
+    clearPendingContext();
     if (changed) {
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
     }
   }
 
+  function saveCartTurn() {
+    if (!msgId) return;
+    const fileIds = _attachedFiles.map(file => file.id).filter(Boolean);
+    const pinIds = nativeShell ? [] : adhoc ? (reportedContextIds ?? _contextIds) : _contextIds;
+    const revision = !nativeShell && _includeTopicMemory ? _topicMemoryForSend.revision : null;
+    savePendingCartTurn(msgId, fileIds.length || pinIds.length || revision
+      ? { topic, agent: _effectiveAgent, adhoc, fileIds, pinIds, revision, lookback }
+      : null);
+  }
+
   function markSessionContextPending() {
-    // Native shell context belongs only to that command; it is never delivered
-    // into (or retained by) the lane's resumable chat session.
     if (nativeShell) return;
-    if (_contextIds.length && !adhoc) {
-      const pendingKey = `${topic}@${_effectiveAgent || '_'}`;
-      _pendingSessionInjectedIds[pendingKey] = [...new Set([
-        ...(_pendingSessionInjectedIds[pendingKey] || []),
-        ..._contextIds,
-      ])];
-    }
-    if (_includeTopicMemory && !adhoc) {
-      const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
-      _pendingSessionMemoryRevisions[memoryKey] = _topicMemoryForSend.revision;
-      delete _memorySelectionOverrides[_memoryOverrideKey(topic, _effectiveAgent, false)];
-    }
-    if (_attachedFiles.length && !adhoc) {
-      const pendingKey = `${topic}@${_effectiveAgent || '_'}`;
-      _pendingSessionAttachedFiles[pendingKey] = [...new Set([
-        ...(_pendingSessionAttachedFiles[pendingKey] || []),
-        ..._attachedFiles.map(f => f.path),
-      ])];
-    }
-    if ((_contextIds.length || _includeTopicMemory || _attachedFiles.length) && !adhoc) {
-      updatePinCount();
-      if (pinPanel.classList.contains('open')) renderPinPanel();
-    }
+    saveCartTurn();
+    clearPendingContext();
+    clearPendingContext = trackPendingCartContext(
+      { topic, agent: _effectiveAgent, adhoc },
+      adhoc ? (reportedContextIds ?? _contextIds) : _contextIds,
+      _includeTopicMemory ? _topicMemoryForSend.revision : null,
+    );
   }
 
   function startStatusFallback(id) {
@@ -6813,10 +6795,17 @@ async function sendMessage(text, opts = {}) {
         if (data.status === 'done') {
           liveBookmarkState = data.bookmarked;
           if (completionRendered || completedFromStatus) return;
-          if (adoptCompletedBubbleRenderedElsewhere()) return;
+          resolvedAgent = data.agent || resolvedAgent;
+          const completedSessionId = data.session_id || data.stats?.session_id || lastSessionId;
+          if (completedSessionId && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = completedSessionId;
+          markSessionContextDelivered(completedSessionId, data);
+          turnStatus = 'done';
+          if (adoptCompletedBubbleRenderedElsewhere()) {
+            finalizeQuotaTracking();
+            return;
+          }
           completedFromStatus = true;
           completionRendered = true;
-          turnStatus = 'done';
           stopStatusFallback();
           doneTime = new Date().toISOString();
           const reconnectMsg = 'Connection interrupted — recovering…';
@@ -6834,7 +6823,6 @@ async function sendMessage(text, opts = {}) {
           }
           bubble.classList.add('history-item');
           bubble._historyContent = raw;
-          resolvedAgent = data.agent || resolvedAgent;
           addPinButton(bubble, msgId, topic, resolvedAgent, data.session_id || null);
           addBookmarkButton(bubble, msgId, topic, resolvedAgent);
           if (!nativeShell) {
@@ -6854,15 +6842,11 @@ async function sendMessage(text, opts = {}) {
           }
           liveSessionTurnCount = parseInt(data.session_turn_count || '0', 10) || liveSessionTurnCount;
           _advisoryTurnCount = liveSessionTurnCount;
-          const completedSessionId = data.session_id || data.stats?.session_id || lastSessionId;
-          if (completedSessionId && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = completedSessionId;
           liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
           if (completedSessionId) liveCtxSpan.dataset.sessionId = completedSessionId;
-          if (data.prompt_context != null) reportedContextIds = historyPromptContext(data).pins;
           renderLiveContext(!!data.adhoc);
           if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, completedSessionId || null, liveSessionTurnCount);
           if (chainMarker && !adhoc) updateRouteChainMarkerTurnCount(chainMarker, 'origin', liveSessionTurnCount);
-          markSessionContextDelivered(completedSessionId);
           evaluateAdvisory();
           let storedTools = [];
           if (data.context) {
@@ -6881,11 +6865,16 @@ async function sendMessage(text, opts = {}) {
           controller.abort();
           finalizeQuotaTracking();
         } else if (data.status === 'error') {
-          if (!String(data.content || '').trim() && !bookmarkOnlyHistory) return;
           completedFromStatus = true;
           turnStatus = 'error';
           stopStatusFallback();
           liveBookmarkState = data.bookmarked;
+          if (!String(data.content || '').trim() && !bookmarkOnlyHistory) {
+            removeThinking();
+            controller.abort();
+            finalizeQuotaTracking();
+            return;
+          }
           if (removeUnbookmarkedLiveGroup()) {
             controller.abort();
             finalizeQuotaTracking();
@@ -6957,8 +6946,10 @@ async function sendMessage(text, opts = {}) {
       _effectiveAgent = topics.find(t => t.name === topic)?.agent || null;
     } catch {}
   }
+  const availability = opts.retryContext ? null : await checkAttachedFiles(topic, stagedFiles);
   const _topicMemoryForSend = await _topicMemoryStateForSend(topic, _effectiveAgent, adhoc);
-  const _includeTopicMemory = opts.retryContext?.mem ?? _topicMemoryForSend.selected;
+  const _includeTopicMemory = opts.retryContext?.mem ?? (_topicMemoryForSend.selected
+    && !hasPendingCartMemory({ topic, agent: _effectiveAgent, adhoc }, _topicMemoryForSend.revision));
   let _contextIds;
   let _attachedFiles;
   if (opts.retryContext) {
@@ -6971,10 +6962,7 @@ async function sendMessage(text, opts = {}) {
     const extraPinnedIds = Array.isArray(opts.extraPinnedIds) ? opts.extraPinnedIds : [];
     const explicitLookbackIds = lookbackSelection?.cleared ? lookbackSelection.ids : shellLookbackIds;
     _contextIds = [...new Set([...explicitLookbackIds, ...pinnedIds, ...extraPinnedIds])];
-    const missing = new Set(await pruneMissingAttachedFiles(topic, stagedFiles));
-    _attachedFiles = _attachedFilesState(
-      { topic, agent: _effectiveAgent, adhoc }, stagedFiles.filter(file => !missing.has(file.path)),
-    ).selected;
+    _attachedFiles = getAttachmentsForSend(topic, stagedFiles, availability, opts.broadcastTarget);
   }
   if (!nativeShell) {
     const activeSessionId = !adhoc ? (_sessionIds[`${topic}@${_effectiveAgent || '_'}`] || null) : null;
@@ -7012,6 +7000,8 @@ async function sendMessage(text, opts = {}) {
   }
 
   try {
+    trackCartAttachments();
+    markSessionContextPending();
     startProcPoll({ hold: true });
     const transportMode = await realtimeTransportMode;
     if (transportMode !== 'sse' && realtimeV1) {
@@ -7029,12 +7019,9 @@ async function sendMessage(text, opts = {}) {
           if (lateResult?.ok && lateResult.msg_id) {
             acceptChatStart(lateResult.context_ids);
             if (msgId || completedFromStatus || completionRendered) return;
-            // Discovery may have received and fully rendered the authoritative
-            // turn before this delayed acknowledgement. In that ordering, keep
-            // the discovered final bubble and discard this closure's stale
-            // timeout UI instead of polling and rendering a second response.
-            attachMsgId(lateResult.msg_id);
-            if (adoptCompletedBubbleRenderedElsewhere()) return;
+            if (!attachMsgId(lateResult.msg_id)) return;
+            trackCartAttachments();
+            markSessionContextPending();
             detachedPolling = true;
             startStatusFallback(msgId);
           }
@@ -7075,17 +7062,20 @@ async function sendMessage(text, opts = {}) {
           content: '',
           status: 'pending',
         }, thinkingBubble, {
-          onStored: data => {
-            markSessionContextDelivered(data.session_id || data.stats?.session_id || null);
-            // The finally block skips finalizeQuotaTracking once detachedPolling
-            // is set, so the WS handoff must record this turn's quota delta.
+          // Settle the turn even when there is no pending bubble to replace.
+          onSettled: data => {
+            if (!data || !['done', 'error', 'cancelled'].includes(data.status)) {
+              startStatusFallback(msgId);
+              return;
+            }
             lastSessionId = data.session_id || data.stats?.session_id || lastSessionId;
             turnStatus = data.status;
+            if (turnStatus === 'done') {
+              resolvedAgent = data.agent || resolvedAgent;
+              markSessionContextDelivered(lastSessionId, data);
+            }
             finalizeQuotaTracking();
           },
-          // Paths that never reach onStored (status fetch failed, bubble gone,
-          // empty error) still finalize so quota tracking is released.
-          onSettled: finalizeQuotaTracking,
           onProcessing: startShellRunningStatus,
         });
         return { flowRunId, msgId };
@@ -7140,7 +7130,7 @@ async function sendMessage(text, opts = {}) {
     if (opts.onFlowRunId) { opts.onFlowRunId(flowRunId); flowRunIdEmitted = true; }
     if (!msgId) attachMsgId(res.headers.get('X-Squid-Msg-Id'));
     consumeLookbackSelection();
-    markSessionContextPending();
+    if (!adhoc) markSessionContextPending();
 
     const reader  = res.body.getReader();
     const decoder = new TextDecoder();
@@ -7176,6 +7166,7 @@ async function sendMessage(text, opts = {}) {
               }
               if (Array.isArray(meta.context_ids)) reportedContextIds = meta.context_ids;
               resolvedAgent = meta.agent || null;
+              if (adhoc) markSessionContextPending();
               const metaRuntime = runtimeRef(meta.harness || '', meta.provider || null);
               // Correct the send-time provider guess once the resolved provider
               // arrives. Must move activeCount tracking and recompute
@@ -7344,6 +7335,7 @@ async function sendMessage(text, opts = {}) {
             }
             completionRendered = true;
             turnStatus = 'done';
+            settleAttachments?.(true);
             stopStatusFallback();
             if (bookmarkOnlyHistory && msgId) {
               try {
@@ -7491,16 +7483,6 @@ async function sendMessage(text, opts = {}) {
           }
         }
       }
-    }
-    if (!adhoc && !completionRendered && !detachedPolling) {
-      delete _pendingSessionInjectedIds[`${topic}@${_effectiveAgent || '_'}`];
-      delete _pendingSessionInjectedIds[`${topic}@${resolvedAgent || '_'}`];
-      delete _pendingSessionMemoryRevisions[_memoryInjectedKey(topic, _effectiveAgent)];
-      delete _pendingSessionMemoryRevisions[_memoryInjectedKey(topic, resolvedAgent)];
-      delete _pendingSessionAttachedFiles[`${topic}@${_effectiveAgent || '_'}`];
-      delete _pendingSessionAttachedFiles[`${topic}@${resolvedAgent || '_'}`];
-      updatePinCount();
-      if (pinPanel.classList.contains('open')) renderPinPanel();
     }
     if (!detachedPolling && !userAborted && !firstDataReceived && !completedFromStatus) {
       if (shouldShowLiveResponse()) {
@@ -9348,7 +9330,7 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, on
     const refreshDiscovered = data?.status === 'done' && !onStored && !onSettled
       && item.source !== 'shell' && quotaTrackedMsgIds.has(Number(item.id));
     untrackQuotaForTurn(item.id);
-    onSettled?.();
+    onSettled?.(data);
     if (refreshDiscovered) {
       try {
         const backend = splitAgentRef(data.stats?.backend).provider;
@@ -18138,9 +18120,9 @@ const memoryCloseBtn = document.getElementById('memory-modal-close');
 const _memoryCache = {};
 const _sessionLookupCache = {};
 const _memorySelectionOverrides = {};
-const _pendingSessionInjectedIds = {}; // `${topic}@${agent|_}` -> pinned IDs submitted to an in-flight session turn
-const _pendingSessionMemoryRevisions = {}; // `${topic}@${agent|_}` -> topic memory revision submitted to an in-flight session turn
-const _pendingSessionAttachedFiles = {}; // `${topic}@${agent|_}` -> attached file paths submitted to an in-flight session turn
+const pendingCartContextByRoute = new Map();
+const pendingAttachmentCounts = new Map();
+const pendingAttachmentsByRoute = new Map();
 let _editingMemoryTopic = null;
 
 function updateMemoryTokenCount() {
@@ -18159,7 +18141,10 @@ function getPinnedItems() {
   try { return (JSON.parse(localStorage.getItem('pinnedItems') || '[]')).sort((a, b) => a.id - b.id); } catch { return []; }
 }
 function contextCartSnapshot(topic) {
-  return { selectedPins: getSelectedPins(topic), stagedFiles: getAttachedFiles(topic) };
+  return {
+    selectedPins: getSelectedPins(topic),
+    stagedFiles: getAttachedFiles(topic).filter(file => !pendingAttachmentCounts.has(file.id)),
+  };
 }
 
 function getSelectedPins(topic) {
@@ -18211,46 +18196,38 @@ function clearAttachmentsForTreeSwitch(topic) {
 }
 function getAttachedFiles(topic = _currentContextTarget().topic) {
   const staged = getStagedAttachments();
-  return staged.root === _memoryRootTopic(topic) ? (staged.items || []) : [];
+  if (staged.root !== _memoryRootTopic(topic)) return [];
+  const items = staged.items || [];
+  if (items.every(file => file.id)) return items;
+  const previouslySent = new Set(Object.values(getAttachedFilesInSession()).flat());
+  const migrated = items.map(file => file.id ? file : {
+    ...file, id: newAttachmentId(),
+    ...(previouslySent.has(file.path) ? { selected: false, used: true } : {}),
+  });
+  setAttachedFiles(migrated, topic);
+  return migrated;
 }
 function setAttachedFiles(items, topic = _currentContextTarget().topic) {
   sessionStorage.setItem('attachedFiles', JSON.stringify({ root: _memoryRootTopic(topic), items }));
 }
+function newAttachmentId() {
+  return globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
+}
+
 function setAttachedFileSelected(path, topic, selected) {
   setAttachedFiles(getAttachedFiles(topic).map(file =>
-    file.path === path ? { ...file, selected } : file), topic);
+    file.path === path ? { ...file, selected, used: false } : file), topic);
 }
 
 function getAttachedFilesInSession() {
   try { return JSON.parse(localStorage.getItem('attachedFilesInSession') || '{}'); } catch { return {}; }
 }
-function setAttachedFilesInSession(map) { localStorage.setItem('attachedFilesInSession', JSON.stringify(map)); }
 function _removeAttachedFilePath(path, topic = _currentContextTarget().topic) {
-  if (!path) return false;
-  let changed = false;
   const items = getAttachedFiles(topic);
-  const nextItems = items.filter(f => f.path !== path);
-  if (nextItems.length !== items.length) {
-    setAttachedFiles(nextItems, topic);
-    changed = true;
-  }
-  const inSession = getAttachedFilesInSession();
-  Object.keys(inSession).forEach(key => {
-    const next = (inSession[key] || []).filter(p => p !== path);
-    if (next.length !== (inSession[key] || []).length) {
-      inSession[key] = next;
-      changed = true;
-    }
-  });
-  if (changed) setAttachedFilesInSession(inSession);
-  Object.keys(_pendingSessionAttachedFiles).forEach(key => {
-    const next = (_pendingSessionAttachedFiles[key] || []).filter(p => p !== path);
-    if (next.length !== (_pendingSessionAttachedFiles[key] || []).length) {
-      _pendingSessionAttachedFiles[key] = next;
-      changed = true;
-    }
-  });
-  return changed;
+  const next = items.filter(file => file.path !== path);
+  if (next.length === items.length) return false;
+  setAttachedFiles(next, topic);
+  return true;
 }
 function removeAttachedFilePath(path) {
   const changed = _removeAttachedFilePath(path);
@@ -18260,33 +18237,47 @@ function removeAttachedFilePath(path) {
   }
   return changed;
 }
-async function pruneMissingAttachedFiles(topic = _currentContextTarget().topic, files = getAttachedFiles(topic)) {
+async function checkAttachedFiles(topic = _currentContextTarget().topic, files = getAttachedFiles(topic)) {
   const paths = [...new Set(files.map(f => f.path).filter(Boolean))];
-  if (!paths.length) return [];
+  if (!paths.length) return new Map();
   try {
     const res = await fetch('/localfile/check-paths', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ paths }),
     });
-    if (!res.ok) return [];
+    if (!res.ok) return new Map();
     const data = await res.json();
-    const missing = (data.paths || [])
-      .filter(item => !item.exists || !item.is_file)
-      .map(item => item.path);
-    if (!missing.length) return [];
-    missing.forEach(path => _removeAttachedFilePath(path, topic));
-    updatePinCount();
-    if (pinPanel.classList.contains('open')) renderPinPanel();
-    return missing;
+    const availability = new Map((data.paths || []).map(item =>
+      [item.path, !item.exists || !item.is_file]));
+    const checkedIds = new Set(files.map(file => file.id));
+    const current = getAttachedFiles(topic);
+    const next = current.map(file => {
+      const unavailable = availability.get(file.path);
+      return checkedIds.has(file.id) && unavailable !== undefined && unavailable !== !!file.unavailable
+        ? { ...file, unavailable } : file;
+    });
+    if (next.some((file, index) => file !== current[index])) {
+      setAttachedFiles(next, topic);
+      refreshContextCartUi();
+    }
+    return availability;
   } catch {
-    return [];
+    return new Map();
   }
 }
+function getAttachmentsForSend(topic, files, availability, broadcastTarget) {
+  // Broadcast heads share the attachment selection captured for this input.
+  const usedIds = new Set(broadcastTarget ? [] : getAttachedFiles(topic).filter(file => file.used).map(file => file.id));
+  return files.filter(file => file.selected !== false
+    && !(availability.get(file.path) ?? file.unavailable)
+    && (broadcastTarget || (!pendingAttachmentCounts.has(file.id) && !usedIds.has(file.id))));
+}
+
 function addAttachedFile(path) {
   const items = getAttachedFiles();
   if (items.some(f => f.path === path)) return;
-  setAttachedFiles([...items, { path, name: path.split('/').filter(Boolean).pop() || path }]);
+  setAttachedFiles([...items, { id: newAttachmentId(), path, name: path.split('/').filter(Boolean).pop() || path }]);
   updatePinCount();
   if (pinPanel.classList.contains('open')) renderPinPanel();
 }
@@ -18574,8 +18565,7 @@ function _topicMemoryState(target = null) {
   const key = _memoryOverrideKey(topic, agent, adhoc);
   const injectedKey = _memoryInjectedKey(topic, agent);
   const revision = _memoryRevision(meta);
-  const pendingRevision = !adhoc ? _pendingSessionMemoryRevisions[injectedKey] : null;
-  const pending = !!pendingRevision && pendingRevision === revision;
+  const pending = !!revision && hasPendingCartMemory({ topic, agent, adhoc }, revision);
   const injectedRevision = _memoryInjectedInto[injectedKey];
   const injected = !adhoc && !!injectedRevision && injectedRevision === revision;
   const stale = !adhoc && !!injectedRevision && injectedRevision !== revision;
@@ -18602,85 +18592,204 @@ async function _topicMemoryStateForSend(topic, agent, adhoc) {
     _rememberSessionMemoryRevision(topic, agent, session);
   }
   const key = _memoryOverrideKey(topic, agent, adhoc);
-  const injectedRevision = _memoryInjectedInto[_memoryInjectedKey(topic, agent)];
+  const injectedKey = _memoryInjectedKey(topic, agent);
+  const injectedRevision = _memoryInjectedInto[injectedKey];
   const stale = !adhoc && !!injectedRevision && injectedRevision !== revision;
   const defaultSelected = adhoc || stale || (!injectedRevision && !session.session_id);
-  return { selected: _memorySelectionOverrides[key] ?? defaultSelected, revision };
+  const pending = !!revision && hasPendingCartMemory({ topic, agent, adhoc }, revision);
+  return { selected: !pending && (_memorySelectionOverrides[key] ?? defaultSelected), revision };
 }
 
 function _injectablePinnedIds(topic, agent, adhoc, items = getSelectedPins(topic)) {
-  if (adhoc) return items.map(item => item.id);
   const taKey = `${topic}@${agent || '_'}`;
+  const target = { topic, agent, adhoc };
+  if (adhoc) return items.filter(item => !hasPendingCartPin(target, item.id)).map(item => item.id);
   const currentSid = _sessionIds[taKey] || null;
   const injected = getInjectedInto();
-  const pending = _pendingSessionInjectedIds[taKey] || [];
   return items
     .filter(item => {
       const sameSession = item.session_id && currentSid && item.session_id === currentSid;
-      if (sameSession || pending.includes(item.id)) return false;
+      if (sameSession || hasPendingCartPin(target, item.id)) return false;
       if (currentSid && (injected[currentSid] || []).includes(item.id)) return false;
       return true;
     })
     .map(item => item.id);
 }
 
-function _attachedFilesState(target = _currentContextTarget(), files = getAttachedFiles(target.topic)) {
-  const { topic, agent, adhoc } = target;
-  if (adhoc) return { selected: files.filter(file => file.selected !== false), pending: [], saved: [] };
-  const taKey = `${topic}@${agent || '_'}`;
-  const currentSid = _sessionIds[taKey] || null;
-  const inSession = getAttachedFilesInSession();
-  const sent = new Set(currentSid ? (inSession[currentSid] || []) : []);
-  const pending = new Set(_pendingSessionAttachedFiles[taKey] || []);
-  return {
-    selected: files.filter(f => f.selected !== false && !sent.has(f.path) && !pending.has(f.path)),
-    pending: files.filter(f => pending.has(f.path)),
-    saved: files.filter(f => sent.has(f.path)),
+function refreshContextCartUi() {
+  updatePinCount();
+  if (pinPanel.classList.contains('open')) renderPinPanel();
+}
+
+function contextCartRouteKey({ topic, agent, adhoc }) {
+  return `${topic}@${agent || '_'}:${adhoc ? 'fresh' : 'session'}`;
+}
+
+function hasPendingCartPin(target, id) {
+  const turns = pendingCartContextByRoute.get(contextCartRouteKey(target));
+  return !!turns && Array.from(turns).some(turn => turn.pinIds.includes(id));
+}
+
+function hasPendingCartMemory(target, revision) {
+  const turns = pendingCartContextByRoute.get(contextCartRouteKey(target));
+  return !!turns && Array.from(turns).some(turn => turn.revision === revision);
+}
+
+function trackPendingCartContext(target, pinIds, revision) {
+  if (!pinIds.length && !revision) return () => {};
+  const key = contextCartRouteKey(target);
+  const turns = pendingCartContextByRoute.get(key) || new Set();
+  const turn = { pinIds, revision };
+  turns.add(turn);
+  pendingCartContextByRoute.set(key, turns);
+  refreshContextCartUi();
+
+  return () => {
+    if (!turns.delete(turn)) return;
+    if (!turns.size && pendingCartContextByRoute.get(key) === turns) pendingCartContextByRoute.delete(key);
+    refreshContextCartUi();
   };
 }
 
-function updatePinCount() {
-  const broadcastAgents = stickyChip?.broadcastAgents || null;
-  let selectedCount, pendingCount;
-  if (broadcastAgents) {
-    // Origin Broadcast (multi-head): heads are independent turns, each with
-    // its own topic/agent, so a true union-count across heads would mix
-    // unrelated pins into one number that looks precise but isn't (see
-    // discussion — a summed count can't say *which* head needs what without
-    // a per-head breakdown UI we don't have). Simpler and honest: this is a
-    // presence flag, not a count — at most +1 for "some head has a pin
-    // selected," at most +1 for "some head has memory selected," same as
-    // the single-target formula below but clamped to boolean per category.
-    const asTarget = a => ({ topic: a.topic, agent: a.agent, adhoc: !!a.fresh });
-    const anyPinSelected = broadcastAgents.some(a => _injectablePinnedIds(a.topic, a.agent, !!a.fresh).length > 0);
-    const anyMemSelected = broadcastAgents.some(a => _topicMemoryState(asTarget(a)).selected);
-    selectedCount = (anyPinSelected ? 1 : 0) + (anyMemSelected ? 1 : 0);
-    const anyPinPending = broadcastAgents.some(a => !a.fresh && (_pendingSessionInjectedIds[`${a.topic}@${a.agent || '_'}`] || []).length > 0);
-    const anyMemPending = broadcastAgents.some(a => _topicMemoryState(asTarget(a)).pending);
-    pendingCount = (anyPinPending ? 1 : 0) + (anyMemPending ? 1 : 0);
-  } else {
-    const { topic, agent, adhoc, lookback, routeAgent } = _currentContextTarget();
-    const taKey = `${topic}@${agent || '_'}`;
-    const selectedIds = [
-      ..._activeLookbackItems(topic, adhoc, lookback, agent, routeAgent).map(item => item.id),
-      ..._injectablePinnedIds(topic, agent, adhoc),
-    ];
-    const pendingIds = !adhoc ? (_pendingSessionInjectedIds[taKey] || []) : [];
-    const memoryState = _topicMemoryState();
-    selectedCount = new Set(selectedIds).size + (memoryState.selected ? 1 : 0);
-    pendingCount = new Set(pendingIds).size + (memoryState.pending ? 1 : 0);
+function readPendingCartTurns() {
+  try { return JSON.parse(sessionStorage.getItem('squid_pending_cart_turns') || '{}'); }
+  catch { return {}; }
+}
+
+function savePendingCartTurn(id, turn) {
+  try {
+    const turns = readPendingCartTurns();
+    if (turn) turns[id] = turn;
+    else if (turns[id]) delete turns[id];
+    else return;
+    sessionStorage.setItem('squid_pending_cart_turns', JSON.stringify(turns));
+  } catch {}
+}
+
+function restorePendingCartTurns() {
+  for (const [id, turn] of Object.entries(readPendingCartTurns())) {
+    const { fileIds, pinIds, revision, topic, agent, adhoc, lookback } = turn;
+    const settleFiles = trackAttachmentSend(turn, fileIds.map(id => ({ id })));
+    const clearContext = trackPendingCartContext(turn, pinIds, revision);
+    async function reconcile() {
+      try {
+        const res = await fetch(`/chat/${id}/status`);
+        if (res.ok || res.status === 404) {
+          const data = res.ok ? await res.json() : {};
+          if (data.status !== 'pending') {
+            const done = data.status === 'done';
+            const sessionId = data.session_id || data.stats?.session_id;
+            if (done && sessionId && (!adhoc || lookback)) {
+              const deliveredPins = data.prompt_context === undefined ? pinIds : historyPromptContext(data).pins;
+              const injected = getInjectedInto();
+              if (deliveredPins.length) {
+                injected[sessionId] = [...new Set([...(injected[sessionId] || []), ...deliveredPins])];
+                setInjectedInto(injected);
+              }
+            }
+            if (done && !adhoc && revision) {
+              _memoryInjectedInto[_memoryInjectedKey(topic, agent)] = revision;
+            }
+            settleFiles(done);
+            clearContext();
+            savePendingCartTurn(id, null);
+            return;
+          }
+        }
+      } catch {}
+      setTimeout(reconcile, 2000);
+    }
+    void reconcile();
   }
-  const attachedState = _attachedFilesState();
-  const pinnedCount = getPinnedItems().length;
-  selectedCount += attachedState.selected.length;
-  pendingCount += attachedState.pending.length;
-  const savedPins = pinnedCount + attachedState.saved.length;
-  const badgeCount = selectedCount || pendingCount || savedPins;
-  pinCountEl.textContent = badgeCount || '';
-  pinCountEl.classList.toggle('visible', badgeCount > 0);
-  pinBtn.classList.toggle('has-context', selectedCount > 0);
-  pinBtn.classList.toggle('has-context-pending', selectedCount === 0 && pendingCount > 0);
-  pinBtn.classList.toggle('has-saved-pins', selectedCount === 0 && pendingCount === 0 && savedPins > 0);
+}
+
+function trackAttachmentSend(target, files) {
+  const { topic } = target;
+  const routeKey = contextCartRouteKey(target);
+  const ids = new Set(files.map(file => file.id).filter(Boolean));
+  if (!ids.size) return () => {};
+  const routeCounts = pendingAttachmentsByRoute.get(routeKey) || new Map();
+  pendingAttachmentsByRoute.set(routeKey, routeCounts);
+  for (const id of ids) {
+    routeCounts.set(id, (routeCounts.get(id) || 0) + 1);
+    pendingAttachmentCounts.set(id, (pendingAttachmentCounts.get(id) || 0) + 1);
+  }
+  refreshContextCartUi();
+
+  return success => {
+    if (!ids.size) return;
+    for (const id of ids) {
+      const count = pendingAttachmentCounts.get(id);
+      if (count > 1) pendingAttachmentCounts.set(id, count - 1);
+      else pendingAttachmentCounts.delete(id);
+      const routeCount = routeCounts.get(id);
+      if (routeCount > 1) routeCounts.set(id, routeCount - 1);
+      else routeCounts.delete(id);
+    }
+    if (!routeCounts.size) pendingAttachmentsByRoute.delete(routeKey);
+    if (success) {
+      const current = getAttachedFiles(topic);
+      if (current.some(file => ids.has(file.id))) {
+        setAttachedFiles(current.map(file => ids.has(file.id)
+          ? { ...file, selected: false, used: true } : file), topic);
+      }
+    }
+    ids.clear();
+    refreshContextCartUi();
+  };
+}
+
+function _attachedFilesState(target = _currentContextTarget(), files = getAttachedFiles(target.topic)) {
+  const selected = [];
+  const available = [];
+  for (const file of files) {
+    const state = _attachedFileStatus(file);
+    if (!state.disabled) (state.checked ? selected : available).push(file);
+  }
+  return { selected, available };
+}
+
+function updatePinCount() {
+  const target = _currentContextTarget();
+  const { topic, agent, adhoc, lookback, routeAgent } = target;
+  const heads = stickyChip?.broadcastAgents;
+  const targets = heads
+    ? heads.map(head => ({ topic: head.topic, agent: head.agent, adhoc: !!head.fresh }))
+    : [target];
+  const lookbackItems = heads ? [] : _allLookbackItems(topic, adhoc, lookback, agent);
+  const queuedLookback = new Set(heads ? []
+    : _activeLookbackItems(topic, adhoc, lookback, agent, routeAgent).map(item => item.id));
+  const pins = new Map([...getPinnedItems(), ...lookbackItems].map(item => [item.id, item]));
+  let ready = 0;
+  let sending = 0;
+  let available = 0;
+  for (const item of pins.values()) {
+    const states = targets.map(destination => _pinStatus(item, destination,
+      queuedLookback.has(item.id) || item.selectedTrees?.includes(_memoryRootTopic(destination.topic))));
+    if (states.some(state => !state.disabled && state.checked)) ready++;
+    else if (states.some(state => state.text === 'Sending')) sending++;
+    else if (states.some(state => !state.disabled)) available++;
+  }
+  const memories = targets.map(destination => _topicMemoryState(destination));
+  if (memories.some(state => state.selected && !state.pending)) ready++;
+  else if (memories.some(state => state.pending)) sending++;
+  else if (memories.some(state => state.exists && !state.pending && !state.injected && !state.meta.loading && !state.session.loading)) available++;
+  const files = getAttachedFiles(target.topic);
+  const attached = _attachedFilesState(target, files);
+  const sendingRoutes = targets.map(destination => pendingAttachmentsByRoute.get(contextCartRouteKey(destination)));
+  sending += files.filter(file => sendingRoutes.some(counts => counts?.has(file.id))).length;
+  ready += attached.selected.length;
+  available += attached.available.length;
+  const count = ready || sending || available;
+  const label = ready ? `${ready} ready to send`
+    : sending ? `${sending} sending`
+    : available ? `${available} available to select` : '';
+  pinCountEl.textContent = count || '';
+  pinCountEl.classList.toggle('visible', count > 0);
+  pinBtn.classList.toggle('has-context', ready > 0);
+  pinBtn.classList.toggle('has-context-pending', !ready && sending > 0);
+  pinBtn.title = label ? `Pinned context · ${label}` : 'Pinned context';
+  pinBtn.setAttribute('aria-label', pinBtn.title);
 }
 
 function _pinTagStr(item) {
@@ -18691,37 +18800,32 @@ function _pinTagStr(item) {
 function _pinStatus(item, { topic, agent, adhoc }, selected) {
   const key = `${topic}@${agent || '_'}`;
   const sessionId = !adhoc && _sessionIds[key];
-  if (sessionId && (getInjectedInto()[sessionId] || []).includes(item.id)) {
-    return { text: 'Sent', cls: 'pin-status-session' };
+  if (sessionId && (item.session_id === sessionId || (getInjectedInto()[sessionId] || []).includes(item.id))) {
+    return { text: 'In session', checked: true, disabled: true };
   }
-  if (sessionId && item.session_id === sessionId) {
-    return { text: 'In session', cls: 'pin-status-session' };
+  if (hasPendingCartPin({ topic, agent, adhoc }, item.id)) {
+    return { text: 'Sending', checked: true, disabled: true };
   }
-  if (!adhoc && (_pendingSessionInjectedIds[key] || []).includes(item.id)) {
-    return { text: 'sending', cls: 'pin-status-session' };
-  }
-  return selected
-    ? { text: 'Will inject', cls: 'pin-status-inject' }
-    : { text: 'Will skip', cls: 'pin-status-skip' };
+  return {
+    text: !selected && !item.selectedTrees?.includes(_memoryRootTopic(topic)) && item.selectedTrees?.length
+      ? 'Other topic' : '',
+    checked: !!selected,
+    disabled: false,
+  };
 }
 
 function _memoryStatus(state) {
   if (state.meta.loading || state.session.loading) return { text: 'checking', cls: 'pin-status-session' };
   if (!state.exists) return { text: 'no memory', cls: 'pin-status-empty' };
-  if (state.pending) return { text: 'sending', cls: 'pin-status-session' };
-  if (state.selected) return { text: 'will inject', cls: 'pin-status-inject' };
-  if (state.injected) return { text: 'in session · skip', cls: 'pin-status-session' };
-  if (!state.adhoc && state.session.session_id) return { text: 'in session · skip', cls: 'pin-status-session' };
-  return { text: 'skipped', cls: 'pin-status-done' };
+  if (state.pending) return { text: 'Sending', cls: 'pin-status-session' };
+  if (!state.selected && state.injected) return { text: 'In session', cls: 'pin-status-session' };
+  return { text: '', cls: '' };
 }
 
 function _attachedFileStatus(file) {
-  const state = _attachedFilesState();
-  if (state.pending.some(f => f.path === file.path)) return { text: 'sending', cls: 'pin-status-session' };
-  if (state.saved.some(f => f.path === file.path)) return { text: 'Sent', cls: 'pin-status-session' };
-  return file.selected !== false
-    ? { text: 'Will inject', cls: 'pin-status-inject' }
-    : { text: 'Will skip', cls: 'pin-status-skip' };
+  if (file.unavailable) return { text: 'No file', checked: false, disabled: true };
+  if (pendingAttachmentCounts.has(file.id)) return { text: 'Sending', checked: true, disabled: true };
+  return { text: file.used ? 'Used' : '', checked: file.selected !== false, disabled: false };
 }
 
 function renderPinPanel() {
@@ -18746,20 +18850,21 @@ function renderPinPanel() {
   const preview = memoryState.exists
     ? (memoryState.meta.content || '').trim().replace(/\s+/g, ' ').slice(0, 90)
     : 'No memory yet';
-  const memoryToggleActive = memoryState.selected || memoryState.pending;
-  const memoryToggleText = memoryToggleActive ? 'On' : (memoryState.exists ? 'Off' : 'Add');
+  const memoryLocked = memoryState.pending || (memoryState.injected && !memoryState.selected);
+  const memoryControl = memoryState.exists
+    ? `<label class="pin-item-checkbox-slot"><input class="pin-item-checkbox" data-memory-select type="checkbox" aria-label="Include topic memory in next send${memoryStatus.text ? ` · ${memoryStatus.text}` : ''}"${memoryState.selected || memoryLocked ? ' checked' : ''}${memoryLocked ? ' disabled' : ''}></label>`
+    : '<button class="pin-item-toggle" data-memory-add type="button">Add</button>';
   html += `<div class="memory-item">
     <span class="pin-item-tag">#${escapeHtml(memoryState.topic)}</span>
     <span class="memory-item-preview" data-memory-edit="1">Topic memory · ${escapeHtml(preview)}</span>
-    <span class="memory-item-status ${memoryStatus.cls}">${memoryStatus.text}</span>
-    <button class="pin-item-toggle${memoryToggleActive ? ' active' : ''}" data-memory-toggle="1" type="button"${memoryState.pending ? ' disabled' : ''}>${memoryToggleText}</button>
+    <span class="memory-item-status ${memoryStatus.cls}"${memoryStatus.text ? '' : ' hidden'}>${memoryStatus.text}</span>
+    ${memoryControl}
   </div>`;
 
   if (mergedItems.length) {
     html += `<div class="pin-section-label">Pinned</div>`;
     mergedItems.forEach(item => {
-      const checked = selectedIds.has(item.id);
-      const st = _pinStatus(item, target, checked);
+      const st = _pinStatus(item, target, selectedIds.has(item.id));
       const tag = _pinTagStr(item);
       const preview = (item.content || '').replace(/\s+/g, ' ').slice(0, 90);
       const itemCls = lookbackIds.has(item.id) ? 'pin-item pin-item-lookback' : 'pin-item';
@@ -18769,9 +18874,9 @@ function renderPinPanel() {
       html += `<div class="${itemCls}" data-open-id="${item.id}">
         <span class="pin-item-tag">${escapeHtml(tag)}</span>
         <span class="pin-item-preview">${escapeHtml(preview)}</span>
-        <span class="pin-item-status ${st.cls}">${st.text}</span>
-        <button class="pin-item-toggle${checked ? ' active' : ''}" data-pin-select="${item.id}" type="button" aria-label="Include pinned context in next send" aria-pressed="${checked}">${checked ? 'On' : 'Off'}</button>
-        ${remove}
+        <span class="pin-item-status"${st.text ? '' : ' hidden'}>${st.text}</span>
+        <label class="pin-item-checkbox-slot"><input class="pin-item-checkbox" data-pin-select="${item.id}" type="checkbox" aria-label="Include pinned context in next send${st.text ? ` · ${st.text}` : ''}"${st.checked ? ' checked' : ''}${st.disabled ? ' disabled' : ''}></label>
+        ${remove || '<span class="pin-item-remove-slot" aria-hidden="true"></span>'}
       </div>`;
     });
   } else {
@@ -18783,7 +18888,6 @@ function renderPinPanel() {
   if (attachedFiles.length) {
     html += `<div class="pin-section-label">Files</div>`;
     attachedFiles.forEach(file => {
-      const checked = file.selected !== false;
       const st = _attachedFileStatus(file);
       const lastSlash = file.path.lastIndexOf('/');
       const dirPart = lastSlash >= 0 ? file.path.slice(0, lastSlash + 1) : '';
@@ -18791,9 +18895,9 @@ function renderPinPanel() {
       html += `<div class="pin-item" data-file-path="${escapeHtml(file.path)}">
         <span class="pin-item-tag"><span class="material-symbols-outlined" aria-hidden="true">description</span></span>
         <span class="pin-item-preview pin-item-preview-path" title="${escapeHtml(file.path)}"><span class="pin-item-path-dir">${escapeHtml(dirPart)}</span><span class="pin-item-path-name">${escapeHtml(namePart)}</span></span>
-        <span class="pin-item-status ${st.cls}">${st.text}</span>
-        <button class="pin-item-toggle${checked ? ' active' : ''}" data-file-select="${escapeHtml(file.path)}" type="button" aria-label="Include ${escapeHtml(namePart)} in next send" aria-pressed="${checked}">${checked ? 'On' : 'Off'}</button>
-        <button class="pin-item-remove" data-file-remove="${escapeHtml(file.path)}" type="button">✕</button>
+        <span class="pin-item-status"${st.text ? '' : ' hidden'}>${st.text}</span>
+        <label class="pin-item-checkbox-slot"><input class="pin-item-checkbox" data-file-select="${escapeHtml(file.path)}" type="checkbox" aria-label="Include ${escapeHtml(namePart)} in next send${st.text ? ` · ${st.text}` : ''}"${st.checked ? ' checked' : ''}${st.disabled ? ' disabled' : ''}></label>
+        <button class="pin-item-remove" data-file-remove="${escapeHtml(file.path)}" aria-label="Remove ${escapeHtml(namePart)}" type="button">✕</button>
       </div>`;
     });
   }
@@ -18805,27 +18909,22 @@ function renderPinPanel() {
       openMemoryEditor(memoryState.topic);
     });
   });
-  listEl.querySelectorAll('[data-memory-toggle]').forEach(btn => {
-    btn.addEventListener('mousedown', e => {
-      e.preventDefault();
-      if (!memoryState.exists) {
-        openMemoryEditor(memoryState.topic);
-        return;
-      }
-      _memorySelectionOverrides[memoryState.key] = !memoryState.selected;
-      updatePinCount();
-      renderPinPanel();
-    });
+  listEl.querySelector('[data-memory-add]')?.addEventListener('click', () => openMemoryEditor(memoryState.topic));
+  listEl.querySelector('[data-memory-select]')?.addEventListener('change', event => {
+    _memorySelectionOverrides[memoryState.key] = event.currentTarget.checked;
+    updatePinCount();
+    renderPinPanel();
+    listEl.querySelector('[data-memory-select]')?.focus({ preventScroll: true });
   });
   listEl.querySelectorAll('.pin-item[data-open-id]').forEach(row => {
     row.querySelectorAll('.pin-item-tag, .pin-item-preview').forEach(el => {
       el.addEventListener('click', () => openMsgModal(parseInt(row.dataset.openId, 10)));
     });
   });
-  listEl.querySelectorAll('[data-pin-select]').forEach(button => {
-    button.addEventListener('click', () => {
-      const selected = button.getAttribute('aria-pressed') !== 'true';
-      const id = Number(button.dataset.pinSelect);
+  listEl.querySelectorAll('[data-pin-select]').forEach(checkbox => {
+    checkbox.addEventListener('change', () => {
+      const selected = checkbox.checked;
+      const id = Number(checkbox.dataset.pinSelect);
       if (lookbackIds.has(id)) {
         _setLookbackSelected(topic, lookback, routeAgent, id, selected);
       }
@@ -18842,10 +18941,10 @@ function renderPinPanel() {
       el.addEventListener('click', () => openFileViewer(row.dataset.filePath));
     });
   });
-  listEl.querySelectorAll('[data-file-select]').forEach(button => {
-    button.addEventListener('click', () => {
-      const selected = button.getAttribute('aria-pressed') !== 'true';
-      const path = button.dataset.fileSelect;
+  listEl.querySelectorAll('[data-file-select]').forEach(checkbox => {
+    checkbox.addEventListener('change', () => {
+      const selected = checkbox.checked;
+      const path = checkbox.dataset.fileSelect;
       setAttachedFileSelected(path, topic, selected);
       updatePinCount();
       renderPinPanel();
@@ -18853,15 +18952,11 @@ function renderPinPanel() {
     });
   });
   listEl.querySelectorAll('[data-file-remove]').forEach(btn => {
-    btn.addEventListener('mousedown', e => {
-      e.preventDefault();
-      removeAttachedFilePath(btn.dataset.fileRemove);
-    });
+    btn.addEventListener('click', () => removeAttachedFilePath(btn.dataset.fileRemove));
   });
   listEl.querySelectorAll('.pin-item-remove[data-id]').forEach(btn => {
-    btn.addEventListener('mousedown', e => {
-      e.preventDefault();
-      const id = parseInt(btn.dataset.id);
+    btn.addEventListener('click', () => {
+      const id = Number(btn.dataset.id);
       setPinnedItems(getPinnedItems().filter(i => i.id !== id));
       document.querySelectorAll(`.msg-pin-btn[data-msg-id="${id}"]`)
         .forEach(b => b.classList.remove('pinned'));
@@ -18940,7 +19035,7 @@ function openPinPanel() {
   updateInContextMarkers();
   renderPinPanel();
   pinPanel.classList.add('open');
-  pruneMissingAttachedFiles();
+  checkAttachedFiles();
 }
 function closePinPanel({ restoreFocus = false } = {}) {
   pinPanel.classList.remove('open');
@@ -22092,6 +22187,7 @@ window.addEventListener('offline', () => {
   // Local servers and tunnels may still be reachable despite this browser hint.
   void checkConnectionHealth();
 });
+restorePendingCartTurns();
 initialHistoryReady.then(() => checkConnectionHealth());
 
 // Keep fast refreshes silent, including while initial history is loading.

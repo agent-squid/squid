@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-05-26
-updated: 2026-08-08
+updated: 2026-11-26
 ---
 # ADR-0009: Pinned Message Injection Scoping by Mode
 
@@ -22,19 +22,15 @@ server injects them.
 | Mode | How pinned content enters | Same-session exclusion |
 |---|---|---|
 | Session turn (`--resume`) | Prepended as `<referenced_context>` block in `effective_message` | Client skips pins whose `session_id` matches `_sessionIds[topic@agent]` |
-| Adhoc turn (`!`) | Prepended to `context_history` for `_build_prompt`, deduped against lookback window | Client skips same-session pins |
+| Adhoc turn (`!`) | Prepended to `context_history` for `_build_prompt`, deduped against lookback window | Fresh context. Pins are eligible again once the prior send settles. |
 
 ### Client-side exclusion at send time
 
-Pins store `{ id, topic, agent, session_id, content }` in localStorage. At send time
-the client filters the pin list through three checks in order:
-
-1. **Same-session skip**: if `item.session_id === currentSid && !adhoc` → skip.
-   The session already carries this context via `--resume`.
-2. **Fresh adhoc pass-through**: if `adhoc && lookback === 0` → always include.
-   Each fresh adhoc turn has an empty context window.
-3. **Already-injected skip**: if `injectedInto[currentSid]` contains `item.id` → skip.
-   This pin was sent in a prior turn of this session.
+The client stores pins and their selected topic trees in localStorage. Selection applies
+across sibling topics in a tree. For a resumed session, the client excludes pins whose
+origin session matches the destination session, pins previously injected into that
+session, and pins pending for the route. These exclusions preserve the saved selection.
+A fresh turn can use a selected pin again after the prior send settles.
 
 ### Server-side injection
 
@@ -58,36 +54,59 @@ The server receives `pinned_ids: [id, ...]` in `POST /chat` and:
 {"pins": [47, 52], "mem": true}
 ```
 
-This records exactly what was injected (pin IDs + whether topic memory was included).
-It serves as the ground truth for cross-device injection tracking (see below).
+The user row records the context prepared for the turn, including pin IDs and whether
+topic memory was included. The session lookup uses records associated with its session
+ID to seed cross-device tracking. The request record alone is not a delivery
+acknowledgement.
 
 ### Re-injection prevention
 
 `injectedInto` in localStorage is keyed by **`session_id`** (not `topic@agent`).
 
 - **On session load**: `GET /topics/{topic}/session` returns `injected_ids` — the union of
-  all pin IDs in `chat_messages.context` for that session. The client seeds
+  pin IDs recorded on user prompts whose assistant row completed successfully with that session ID. The client seeds
   `injectedInto[session_id]` from this response, giving any device resuming the session
   immediate knowledge of what was already injected.
-- **After a successful turn**: the client adds `_pinnedIds` to `injectedInto[lastSessionId]`.
+- **After a successful turn**: the client records the server-reported pin IDs in
+  `injectedInto[session_id]` for eligible turns with a known session ID.
 - **On session delete**: `injectedInto[session_id]` is cleared.
 
 Keying by `session_id` rather than `topic@agent` ensures stale tracking from a prior session
 never suppresses injection in a new one.
 
-### UI status labels (pin panel)
+### Delivery confirmation and context cart
 
-| Status | Class | Meaning |
+A submitted item can remain **Sending** after response streaming begins. The client
+confirms delivery when it observes successful turn completion through the SSE `done`
+event or a stored turn with status `done` through realtime or status recovery. The
+first streamed text, request acceptance, and reported context IDs do not confirm
+delivery. Failed or cancelled turns release pending state for retry.
+
+| Cart state | Checkbox | Status |
 |---|---|---|
-| `will inject` | `pin-status-inject` | Will be sent in `pinned_ids` on next turn |
-| `in session · skip` | `pin-status-session` | `session_id` matches current — already in `--resume` context |
-| `injected · skip` | `pin-status-done` | In `injectedInto[session_id]` — sent in a prior turn |
+| Eligible and selected | Checked, editable | |
+| Manually deselected | Unchecked, editable | |
+| Pin selected only in another topic tree | Unchecked, editable | Other topic |
+| Response originated in or was injected into the current session | Checked, disabled | In session |
+| Included in an in-flight send | Checked, disabled | Sending |
+| File sent successfully | Unchecked, editable | Used |
+| File missing | Unchecked, disabled | No file |
 
-The distinction between `in session` and `injected` matters: `in session` means the model
-has it via session continuity (you can't avoid it), while `injected` means it was explicitly
-sent as supplementary context in a prior turn.
+Files are staged within the current topic tree. A successful send marks a file **Used**
+until the user selects it again. A failed send leaves the file selected. Missing files
+remain in the cart and recover their prior selection when they become available again.
 
-**Contract tests**: `tests/e2e/pin.spec.js`
+The cart button shows one badge for the active route. Ready items take priority,
+followed by a pulsing sending count, then a grey selectable count. Switching topics,
+agents, or between resumed and fresh mode recomputes the count. Returning to a route
+with context still in flight restores its pulse. A staged file can stay locked in
+sibling topics while contributing to the sending badge only on its submitting route.
+
+Cancellation leaves context eligible for retry unless successful completion won the
+race. A cancelled turn can retain a session ID for turn history. The session lookup
+only counts successful turns as confirmed context delivery.
+
+**Contract tests**: `tests/ui/context-cart.test.cjs`, `tests/e2e/pin.spec.js`
 
 ## Consequences
 

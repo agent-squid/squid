@@ -13,7 +13,7 @@ from .watch_urls import valid_api_url
 
 def main(argv):
     parser = argparse.ArgumentParser(prog='agentsquid continue', description=
-        'Schedule one bounded sequence (up to 8 steps) after this human turn succeeds and syncs. '
+        'Schedule one bounded sequence (up to 30 steps) after this human turn succeeds and syncs. '
         'Enabled automatically with worktree.enabled: true. Watch and Flow successors use isolated local steps, read-only task_review, or explicitly granted host task_publication. '
         'Create input: {"request_key":"commit","mode":"backing_git","prompt":"Commit the requested changes"}. '
         'For multiple steps: {"request_key":"task","steps":[{"mode":"backing_git","prompt":"Commit"},{"mode":"isolated","prompt":"Next edit"}]}. '

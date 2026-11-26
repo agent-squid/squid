@@ -17,7 +17,7 @@ from .watch_async import call, settle
 
 log = logging.getLogger(__name__)
 _enabled = False
-MAX_STEPS = 8
+MAX_STEPS = 30
 
 
 @contextmanager
@@ -457,7 +457,7 @@ def create(token, body):
             if any(step['mode'] not in {'isolated','task_review','task_publication'} for step in steps):
                 raise PermissionError('continuation_not_authorized')
             # Reserve the entire declared sequence, across all Flow members.
-            # A later member cannot multiply the owner's eight-step allowance.
+            # A later member cannot multiply the owner's step allowance.
             group_path = '$.run_id' if owner['kind'] == 'watch' else '$.flow.flow_run_id'
             group_id = owner['run_id'] if owner['kind'] == 'watch' else owner['flow']['flow_run_id']
             siblings = conn.execute('''SELECT * FROM continuations WHERE parent_id=origin_parent_id

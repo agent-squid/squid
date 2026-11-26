@@ -246,10 +246,11 @@ test('Files menu deletes files from rows and the open file view', async ({ page 
 
   await page.goto('/');
   await page.evaluate(() => {
-    localStorage.setItem('attachedFiles', JSON.stringify([
+    setAttachedFiles([
       { path: '/tmp/work/project/notes.txt', name: 'notes.txt' },
-    ]));
+    ]);
   });
+  expect(await page.evaluate(() => getAttachedFiles().map(file => file.path))).toEqual(['/tmp/work/project/notes.txt']);
   await page.getByRole('button', { name: 'Files' }).click();
   await page.getByRole('link', { name: '/tmp/work/project' }).click();
 
@@ -258,7 +259,7 @@ test('Files menu deletes files from rows and the open file view', async ({ page 
   await expect(page.locator('.fv-path-modal')).toContainText("Delete notes.txt? This can't be undone.");
   await page.locator('.fv-path-modal').getByRole('button', { name: 'Delete' }).click();
   await expect(page.getByRole('link', { name: 'notes.txt' })).toHaveCount(0);
-  const attachedAfterDelete = await page.evaluate(() => JSON.parse(localStorage.getItem('attachedFiles') || '[]'));
+  const attachedAfterDelete = await page.evaluate(() => getAttachedFiles());
   expect(attachedAfterDelete).toEqual([]);
 
   await page.getByRole('link', { name: 'README.md' }).click();

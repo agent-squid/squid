@@ -2056,27 +2056,30 @@ body {
   background: var(--accent);
   color: #fff;
 }
+
 #pin-btn.has-context-pending #pin-count {
-  background: color-mix(in srgb, var(--accent) 52%, #333);
+  background: color-mix(in srgb, var(--accent) 44%, #333);
   color: #fff;
-  animation: pin-badge-pending-pulse 1.8s ease-in-out infinite;
+  animation: pin-badge-pending-pulse 1.6s ease-in-out infinite;
 }
 
 @keyframes pin-badge-pending-pulse {
   0%, 100% {
-    background: color-mix(in srgb, var(--accent) 52%, #333);
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 52%, transparent);
+    background: color-mix(in srgb, var(--accent) 44%, #333);
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 28%, transparent);
   }
   50% {
-    background: color-mix(in srgb, var(--accent) 92%, #333);
-    box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 0%, transparent);
+    background: var(--accent);
+    transform: scale(1.1);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 0%, transparent);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   #pin-btn.has-context-pending #pin-count {
     animation: none;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 42%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 32%, transparent);
   }
 }
 
@@ -2149,9 +2152,9 @@ body {
 }
 .pin-item {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.4rem;
-  padding: 0.25rem 0.7rem;
+  padding: 0.125rem 0.7rem;
 }
 .pin-item:hover { background: var(--surface-3); }
 .pin-item-tag {
@@ -2181,11 +2184,57 @@ body {
 }
 .pin-item-path-name { white-space: nowrap; flex-shrink: 0; }
 .pin-item .pin-item-tag, .pin-item .pin-item-preview { cursor: pointer; }
-.pin-item-status { font-size: var(--text-md); flex-shrink: 0; white-space: nowrap; }
-.pin-status-inject   { color: #70b870; }
-.pin-status-skip     { color: var(--accent-dim); }
-.pin-status-session  { color: #484858; }
-.pin-status-done     { color: #484858; }
+.pin-item-status, .pin-status-session { color: var(--text-muted); }
+.pin-item-status {
+  font-size: var(--text-md);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.pin-item-checkbox-slot {
+  display: grid;
+  place-items: center;
+  width: 1.8rem;
+  height: 1.4rem;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+.pin-item-checkbox-slot:has(:disabled) { cursor: default; }
+.pin-item-checkbox {
+  accent-color: var(--accent);
+  width: 0.75rem;
+  height: 0.75rem;
+  margin: 0;
+  cursor: inherit;
+}
+.pin-item-checkbox:not(:checked),
+.pin-item-checkbox:disabled:checked {
+  appearance: none;
+  background: var(--surface-2);
+  border: 1px solid var(--text-mid);
+  border-radius: 2px;
+}
+.pin-item-checkbox:disabled:checked {
+  display: grid;
+  place-items: center;
+  background: var(--surface);
+  border-color: var(--border);
+}
+.pin-item-checkbox:disabled:checked::after {
+  content: "";
+  width: 3px;
+  height: 6px;
+  border: solid var(--text-lo);
+  border-width: 0 1px 1px 0;
+  transform: translateY(-1px) rotate(45deg);
+}
+.pin-item-checkbox:disabled:not(:checked) { border-color: var(--border); }
+@media (forced-colors: active) {
+  .pin-item-checkbox:not(:checked),
+  .pin-item-checkbox:disabled:checked { appearance: auto; }
+  .pin-item-checkbox:disabled:checked::after { content: none; }
+}
+.pin-item .pin-item-remove,
+.pin-item-remove-slot { flex: 0 0 1.25rem; }
 .pin-item-remove {
   background: none;
   border: none;
@@ -2200,9 +2249,9 @@ body {
 .pin-item-remove:hover { color: #e06060; }
 .memory-item {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.4rem;
-  padding: 0.25rem 0.7rem;
+  padding: 0.125rem 0.7rem;
   cursor: default;
   border-bottom: 1px solid var(--surface-2);
 }
@@ -2227,10 +2276,6 @@ body {
   padding: 0.12rem 0.4rem;
   border-radius: 5px;
   flex-shrink: 0;
-}
-.pin-item-toggle.active {
-  color: #70b870;
-  border-color: #3c6a3c;
 }
 .pin-status-empty { color: var(--text-dim); }
 

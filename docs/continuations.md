@@ -63,7 +63,7 @@ not define mandatory commit scope. The successor must inspect current state
 because other work can land between sync and execution.
 
 One human turn can accept one request: either the single-successor form above,
-or an ordered sequence of up to eight follow-on steps (48,000 prompt characters
+or an ordered sequence of up to 30 follow-on steps (48,000 prompt characters
 in total, 16,000 per step). Split work at each Git boundary. For example, after
 the initial edit, “edit, commit, edit, commit and push” schedules:
 
@@ -184,7 +184,7 @@ when the issuing process ends; accepted work survives revocation.
 CLI/HTTP delivery is implemented. Shared watch-registry discovery, native MCP
 mapping, richer UI, atomic preparation/message linkage, configurable aggregate
 budgets remain future ADR-0054 work. Bounded watch/Flow
-descendants share their original owner, eight-step allowance and saved deadline.
+descendants share their original owner, 30-step allowance and saved deadline.
 Watch settlement and Flow dependency completion wait for the whole sequence
 and recheck its frozen owner and deadline before acknowledging events or
 releasing dependencies. Sequence order follows durable parent/child links,

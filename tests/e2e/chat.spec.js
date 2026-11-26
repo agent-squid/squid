@@ -719,7 +719,7 @@ test('websocket submission sends an attachment once without rewriting the displa
 
   await page.goto('/');
   await page.evaluate(() => {
-    localStorage.setItem('attachedFiles', JSON.stringify([{ path: '/tmp/screenshot.png', name: 'screenshot.png' }]));
+    setAttachedFiles([{ path: '/tmp/screenshot.png', name: 'screenshot.png' }], 'squid');
     updatePinCount();
   });
   await sendMsg(page, '#squid@claude first prompt');

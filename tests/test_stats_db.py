@@ -1521,6 +1521,13 @@ def test_session_injected_context_recovers_pins_and_memory_revision(tmp_path, mo
     assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
     stats_db.update_assistant_message(assistant_id, "done", "session-1", "done")
 
+    for partial in ("", "partially streamed text"):
+        cancelled_user_id = stats_db.insert_user_message(
+            "squid", "codex", "cancelled send", context_ids=[9], mem=True, mem_revision="rev-2",
+        )
+        cancelled_id = stats_db.insert_assistant_message("squid", "codex", cancelled_user_id, adhoc=False)
+        stats_db.update_assistant_message(cancelled_id, partial, "session-1", "cancelled")
+
     context = stats_db.get_session_injected_context("session-1")
 
     assert context == {

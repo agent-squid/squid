@@ -47,17 +47,14 @@ async function mockBackend(page, { agent = 'claude', topic = 'squid' } = {}) {
 async function seedPin(page, item) {
   await page.evaluate(item => {
     const existing = JSON.parse(localStorage.getItem('pinnedItems') || '[]');
-    existing.push(item);
+    existing.push({ selectedTrees: ['squid'], ...item });
     localStorage.setItem('pinnedItems', JSON.stringify(existing));
   }, item);
 }
 
 async function seedAttachedFile(page, path) {
   await page.evaluate(path => {
-    localStorage.setItem('attachedFiles', JSON.stringify([{
-      path,
-      name: path.split('/').filter(Boolean).pop() || path,
-    }]));
+    setAttachedFiles([{ path, name: path.split('/').pop() }], 'squid');
     updatePinCount();
   }, path);
 }
@@ -164,11 +161,9 @@ test('pinned item from current session shows in-session skip', async ({ page }) 
 
   await page.click('#pin-btn');
   await expect(page.locator('#pin-panel.open')).toBeVisible();
-  await expect(page.locator('.pin-item-status')).toContainText('in session');
-  await expect(page.locator('.pin-item-status')).toContainText('skip');
+  await expect(page.locator('.pin-item-status')).toHaveText('In session');
   await expect(page.locator('.pin-item-status')).not.toContainText('claude');
-  await expect(page.locator('#pin-count')).toHaveText('1');
-  await expect(page.locator('#pin-btn')).toHaveClass(/has-saved-pins/);
+  await expect(page.locator('#pin-count')).toHaveText('');
 });
 
 test('/clear invalidates cached session id so same-session pin can inject', async ({ page }) => {
@@ -189,12 +184,12 @@ test('/clear invalidates cached session id so same-session pin can inject', asyn
   await bubble.locator('.msg-pin-btn').click();
 
   await page.click('#pin-btn');
-  await expect(page.locator('.pin-item-status')).toContainText('in session');
+  await expect(page.locator('.pin-item-status')).toHaveText('In session');
 
   await page.fill('#input', '#squid@claude /clear');
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+  await expect(page.locator('[data-pin-select]')).toBeChecked();
 });
 
 test('pinned item from same topic@agent shows will-inject for adhoc turn', async ({ page }) => {
@@ -208,7 +203,7 @@ test('pinned item from same topic@agent shows will-inject for adhoc turn', async
 
   await page.click('#pin-btn');
   await expect(page.locator('#pin-panel.open')).toBeVisible();
-  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+  await expect(page.locator('[data-pin-select]')).toBeChecked();
 });
 
 test('session send includes pinned_ids for cross-topic pins', async ({ page }) => {
@@ -248,7 +243,7 @@ test('session send clears the will-inject pin badge once context is delivered', 
 
   await page.fill('#input', '#squid@claude hello');
   await page.click('#pin-btn');
-  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+  await expect(page.locator('[data-pin-select]')).toBeChecked();
   await page.click('#pin-btn'); // close panel
 
   await page.focus('#input');
@@ -256,10 +251,9 @@ test('session send clears the will-inject pin badge once context is delivered', 
   await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
 
   // Already sent in this session turn — badge should clear, not keep showing "will inject".
-  await expect(page.locator('#pin-count')).toHaveText('1');
-  await expect(page.locator('#pin-btn')).toHaveClass(/has-saved-pins/);
+  await expect(page.locator('#pin-count')).toHaveText('');
   await page.click('#pin-btn');
-  await expect(page.locator('.pin-item-status')).toContainText('in session');
+  await expect(page.locator('.pin-item-status')).toHaveText('In session');
 });
 
 test('session send turns attached file badge gray once delivered', async ({ page }) => {
@@ -290,7 +284,7 @@ test('session send turns attached file badge gray once delivered', async ({ page
   await page.click('#pin-btn');
   await expect(page.locator('#pin-count')).toHaveText('1');
   await expect(page.locator('#pin-btn')).toHaveClass(/(^|\s)has-context(\s|$)/);
-  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+  await expect(page.locator('.pin-item input[type=checkbox]')).toBeChecked();
   await page.click('#pin-btn');
 
   await page.focus('#input');
@@ -300,15 +294,14 @@ test('session send turns attached file badge gray once delivered', async ({ page
   expect(sentBodies[0].attached_paths).toEqual(['/Users/haebin/Work/squid/pyproject.toml']);
 
   await expect(page.locator('#pin-count')).toHaveText('1');
-  await expect(page.locator('#pin-btn')).toHaveClass(/has-saved-pins/);
   await expect(page.locator('#pin-btn')).not.toHaveClass(/(^|\s)has-context(\s|$)/);
   await page.click('#pin-btn');
-  await expect(page.locator('.pin-item-status')).toContainText('in session');
+  await expect(page.locator('.pin-item-status')).toHaveText('Used');
   await page.click('#pin-btn');
 
   await page.fill('#input', '#squid@claude again');
   await page.keyboard.press('Enter');
-  expect(sentBodies[1].message).toBe('#squid@claude again');
+  await expect.poll(() => sentBodies[1]?.message).toBe('#squid@claude again');
   expect(sentBodies[1].attached_paths).toBeUndefined();
 });
 
@@ -340,8 +333,8 @@ test('native shell sends literal command with selected context paths', async ({ 
   await seedAttachedFile(page, '/private/tmp/Screenshot.png');
   await page.fill('#input', '#squid@claude ! printf ok');
   await page.click('#pin-btn');
-  if (await page.locator('[data-memory-toggle]').textContent() === 'Off') {
-    await page.locator('[data-memory-toggle]').click();
+  if (!(await page.locator('[data-memory-select]').isChecked())) {
+    await page.locator('[data-memory-select]').click();
   }
   await page.click('#pin-btn');
   await page.focus('#input');
@@ -352,7 +345,7 @@ test('native shell sends literal command with selected context paths', async ({ 
   expect(sentBody.pinned_ids).toEqual([77]);
   expect(sentBody.attached_paths).toEqual(['/private/tmp/Screenshot.png']);
   expect(sentBody.include_topic_memory).toBe(true);
-  const attachedFiles = await page.evaluate(() => JSON.parse(localStorage.getItem('attachedFiles') || '[]'));
+  const attachedFiles = await page.evaluate(() => getAttachedFiles('squid'));
   expect(attachedFiles).toHaveLength(1);
   await page.evaluate(() => {
     const anchor = document.createElement('div');
@@ -371,7 +364,7 @@ test('native shell sends literal command with selected context paths', async ({ 
   expect(await shellFooter.evaluate(el => getComputedStyle(el).color)).toBe('rgb(136, 136, 136)');
 });
 
-test('in-flight native shell does not hide context from the next session prompt', async ({ page }) => {
+test('in-flight native shell locks its attachment and leaves pin and memory available', async ({ page }) => {
   await page.addInitScript(() => {
     window.__chatStartPayloads = [];
     class PendingShellWebSocket {
@@ -420,19 +413,17 @@ test('in-flight native shell does not hide context from the next session prompt'
   await seedAttachedFile(page, '/private/tmp/Screenshot.png');
   await page.fill('#input', '#squid@claude ! printf ok');
   await page.click('#pin-btn');
-  if (await page.locator('[data-memory-toggle]').textContent() === 'Off') {
-    await page.locator('[data-memory-toggle]').click();
-  }
+  await page.locator('[data-memory-select]').check();
   await page.click('#pin-btn');
   await page.focus('#input');
   await page.keyboard.press('Enter');
   await page.waitForFunction(() => window.__chatStartPayloads.length === 1);
 
-  expect(await page.evaluate(() => ({
-    pins: _pendingSessionInjectedIds['squid@claude'] || [],
-    memory: _pendingSessionMemoryRevisions['squid@claude'] || null,
-    files: _pendingSessionAttachedFiles['squid@claude'] || [],
-  }))).toEqual({ pins: [], memory: null, files: [] });
+  await page.click('#pin-btn');
+  await expect(page.locator('[data-pin-select]')).toBeEnabled();
+  await expect(page.locator('[data-memory-select]')).toBeEnabled();
+  await expect(page.locator('.pin-item-status').filter({ hasText: 'Sending' })).toHaveCount(1);
+  await page.click('#pin-btn');
 
   await page.fill('#input', '#squid@claude normal prompt');
   await page.focus('#input');
@@ -446,8 +437,8 @@ test('in-flight native shell does not hide context from the next session prompt'
   });
   expect(payloads[1]).toMatchObject({
     message: '#squid@claude normal prompt', pinned_ids: [77], include_topic_memory: true,
-    attached_paths: ['/private/tmp/Screenshot.png'],
   });
+  expect(payloads[1].attached_paths).toBeUndefined();
 });
 
 test('native shell running timer starts after queued command begins processing', async ({ page }) => {
@@ -492,7 +483,7 @@ test('native shell running timer starts after queued command begins processing',
   await page.evaluate(() => window._testSseWriter?.close().catch(() => {}));
 });
 
-test('session send prunes missing attached files before submitting', async ({ page }) => {
+test('session send skips missing attached files and keeps them in the cart', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({
     json: {
@@ -512,7 +503,7 @@ test('session send prunes missing attached files before submitting', async ({ pa
 
   const sentMessages = [];
   await page.route('**/chat', async route => {
-    sentMessages.push(route.request().postDataJSON().message);
+    sentMessages.push(route.request().postDataJSON());
     await route.fulfill({
       status: 200, headers: SSE_HEADERS,
       body: sse(META, { data: 'session response' }, STATS, DONE),
@@ -526,10 +517,11 @@ test('session send prunes missing attached files before submitting', async ({ pa
   await page.keyboard.press('Enter');
   await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
 
-  expect(sentMessages[0]).not.toContain('Files:');
+  expect(sentMessages[0].attached_paths).toBeUndefined();
   await expect(page.locator('#pin-count')).toHaveText('');
-  const attachedFiles = await page.evaluate(() => JSON.parse(localStorage.getItem('attachedFiles') || '[]'));
-  expect(attachedFiles).toEqual([]);
+  await page.click('#pin-btn');
+  await expect(page.locator('.pin-item-status')).toHaveText('No file');
+  await expect(page.locator('.pin-item input[type=checkbox]')).toBeDisabled();
 });
 
 test('session send marks memory and pinned context as sending while request is pending', async ({ page }) => {
@@ -563,11 +555,9 @@ test('session send marks memory and pinned context as sending while request is p
   await expect(page.locator('#pin-count')).toHaveText('2');
   await expect(page.locator('#pin-btn')).toHaveClass(/has-context-pending/);
   await expect(page.locator('#pin-count')).toHaveCSS('animation-name', 'pin-badge-pending-pulse');
-  await expect(page.locator('#pin-count')).toHaveCSS('animation-duration', '1.8s');
-  await expect(page.locator('#pin-count')).toHaveCSS('transform', 'none');
   await page.click('#pin-btn');
-  await expect(page.locator('.memory-item-status')).toContainText('sending');
-  await expect(page.locator('.pin-item-status')).toContainText('sending');
+  await expect(page.locator('.memory-item-status')).toHaveText('Sending');
+  await expect(page.locator('.pin-item-status')).toHaveText('Sending');
 });
 
 test('status polling completion clears sending context badge', async ({ page }) => {
@@ -604,12 +594,11 @@ test('status polling completion clears sending context badge', async ({ page }) 
   await page.keyboard.press('Enter');
 
   await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toContainText('recovered response');
-  await expect(page.locator('#pin-count')).toHaveText('1');
-  await expect(page.locator('#pin-btn')).toHaveClass(/has-saved-pins/);
+  await expect(page.locator('#pin-count')).toHaveText('');
   await expect(page.locator('#pin-btn')).not.toHaveClass(/has-context-pending/);
   await page.click('#pin-btn');
-  await expect(page.locator('.memory-item-status')).toContainText('in session');
-  await expect(page.locator('.pin-item-status')).toContainText('in session');
+  await expect(page.locator('.memory-item-status')).toHaveText('In session');
+  await expect(page.locator('.pin-item-status')).toHaveText('In session');
 });
 
 test('cancelled session send restores pending memory and pins to will-inject', async ({ page }) => {
@@ -662,8 +651,8 @@ test('cancelled session send restores pending memory and pins to will-inject', a
   await expect(page.locator('#pin-btn')).toHaveClass(/(^|\s)has-context(\s|$)/);
 
   await page.click('#pin-btn');
-  await expect(page.locator('.memory-item-status')).toContainText('will inject');
-  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+  await expect(page.locator('[data-memory-select]')).toBeChecked();
+  await expect(page.locator('[data-pin-select]')).toBeChecked();
 });
 
 test('adhoc turn keeps the will-inject pin badge after send', async ({ page }) => {
@@ -684,7 +673,7 @@ test('adhoc turn keeps the will-inject pin badge after send', async ({ page }) =
 
   await page.fill('#input', '#squid@claude! hello');
   await page.click('#pin-btn');
-  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+  await expect(page.locator('[data-pin-select]')).toBeChecked();
   await page.click('#pin-btn'); // close panel
 
   await page.focus('#input');
@@ -695,7 +684,7 @@ test('adhoc turn keeps the will-inject pin badge after send', async ({ page }) =
   await expect(page.locator('#pin-count')).toHaveText('1');
   await expect(page.locator('#pin-btn')).toHaveClass(/(^|\s)has-context(\s|$)/);
   await page.click('#pin-btn');
-  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+  await expect(page.locator('[data-pin-select]')).toBeChecked();
 });
 
 test('adhoc send includes pinned_ids in POST /chat body', async ({ page }) => {
@@ -761,10 +750,10 @@ test('adhoc lookback selects recent visible responses as toggleable context pins
   await expect(page.locator('.pin-item-lookback')).toHaveCount(2);
   await expect(page.locator('.pin-item-lookback')).toContainText(['second response', 'third response']);
 
-  await page.locator('[data-lookback-id="11"]').click();
+  await page.locator('[data-pin-select="11"]').click();
   await expect(page.locator('.msg-pin-btn[data-msg-id="11"]')).not.toHaveClass(/lookback-sel/);
   await expect(page.locator('.msg-pin-btn[data-msg-id="12"]')).toHaveClass(/lookback-sel/);
-  await expect(page.locator('.pin-item-lookback')).toHaveCount(1);
+  await expect(page.locator('[data-pin-select="11"]')).not.toBeChecked();
   await page.click('#pin-btn');
 
   await page.focus('#input');
@@ -774,8 +763,8 @@ test('adhoc lookback selects recent visible responses as toggleable context pins
 
   expect(capturedBody?.adhoc).toBe(true);
   expect(capturedBody?.lookback).toBe(2);
-  expect(capturedBody?.lookback_via_pins).toBe(true);
-  expect(capturedBody?.pinned_ids).toEqual([12]);
+  expect(capturedBody?.lookback_excluded_ids).toEqual([11]);
+  expect(capturedBody?.pinned_ids).toBeUndefined();
 });
 
 test('adhoc lookback selects async search result responses without another keystroke', async ({ page }) => {
@@ -916,8 +905,7 @@ test('context cart highlights stale topic memory from session revision', async (
   await page.fill('#input', '#squid@claude hello');
   await page.click('#pin-btn');
 
-  await expect(page.locator('.memory-item-status')).toContainText('will inject');
-  await expect(page.locator('[data-memory-toggle]')).toHaveText('On');
+  await expect(page.locator('[data-memory-select]')).toBeChecked();
 });
 
 test('context cart highlights legacy injected topic memory without revision', async ({ page }) => {
@@ -937,8 +925,7 @@ test('context cart highlights legacy injected topic memory without revision', as
   await page.fill('#input', '#squid@claude hello');
   await page.click('#pin-btn');
 
-  await expect(page.locator('.memory-item-status')).toContainText('will inject');
-  await expect(page.locator('[data-memory-toggle]')).toHaveText('On');
+  await expect(page.locator('[data-memory-select]')).toBeChecked();
 });
 
 test('/clear memory injects once and is unselected immediately after send', async ({ page }) => {
@@ -968,7 +955,7 @@ test('/clear memory injects once and is unselected immediately after send', asyn
   await page.keyboard.press('Enter');
 
   await page.click('#pin-btn');
-  await expect(page.locator('.memory-item-status')).toContainText('will inject');
+  await expect(page.locator('[data-memory-select]')).toBeChecked();
   await page.click('#pin-btn');
 
   await page.fill('#input', '#squid@claude hello');
@@ -978,14 +965,14 @@ test('/clear memory injects once and is unselected immediately after send', asyn
   expect(capturedBody?.include_topic_memory).toBe(true);
 
   await page.click('#pin-btn');
-  await expect(page.locator('.memory-item-status')).toContainText('in session');
-  await expect(page.locator('[data-memory-toggle]')).toHaveText('Off');
+  await expect(page.locator('.memory-item-status')).toHaveText('In session');
+  await expect(page.locator('[data-memory-select]')).toBeDisabled();
 
   await page.click('#pin-btn');
   await page.fill('#input', '#squid@claude next');
   await page.click('#pin-btn');
-  await expect(page.locator('.memory-item-status')).toContainText('in session');
-  await expect(page.locator('[data-memory-toggle]')).toHaveText('Off');
+  await expect(page.locator('.memory-item-status')).toHaveText('In session');
+  await expect(page.locator('[data-memory-select]')).toBeDisabled();
 });
 
 test('topic memory editor saves and refreshes preview', async ({ page }) => {
@@ -1011,7 +998,7 @@ test('topic memory editor saves and refreshes preview', async ({ page }) => {
   await page.goto('/');
   await page.fill('#input', '#squid@claude hello');
   await page.click('#pin-btn');
-  await page.locator('[data-memory-toggle]').click();
+  await page.locator('[data-memory-add]').click();
 
   await expect(page.locator('#memory-modal.open')).toBeVisible();
   await expect(page.locator('#memory-path')).toHaveText('~/.squid/context/topics/squid/memory.md');
@@ -1129,7 +1116,7 @@ test('a slow first memory fetch does not clobber a newer save (out-of-order resp
 
   // Add memory content and save while the first GET is still pending.
   await page.click('#pin-btn');
-  await page.locator('[data-memory-toggle]').click();
+  await page.locator('[data-memory-add]').click();
   await expect(page.locator('#memory-modal.open')).toBeVisible();
   await page.fill('#memory-editor', 'Fresh memory content.');
   await page.click('#memory-save');
@@ -1142,7 +1129,7 @@ test('a slow first memory fetch does not clobber a newer save (out-of-order resp
 
   await page.click('#pin-btn');
   await expect(page.locator('.memory-item-preview')).toContainText('Fresh memory content.');
-  await expect(page.locator('[data-memory-toggle]')).toHaveText('On');
+  await expect(page.locator('[data-memory-select]')).toBeChecked();
 });
 
 test('active session skips topic memory by default', async ({ page }) => {
@@ -1172,5 +1159,7 @@ test('active session skips topic memory by default', async ({ page }) => {
 
   await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
   expect(capturedBody?.include_topic_memory).toBeUndefined();
-  await expect(page.locator('#pin-count')).toHaveText('');
+  await expect(page.locator('#pin-count')).toHaveText('1');
+  await page.click('#pin-btn');
+  await expect(page.locator('[data-memory-select]')).not.toBeChecked();
 });
