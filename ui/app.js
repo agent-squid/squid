@@ -4144,6 +4144,8 @@ async function loadSearchResults() {
 
 // All Squid-owned commands. Shown in the / autocomplete popup.
 // args:true = takes optional args (insert into input); args:false = execute directly on select.
+const LOGIN_HARNESSES = new Set(['claudecode', 'codex', 'cursor', 'antigravity', 'opencode']);
+
 const SQUID_COMMANDS = [
   { name: 'clear',        desc: 'clear session — next message starts fresh',         args: false },
   { name: 'stop',         desc: 'kill running process for current topic',             args: false },
@@ -4158,6 +4160,7 @@ const SQUID_COMMANDS = [
   { name: 'bad',        desc: 'toggle marked bad responses only',                     args: false },
   { name: 'prompts',     desc: 'toggle user prompts only',                            args: false },
   { name: 'status',       desc: 'show active processes panel',                        args: false },
+  { name: 'login', desc: 'sign in to the selected agent', args: true },
   { name: 'help',         desc: 'show help panel',                                    args: false },
   { name: 'remote',       desc: 'show QR code for mobile / tablet access',            args: false },
   { name: 'pair',         desc: 'pair a browser for Shore remote access (QR code)',   args: false },
@@ -4218,7 +4221,8 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
   }
   if (cmd.command === 'login') {
     const selectedAgent = agent || stickyChip?.agent;
-    let harness = cmd.harness;
+    const aliases = { agy: 'antigravity', claude: 'claudecode' };
+    let harness = aliases[cmd.harness] || cmd.harness;
     let provider = null;
     if (selectedAgent) {
       try {
@@ -4239,7 +4243,7 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
       }
     }
     if (!harness || !HARNESS_LABELS[harness]) {
-      showToast('Usage: /login [claude|codex|cursor|opencode]');
+      showToast('Usage: /login [claude|codex|cursor|opencode|agy]');
       return;
     }
     openAuthPanel(harness, null, { provider });
@@ -5263,7 +5267,7 @@ const agentsAuthPanelRestartBtn = document.getElementById('agents-auth-panel-res
 const agentsAuthPanelHome = document.getElementById('agents-auth-panel-home');
 let _authSession = null; // { id, harness, es, term, onSuccessRetry }
 
-const HARNESS_LABELS = { claudecode: 'Claude Code', codex: 'Codex', cursor: 'Cursor', opencode: 'OpenCode', pi: 'Pi' };
+const HARNESS_LABELS = { claudecode: 'Claude Code', codex: 'Codex', cursor: 'Cursor', opencode: 'OpenCode', pi: 'Pi', antigravity: 'Antigravity' };
 
 function parseAuthRequiredError(text) {
   const m = /^\[\[cli-auth-required:([a-z]+)(?::([a-z][a-z0-9_-]*))?\]\]\s*/.exec(text || '');
@@ -5385,7 +5389,7 @@ function codexDevicePrompt(buffer) {
   };
 }
 
-function cursorWebPrompt(buffer) {
+function terminalWebPrompt(buffer, endpoints) {
   // Only consume completed terminal lines. A URL at the cursor can still be
   // receiving query parameters in a later PTY chunk, even if its path parses.
   let text = '';
@@ -5400,7 +5404,7 @@ function cursorWebPrompt(buffer) {
   const url = urls.find(value => {
     try {
       const parsed = new URL(value);
-      return parsed.origin === 'https://cursor.com' && parsed.pathname === '/loginDeepControl';
+      return endpoints.includes(parsed.origin + parsed.pathname);
     } catch { return false; }
   });
   return { url: url || null, code: null, success: false };
@@ -5468,7 +5472,9 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   panelTerm.innerHTML = '';
   const claudeLogin = harness === 'claudecode' && mode === 'login';
   const cursorLogin = harness === 'cursor' && mode === 'login';
-  const deviceLogin = (harness === 'codex' || claudeLogin || cursorLogin) && mode === 'login';
+  const agyLogin = harness === 'antigravity' && mode === 'login';
+  const pasteLogin = claudeLogin || agyLogin;
+  const deviceLogin = (harness === 'codex' || pasteLogin || cursorLogin) && mode === 'login';
   const deviceUi = document.getElementById('codex-device-login');
   const deviceStatus = document.getElementById('codex-device-status');
   const deviceLink = document.getElementById('codex-device-link');
@@ -5479,17 +5485,21 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   const claudeCodeRow = document.getElementById('claude-login-code-row');
   const claudeCodeInput = document.getElementById('claude-login-code');
   const claudeCodeSubmit = document.getElementById('claude-login-submit');
-  claudeCodeRow.hidden = !claudeLogin;
+  claudeCodeRow.hidden = !pasteLogin;
+  claudeCodeRow.querySelector('label').textContent = agyLogin
+    ? 'Authorization code or callback URL from Google' : 'Authorization code from Claude';
   claudeCodeInput.value = '';
   claudeCodeInput.disabled = false;
   claudeCodeSubmit.disabled = false;
-  deviceLink.textContent = claudeLogin ? 'Open Claude login page ↗' : cursorLogin ? 'Open Cursor login page ↗' : 'Open activation page ↗';
+  deviceLink.textContent = agyLogin ? 'Open Google sign-in page ↗' : claudeLogin ? 'Open Claude login page ↗' : cursorLogin ? 'Open Cursor login page ↗' : 'Open activation page ↗';
   claudeCodeSubmit.onclick = async () => {
     const session = _authSession;
     const code = claudeCodeInput.value.trim();
     if (!code || !session?.id || session.term !== term || !session.running) return;
     if (/[\r\n\x00-\x1f\x7f]/.test(code)) {
-      deviceStatus.textContent = 'Paste only the authorization code shown by Claude.';
+      deviceStatus.textContent = agyLogin
+        ? 'Paste the authorization code or callback URL on one line.'
+        : 'Paste only the authorization code shown by Claude.';
       return;
     }
     claudeCodeSubmit.disabled = true;
@@ -5502,7 +5512,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
       if (_authSession !== session || !session.running) return;
       if (!response.ok) throw new Error('Code submission failed');
       claudeCodeInput.value = '';
-      deviceStatus.textContent = 'Code sent. Waiting for Claude to confirm login…';
+      deviceStatus.textContent = 'Code sent. Waiting for sign-in confirmation…';
     } catch {
       if (_authSession === session && session.running) deviceStatus.textContent = 'Could not send code. Try again or check terminal details.';
     } finally {
@@ -5524,7 +5534,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   deviceCode.textContent = '';
   deviceCopy.textContent = 'Copy code';
   deviceCopy.disabled = false;
-  deviceStatus.textContent = claudeLogin ? 'Preparing Claude login…' : cursorLogin ? 'Preparing Cursor login…' : 'Preparing device login…';
+  deviceStatus.textContent = agyLogin ? 'Preparing Google sign-in…' : claudeLogin ? 'Preparing Claude login…' : cursorLogin ? 'Preparing Cursor login…' : 'Preparing device login…';
   deviceDetails.textContent = 'Show terminal details';
   deviceDetails.setAttribute('aria-expanded', 'false');
   deviceDetails.onclick = () => {
@@ -5558,7 +5568,18 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   term.open(panelTerm);
   if (deviceLogin) term.onWriteParsed(() => {
     if (_authSession?.term !== term || !_authSession.running) return;
-    const prompt = claudeLogin ? claudeWebPrompt(term.buffer.active) : cursorLogin ? cursorWebPrompt(term.buffer.active) : codexDevicePrompt(term.buffer.active);
+    const buffer = term.buffer.active;
+    let prompt;
+    if (agyLogin) {
+      prompt = terminalWebPrompt(buffer, [
+        'https://accounts.google.com/o/oauth2/auth',
+        'https://accounts.google.com/o/oauth2/v2/auth',
+      ]);
+    } else if (cursorLogin) {
+      prompt = terminalWebPrompt(buffer, ['https://cursor.com/loginDeepControl']);
+    } else {
+      prompt = claudeLogin ? claudeWebPrompt(buffer) : codexDevicePrompt(buffer);
+    }
     if (prompt.success && !_authSession.provider) {
       // Leave xterm's parser callback before disposing its terminal. Codex has
       // saved credentials, but may still be exiting: do not cancel that process.
@@ -5570,6 +5591,9 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
       deviceLink.hidden = false;
       if (claudeLogin && _authSession.running && !claudeCodeInput.value && !claudeCodeSubmit.disabled) {
         deviceStatus.textContent = 'Sign in using the link, then paste the full authorization code below, including any # suffix.';
+      }
+      if (agyLogin && !claudeCodeInput.value && !claudeCodeSubmit.disabled) {
+        deviceStatus.textContent = 'Open the Google sign-in page, then paste the authorization code or callback URL below.';
       }
       if (cursorLogin) deviceStatus.textContent = 'Open the Cursor login page and complete sign in. Waiting for approval…';
     }
@@ -5699,7 +5723,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
         fitTerminal();
       } else if (deviceLogin) {
         const session = _authSession;
-        const label = session.providerLabel || (claudeLogin ? 'Claude' : cursorLogin ? 'Cursor' : 'Codex');
+        const label = session.providerLabel || (claudeLogin ? 'Claude' : HARNESS_LABELS[harness]);
         panelTitle.textContent = `Signed in to ${label} ✓`;
         deviceStatus.textContent = `${label} login successful.`;
         deviceLink.hidden = true;
@@ -15117,7 +15141,7 @@ async function confirmTopicDelete() {
 // ── runtime catalogs ──────────────────────────────────────────────────────────
 
 const GAUGE_CATALOG = Object.freeze({
-  antigravity: 'native agy quota · run agy in a terminal to sign in',
+  antigravity: 'native agy quota · sign in with /login agy',
   claude: 'click gauge in header -> Detect',
   codex: 'uses codex CLI auth',
   cursor: 'automatic via cursor-agent',
@@ -16496,7 +16520,7 @@ async function updateAutocomplete() {
   if (editingExpandedSlug && acItems[0]?.routeHistory) hideAutocomplete();
 
   // Command popup: message portion starts with /
-  const { message: msgPart } = parseInput(val);
+  const { message: msgPart, agent: commandAgent } = parseInput(val);
   if (!editingExpandedSlug && msgPart.startsWith('/')) {
     const slashIdx = val.lastIndexOf('/');
     const before   = val.slice(0, slashIdx);           // prefix to preserve (#topic@alias )
@@ -16505,11 +16529,18 @@ async function updateAutocomplete() {
       c.name.toLowerCase().startsWith(partial) ||
       (c.alias && c.alias.toLowerCase().startsWith(partial)))
     );
+    if (matched.some(c => c.name === 'login')) {
+      const selectedAgent = commandAgent || stickyChip?.agent;
+      const agents = selectedAgent ? await _acAgents() : [];
+      if (input.value !== val || editingExpandedSlug ||
+          selectedAgent !== (parseInput(val).agent || stickyChip?.agent)) return;
+      const harness = agents.find(agent => agent.name === selectedAgent)?.harness;
+      if (!LOGIN_HARNESSES.has(harness)) matched.splice(matched.findIndex(c => c.name === 'login'), 1);
+    }
     if (matched.length) {
       _acRender(matched.map(c => ({
         label:   `<span class="ac-cmd">/${c.name}${c.alias ? ', /' + c.alias : ''}</span>`,
         sub:     c.desc,
-        meta:    'squid',
         insert:  before + '/' + c.name,
         execute: !c.args,
       })), 'Commands');

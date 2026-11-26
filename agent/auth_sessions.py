@@ -43,7 +43,7 @@ import time
 import uuid
 from typing import AsyncGenerator, Optional
 
-from .config import CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OLLAMA_PATH, OPENCODE_PATH
+from .config import AGY_PATH, CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OLLAMA_PATH, OPENCODE_PATH
 from .runners import _register_proc, _deregister_proc, _signal_process_group
 from .watch_async import call as settled_thread_call, settle
 
@@ -79,7 +79,7 @@ class AuthSessionError(RuntimeError):
 
 
 class NoLoginCommand(AuthSessionError):
-    """Raised for harnesses with no standalone CLI login command (pi, Antigravity)."""
+    """Raised for harnesses with no standalone CLI login command (pi)."""
 
 
 def _login_argv(harness_id: str) -> list[str]:
@@ -101,9 +101,9 @@ def _login_argv(harness_id: str) -> list[str]:
             raise AuthSessionError("opencode CLI not found in PATH")
         return [OPENCODE_PATH, "auth", "login"]
     if harness_id == "antigravity":
-        raise NoLoginCommand(
-            "Antigravity uses native interactive login — run agy in a terminal first."
-        )
+        if not AGY_PATH:
+            raise AuthSessionError("agy CLI not found in PATH")
+        return [AGY_PATH, "acp", "--login"]
     if harness_id == "pi":
         raise NoLoginCommand(
             "pi has no CLI login command — set ANTHROPIC_API_KEY or "

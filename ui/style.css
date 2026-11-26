@@ -5664,7 +5664,7 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ac-label .ac-topic { color: var(--accent-dim); }
+.ac-label :is(.ac-topic, .ac-cmd) { color: var(--accent-dim); }
 .ac-label .ac-agent { color: var(--agent-color, #848899); }
 .ac-meta  { color: var(--text-ghost); font-size: var(--text-body); margin-left: auto; padding-left: 0.5rem; white-space: nowrap; flex-shrink: 0; }
 .ac-sub   { color: var(--text-mid); font-size: var(--text-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; margin-left: 0.5rem; }
@@ -5680,7 +5680,6 @@ button {
   line-height: 1.2;
   vertical-align: middle;
 }
-.ac-cmd   { color: #7ec8a0; font-family: ui-monospace, monospace; font-weight: 600; }
 .ac-history-prompt { color: var(--text-mid); }
 .ac-item:hover .ac-history-prompt,
 .ac-item.selected .ac-history-prompt { color: var(--text-muted); }
@@ -5701,7 +5700,6 @@ button {
 .ac-close-mobile { display: none; }
 .close-mobile { display: none; }
 .help-mobile-only { display: none; }
-.ac-item[data-cmd] .ac-meta { color: #2a5a40; font-size: var(--text-md); background: #0e2218; padding: 0.05em 0.35em; border-radius: 3px; }
 .ac-del-btn {
   flex-shrink: 0;
   margin-left: 0.4rem;

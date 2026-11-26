@@ -228,10 +228,14 @@ print(json.dumps({'harnesses': list_harnesses(), 'providers': providers, 'resolv
         assert provider['gauge']['text'] == 'Custom'
 
 
-def test_login_guidance_uses_native_cli():
-    from agent.auth_sessions import NoLoginCommand, _login_argv
-    with pytest.raises(NoLoginCommand, match='run agy in a terminal'):
-        _login_argv('antigravity')
+def test_login_uses_native_cli(monkeypatch):
+    from agent import auth_sessions
+    monkeypatch.setattr(auth_sessions, 'AGY_PATH', '/test/agy')
+    assert auth_sessions._login_argv('antigravity') == ['/test/agy', 'acp', '--login']
+
+    monkeypatch.setattr(auth_sessions, 'AGY_PATH', None)
+    with pytest.raises(auth_sessions.AuthSessionError, match='agy CLI not found'):
+        auth_sessions._login_argv('antigravity')
 
 
 def test_real_subprocess_uses_shared_cancellation_and_cleanup(tmp_path, monkeypatch):

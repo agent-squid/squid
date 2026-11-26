@@ -7,9 +7,10 @@ protocol. The implementation follows the official
 [CLI flags](https://antigravity.google/docs/cli/reference/).
 
 Install with `curl -fsSL https://antigravity.google/cli/install.sh | bash`,
-put `agy` on the server's PATH, and complete native login in an interactive
-`agy` session. Restart Squid to refresh CLI detection. Browser login-session
-integration and isolated credential-home support are not implemented for agy.
+put `agy` on the server's PATH, and restart Squid to refresh CLI detection.
+In Squid chat, run `/login agy`, open the Google sign-in page, and paste the
+authorization code or callback URL. Squid runs `agy acp --login` using the host
+account's credential store. For terminal sign-in, run the same command on the host.
 
 The example configuration includes the native harness and its `google`
 provider. Installations with an explicit provider catalog need a provider
