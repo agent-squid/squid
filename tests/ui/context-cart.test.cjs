@@ -167,6 +167,35 @@ test('attachments are used once, retryable on failure, and selectable again', ()
   assert.equal(cart._attachedFilesState(sibling).selected[0].path, file.path);
 });
 
+test('successful sign-in retry consumes the original staged attachment', async () => {
+  const cart = setup();
+  const target = { topic: 'work', agent: 'echo', adhoc: false };
+  const path = '/draft.txt';
+  cart.setAttachedFiles([{ path }], target.topic);
+  const { stagedFiles } = cart.contextCartSnapshot(target.topic);
+  cart.trackAttachmentSend(target, stagedFiles)(false);
+
+  const retryStart = source.indexOf('retryContext: {') + 'retryContext: '.length;
+  const retryEnd = source.indexOf('\n    }));', retryStart);
+  const retryContext = vm.runInContext(
+    '((_attachedFiles, _contextIds, lookbackViaPins, lookbackExcludedIds, _includeTopicMemory) => ('
+      + source.slice(retryStart, retryEnd).trim().replace(/,$/, '') + '))', cart,
+  )(stagedFiles, [], false, [], false);
+
+  Object.assign(cart, {
+    topic: target.topic, _effectiveAgent: target.agent, adhoc: false,
+    opts: { retryContext }, _topicMemoryStateForSend: async () => ({ selected: false }),
+  });
+  const start = source.indexOf('  const availability = opts.retryContext');
+  const end = source.indexOf('  if (!nativeShell) {', start);
+  const files = await vm.runInContext('(async () => {' + source.slice(start, end) + 'return _attachedFiles; })()', cart);
+  const settle = cart.trackAttachmentSend(target, files);
+  assert.equal(cart._attachedFileStatus(stagedFiles[0]).text, 'Sending');
+  settle(true);
+  assert.equal(cart._attachedFileStatus(cart.getAttachedFiles(target.topic)[0]).text, 'Used');
+  assert.equal(cart._attachedFilesState(target).selected.length, 0);
+});
+
 test('send preparation skips pins that start sending during file validation', async () => {
   const cart = setup();
   const target = { topic: 'work', agent: 'echo', adhoc: false };

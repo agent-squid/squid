@@ -6561,7 +6561,7 @@ async function sendMessage(text, opts = {}) {
         lookbackViaPins,
         lookbackExcludedIds,
         mem: _includeTopicMemory,
-        attachedPaths: _attachedFiles.map(file => file.path),
+        attachedFiles: _attachedFiles,
       },
     }));
     scrollToBottom();
@@ -6954,7 +6954,8 @@ async function sendMessage(text, opts = {}) {
   let _attachedFiles;
   if (opts.retryContext) {
     _contextIds = opts.retryContext.pins;
-    _attachedFiles = opts.retryContext.attachedPaths.map(path => ({ path }));
+    _attachedFiles = opts.retryContext.attachedFiles
+      ?? opts.retryContext.attachedPaths.map(path => ({ path }));
   } else {
     const pinnedIds = nativeShell
       ? selectedPins.map(item => item.id)
